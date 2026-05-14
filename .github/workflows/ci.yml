@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: SwiftPM tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guard forbidden runtime dependencies
+        run: scripts/guard_no_rust_uniffi.sh
+      - name: Resolve dependencies
+        run: swift package resolve
+      - name: Run tests
+        run: swift test
+
+  apple-builds:
+    name: Apple platform builds
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build macOS
+        run: xcodebuild build -scheme LiveKitNative -destination 'generic/platform=macOS'
+      - name: Build iOS simulator
+        run: xcodebuild build -scheme LiveKitNative -destination 'generic/platform=iOS Simulator'
+      - name: DocC
+        run: xcodebuild docbuild -scheme LiveKitNative -destination 'generic/platform=macOS'

@@ -1,0 +1,75 @@
+import Foundation
+
+public struct RoomOptions: Equatable, Sendable {
+    public var defaultAutoSubscribe: Bool
+
+    public init(defaultAutoSubscribe: Bool = true) {
+        self.defaultAutoSubscribe = defaultAutoSubscribe
+    }
+}
+
+public struct ConnectOptions: Equatable, Sendable {
+    public var autoSubscribe: Bool?
+    public var reconnect: Bool
+    public var sdk: String
+    public var version: String
+    public var protocolVersion: Int
+
+    public init(
+        autoSubscribe: Bool? = nil,
+        reconnect: Bool = false,
+        sdk: String = LiveKitNative.sdkName,
+        version: String = LiveKitNative.version,
+        protocolVersion: Int = LiveKitNative.protocolVersion
+    ) {
+        self.autoSubscribe = autoSubscribe
+        self.reconnect = reconnect
+        self.sdk = sdk
+        self.version = version
+        self.protocolVersion = protocolVersion
+    }
+}
+
+public struct CameraCaptureOptions: Equatable, Sendable {
+    public var position: CameraPosition
+
+    public init(position: CameraPosition = .front) {
+        self.position = position
+    }
+}
+
+public enum CameraPosition: String, Equatable, Sendable {
+    case front
+    case back
+    case unspecified
+}
+
+public struct AudioCaptureOptions: Equatable, Sendable {
+    public var echoCancellation: Bool
+
+    public init(echoCancellation: Bool = true) {
+        self.echoCancellation = echoCancellation
+    }
+}
+
+public struct TrackPublishOptions: Equatable, Sendable {
+    public var name: String?
+    public var source: TrackSource?
+    public var simulcast: Bool
+
+    public init(name: String? = nil, source: TrackSource? = nil, simulcast: Bool = true) {
+        self.name = name
+        self.source = source
+        self.simulcast = simulcast
+    }
+}
+
+public struct DataPublishOptions: Equatable, Sendable {
+    public var reliable: Bool
+    public var topic: String?
+
+    public init(reliable: Bool = true, topic: String? = nil) {
+        self.reliable = reliable
+        self.topic = topic
+    }
+}
