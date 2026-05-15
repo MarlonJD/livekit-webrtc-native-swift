@@ -37,6 +37,116 @@ package struct ICEServer: Equatable, Sendable {
     }
 }
 
+package struct ICECredentials: Equatable, Sendable {
+    package var usernameFragment: String
+    package var password: String
+
+    package init(usernameFragment: String, password: String) {
+        self.usernameFragment = usernameFragment
+        self.password = password
+    }
+
+    package static func random() -> ICECredentials {
+        let usernameCharacters = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        let passwordCharacters = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./-_")
+        var generator = SystemRandomNumberGenerator()
+
+        let username = String((0..<8).map { _ in
+            usernameCharacters.randomElement(using: &generator) ?? "a"
+        })
+
+        let password = String((0..<24).map { _ in
+            passwordCharacters.randomElement(using: &generator) ?? "a"
+        })
+
+        return ICECredentials(
+            usernameFragment: username,
+            password: password
+        )
+    }
+}
+
+package struct DTLSSignature: Equatable, Sendable {
+    package var hashFunction: String
+    package var value: String
+
+    package init(hashFunction: String, value: String) {
+        self.hashFunction = hashFunction
+        self.value = value
+    }
+
+    package static func sha256Fingerprint(for data: Data) -> DTLSSignature {
+        let digest = SHA256.hash(data: data)
+        let value = digest
+            .map { String(format: "%02X", Int($0)) }
+            .joined(separator: ":")
+
+        return DTLSSignature(hashFunction: "sha-256", value: value)
+    }
+
+    package static func ephemeralIdentityFingerprint() -> DTLSSignature {
+        var error: Unmanaged<CFError>?
+        let attributes: [CFString: Any] = [
+            kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits: 256,
+        ]
+
+        guard
+            let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, &error),
+            let publicKey = SecKeyCopyPublicKey(privateKey),
+            let publicKeyData = SecKeyCopyExternalRepresentation(publicKey, &error) as Data?
+        else {
+            return random()
+        }
+
+        return sha256Fingerprint(for: publicKeyData)
+    }
+
+    package static func random() -> DTLSSignature {
+        var generator = SystemRandomNumberGenerator()
+        let randomBytes = (0..<32).map { _ in
+            UInt8.random(in: .min ... .max, using: &generator)
+        }
+        let value = randomBytes
+            .map { String(format: "%02X", Int($0)) }
+            .joined(separator: ":")
+
+        return DTLSSignature(hashFunction: "sha-256", value: value)
+    }
+}
+
+package struct RTCIceCandidateInit: Equatable, Sendable, Decodable {
+    package var candidate: String
+    package var sdpMid: String?
+    package var sdpMLineIndex: Int32?
+    package var usernameFragment: String?
+
+    package init(
+        candidate: String,
+        sdpMid: String? = nil,
+        sdpMLineIndex: Int32? = nil,
+        usernameFragment: String? = nil
+    ) {
+        self.candidate = candidate
+        self.sdpMid = sdpMid
+        self.sdpMLineIndex = sdpMLineIndex
+        self.usernameFragment = usernameFragment
+    }
+
+    package init(jsonString: String) throws {
+        let data = Data(jsonString.utf8)
+        self = try JSONDecoder().decode(Self.self, from: data)
+    }
+}
+
+package struct RemoteICECandidate: Equatable, Sendable {
+    package var candidateInit: RTCIceCandidateInit
+
+    package init(candidateInit: RTCIceCandidateInit) {
+        self.candidateInit = candidateInit
+    }
+}
+
 package struct NativeWebRTCMediaProfile: Equatable, Sendable {
     package var publishVideoCodecs: [RTPCodec]
     package var receiveVideoCodecs: [RTPCodec]
@@ -71,15 +181,21 @@ package struct NativeWebRTCConfiguration: Equatable, Sendable {
     package var role: PeerConnectionRole
     package var iceServers: [ICEServer]
     package var mediaProfile: NativeWebRTCMediaProfile
+    package var iceCredentials: ICECredentials
+    package var dtlsFingerprint: DTLSSignature
 
     package init(
         role: PeerConnectionRole,
         iceServers: [ICEServer] = [],
-        mediaProfile: NativeWebRTCMediaProfile = .liveKitTiny
+        mediaProfile: NativeWebRTCMediaProfile = .liveKitTiny,
+        iceCredentials: ICECredentials = .random(),
+        dtlsFingerprint: DTLSSignature = .ephemeralIdentityFingerprint()
     ) {
         self.role = role
         self.iceServers = iceServers
         self.mediaProfile = mediaProfile
+        self.iceCredentials = iceCredentials
+        self.dtlsFingerprint = dtlsFingerprint
     }
 }
 
@@ -106,12 +222,31 @@ package enum PeerConnectionState: String, Equatable, Sendable {
     case closed
 }
 
+package enum PeerConnectionNegotiationError: Error, Equatable, Sendable {
+    case subscriberAnswerRequestedForPublisher
+}
+
 package final class PeerConnectionCoordinator: @unchecked Sendable {
     package let configuration: NativeWebRTCConfiguration
     package private(set) var state: PeerConnectionState = .new
+    private let remoteCandidateLock = NSLock()
+    private var mutableRemoteICECandidates: [RemoteICECandidate] = []
+    private var mutableRemoteICEGatheringComplete = false
 
     package init(configuration: NativeWebRTCConfiguration) {
         self.configuration = configuration
+    }
+
+    package var remoteICECandidates: [RemoteICECandidate] {
+        remoteCandidateLock.lock()
+        defer { remoteCandidateLock.unlock() }
+        return mutableRemoteICECandidates
+    }
+
+    package var isRemoteICEGatheringComplete: Bool {
+        remoteCandidateLock.lock()
+        defer { remoteCandidateLock.unlock() }
+        return mutableRemoteICEGatheringComplete
     }
 
     package var localCapabilities: [SDPCodecCapability] {
@@ -131,5 +266,37 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
 
     package func close() {
         state = .closed
+    }
+
+    package func addRemoteICECandidate(candidateInitJSON: String, isFinal: Bool) throws {
+        let parsedCandidate: RTCIceCandidateInit?
+        if candidateInitJSON.isEmpty {
+            parsedCandidate = nil
+        } else {
+            parsedCandidate = try RTCIceCandidateInit(jsonString: candidateInitJSON)
+        }
+
+        remoteCandidateLock.lock()
+        defer { remoteCandidateLock.unlock() }
+
+        if let parsedCandidate {
+            mutableRemoteICECandidates.append(RemoteICECandidate(candidateInit: parsedCandidate))
+        }
+
+        if isFinal {
+            mutableRemoteICEGatheringComplete = true
+        }
+    }
+
+    package func makeSubscriberAnswer(for offerSDP: String) throws -> String {
+        guard configuration.role == .subscriber else {
+            throw PeerConnectionNegotiationError.subscriberAnswerRequestedForPublisher
+        }
+
+        return try SubscriberSDPAnswerFactory(
+            mediaProfile: configuration.mediaProfile,
+            iceCredentials: configuration.iceCredentials,
+            dtlsFingerprint: configuration.dtlsFingerprint
+        ).makeAnswer(to: offerSDP)
     }
 }

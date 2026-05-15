@@ -30,16 +30,23 @@ actor MockSignalTransport: SignalTransport {
     private(set) var pingCount = 0
 
     private var incomingFrames: [SignalTransportFrame]
+    private var receiveContinuations: [CheckedContinuation<SignalTransportFrame, any Error>] = []
+    private var isClosed = false
 
     init(incomingFrames: [SignalTransportFrame] = []) {
         self.incomingFrames = incomingFrames
     }
 
     func enqueueIncomingFrame(_ frame: SignalTransportFrame) {
-        incomingFrames.append(frame)
+        if receiveContinuations.isEmpty {
+            incomingFrames.append(frame)
+        } else {
+            receiveContinuations.removeFirst().resume(returning: frame)
+        }
     }
 
     func connect(to url: URL) async throws {
+        isClosed = false
         connectedURLs.append(url)
     }
 
@@ -49,7 +56,13 @@ actor MockSignalTransport: SignalTransport {
 
     func receive() async throws -> SignalTransportFrame {
         guard !incomingFrames.isEmpty else {
-            throw LiveKitNativeError.signalingClosed(code: nil, reason: "No mock frame queued.")
+            if isClosed {
+                throw LiveKitNativeError.signalingClosed(code: nil, reason: "Mock transport closed.")
+            }
+
+            return try await withCheckedThrowingContinuation { continuation in
+                receiveContinuations.append(continuation)
+            }
         }
 
         return incomingFrames.removeFirst()
@@ -60,6 +73,13 @@ actor MockSignalTransport: SignalTransport {
     }
 
     func close(code: SignalTransportCloseCode, reason: Data?) async {
+        isClosed = true
         closeCalls.append(MockSignalTransportCloseCall(code: code, reason: reason))
+
+        let continuations = receiveContinuations
+        receiveContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume(throwing: LiveKitNativeError.signalingClosed(code: code.rawValue, reason: "Mock transport closed."))
+        }
     }
 }

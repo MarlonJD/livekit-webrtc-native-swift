@@ -31,4 +31,91 @@ final class RoomActorTests: XCTestCase {
         XCTAssertEqual(participant?.name, "Alice Smith")
         XCTAssertEqual(participant?.metadata, "updated")
     }
+
+    func testTrackPublicationsAreIdempotentBySid() async {
+        let actor = RoomActor(localParticipant: LocalParticipant(identity: "me"))
+        let update = ParticipantSnapshot(
+            sid: "PA_alice",
+            identity: "alice",
+            name: "Alice",
+            trackPublications: [
+                TrackPublicationSnapshot(sid: "TR_camera", name: "camera", kind: .video, source: .camera),
+            ]
+        )
+
+        let firstResult = await actor.applyParticipantUpdates([update])
+        let secondResult = await actor.applyParticipantUpdates([update])
+        let participant = await actor.snapshot().remoteParticipants.first
+
+        XCTAssertEqual(firstResult.1.count, 2)
+        XCTAssertEqual(secondResult.1.count, 0)
+        XCTAssertEqual(participant?.trackPublications.count, 1)
+        XCTAssertEqual(participant?.trackPublications.first?.sid, "TR_camera")
+
+        guard case .participantConnected = firstResult.1[0] else {
+            return XCTFail("Expected participantConnected before trackPublished.")
+        }
+
+        guard case let .trackPublished(publication, publishedParticipant) = firstResult.1[1] else {
+            return XCTFail("Expected trackPublished event.")
+        }
+        XCTAssertEqual(publication.sid, "TR_camera")
+        XCTAssertEqual(publishedParticipant.sid, "PA_alice")
+    }
+
+    func testTrackPublicationRemovalEmitsTrackUnpublished() async {
+        let actor = RoomActor(localParticipant: LocalParticipant(identity: "me"))
+        _ = await actor.applyParticipantUpdates([
+            ParticipantSnapshot(
+                sid: "PA_alice",
+                identity: "alice",
+                trackPublications: [
+                    TrackPublicationSnapshot(sid: "TR_camera", name: "camera", kind: .video, source: .camera),
+                ]
+            ),
+        ])
+
+        let result = await actor.removeTrackPublication(sid: "TR_camera")
+        let participant = result.0.remoteParticipants.first
+
+        XCTAssertEqual(participant?.trackPublications.count, 0)
+        XCTAssertEqual(result.1.count, 1)
+
+        guard case let .trackUnpublished(publication, unpublishedParticipant) = result.1[0] else {
+            return XCTFail("Expected trackUnpublished event.")
+        }
+        XCTAssertEqual(publication.sid, "TR_camera")
+        XCTAssertEqual(unpublishedParticipant.sid, "PA_alice")
+    }
+
+    func testDisconnectedParticipantUpdateRemovesParticipantAndTracks() async {
+        let actor = RoomActor(localParticipant: LocalParticipant(identity: "me"))
+        _ = await actor.applyParticipantUpdates([
+            ParticipantSnapshot(
+                sid: "PA_alice",
+                identity: "alice",
+                trackPublications: [
+                    TrackPublicationSnapshot(sid: "TR_camera", name: "camera", kind: .video, source: .camera),
+                ]
+            ),
+        ])
+
+        let result = await actor.applyParticipantUpdates([
+            ParticipantSnapshot(sid: "PA_alice", identity: "alice", isDisconnected: true),
+        ])
+
+        XCTAssertEqual(result.0.remoteParticipants.count, 0)
+        XCTAssertEqual(result.1.count, 2)
+
+        guard case let .trackUnpublished(publication, participant) = result.1[0] else {
+            return XCTFail("Expected trackUnpublished before participantDisconnected.")
+        }
+        XCTAssertEqual(publication.sid, "TR_camera")
+        XCTAssertEqual(participant.sid, "PA_alice")
+
+        guard case let .participantDisconnected(disconnectedParticipant) = result.1[1] else {
+            return XCTFail("Expected participantDisconnected event.")
+        }
+        XCTAssertEqual(disconnectedParticipant.sid, "PA_alice")
+    }
 }

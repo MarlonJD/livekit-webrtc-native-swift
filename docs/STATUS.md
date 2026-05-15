@@ -1,11 +1,12 @@
 # LiveKitNative Status
 
-Last updated: 2026-05-14
+Last updated: 2026-05-15
 
 ## Current State
 
-`LiveKitNative` is currently an early SwiftPM scaffold plus protocol-engine
-groundwork. It is not yet a working end-to-end LiveKit client.
+`LiveKitNative` has completed the `0.2.0` developer-preview scope and is now
+moving into the `0.3.0` H.264 camera publish phase. It is not yet a working
+end-to-end production media client.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -58,6 +59,39 @@ The old binary WebRTC dependency path has been removed from the package model.
   behavior.
 - `SignalConnection` actor for connection state, encode/decode, send, receive,
   ping, and close.
+- `Room.connect` now opens the signal connection, waits for the initial
+  `SignalResponse.join`, applies local participant identity from
+  `JoinResponse.participant`, and hydrates remote participants from
+  `JoinResponse.otherParticipants`.
+- Remote participant snapshots now map LiveKit `TrackInfo` entries into
+  idempotent `RemoteTrackPublication` state and emit `trackPublished` events
+  for newly observed track SIDs.
+- A post-join signal receive loop now consumes `ParticipantUpdate`,
+  `refresh_token`, `TrickleRequest`, `TrackUnpublishedResponse`,
+  `LeaveRequest`, and `ReconnectResponse` messages.
+- `ParticipantUpdate` messages flow through the same idempotent participant and
+  track publication reducers used by the initial join snapshot.
+- Participant updates with disconnected participant state remove the remote
+  participant and emit `trackUnpublished` plus `participantDisconnected` events.
+- `TrackUnpublishedResponse` removes the matching remote publication and emits a
+  `trackUnpublished` event.
+- `refresh_token` messages emit a `RoomEvent.tokenRefreshed` event.
+- `LeaveRequest` messages transition to `disconnected` for disconnect actions
+  and to `reconnecting` for resume/reconnect actions.
+- `SignalResponse.offer` is routed into the subscriber peer connection adapter,
+  which generates a minimal SDP answer and sends it back as
+  `SignalRequest.answer`.
+- Subscriber SDP answer generation preserves offered BUNDLE MIDs, accepts the
+  tiny receive profile codecs (Opus, H.264, VP8, WebRTC data channel), filters
+  unsupported codec payloads, and answers media sections as receive-only.
+- SDP answers now emit local `a=ice-ufrag`, `a=ice-pwd`,
+  `a=fingerprint:<algorithm> <value>`, and `a=ice-options:trickle` lines so the
+  answer is closer to a real negotiation payload.
+- Subscriber-targeted trickle messages decode `RTCIceCandidateInit` JSON and
+  store remote ICE candidates on the subscriber peer connection adapter,
+  including end-of-candidates state.
+- Non-join initial signal frames close the connection, return the room to
+  `disconnected`, and surface a typed signal frame error.
 - Mock signal transport for unit tests.
 
 ### Protocol Pinning
@@ -97,11 +131,27 @@ The old binary WebRTC dependency path has been removed from the package model.
   - attribute padding
   - ICE attributes such as username, priority, use-candidate, controlled, and
     controlling
+  - IPv4 `XOR-MAPPED-ADDRESS` encode/decode groundwork for Binding success
+    responses
 - ICE basics:
+  - local ICE username fragment and password generation
+  - host candidate construction from local interface addresses
+  - UDP STUN datagram transport abstraction and Darwin UDP socket transport
+  - remote trickle candidate JSON decoding and storage
+  - end-of-candidates tracking
   - candidate type preferences
   - candidate priority calculation
   - candidate pair priority calculation
+  - candidate pair checklist state and nomination tracking
   - basic SDP candidate attribute serialization
+  - connectivity-check Binding request construction with ICE username,
+    priority, role, and use-candidate attributes
+  - Binding success response handling for server-reflexive mapped address
+    discovery
+- DTLS/SRTP groundwork:
+  - SHA-256 fingerprint formatting
+  - ephemeral Security framework key material for SDP fingerprint generation
+  - explicit boundary before full DTLS `use_srtp` handshake and SRTP key export
 - RTP basics:
   - RTP v2 header encode/decode
   - marker bit, payload type, sequence number, timestamp, SSRC, and payload
@@ -111,13 +161,16 @@ The old binary WebRTC dependency path has been removed from the package model.
   - STAP-A parameter set packing/unpacking
   - FU-A fragmentation/reassembly
   - missing fragment start and sequence gap error paths
+  - subscribe-side RTP to H.264 access-unit assembly
+  - Annex-B byte-stream output for decoder handoff
+  - VideoToolbox subscribe decoder adapter scaffold with SPS/PPS detection
 
 ## Verified
 
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 33 tests passed
+  - 54 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -134,18 +187,17 @@ The following checks passed after the latest implementation pass:
 
 ### LiveKit Signaling
 
-- WebSocket join handshake.
-- `JoinResponse` handling.
-- `LeaveRequest`, `ReconnectResponse`, and `refresh_token`.
+- Rich handling for publisher answers, speaker updates, connection quality,
+  stream state, subscription permissions, room moved, and data track control
+  messages.
+- Alternative URL retry handling from `JoinResponse.alternative_url`.
 - Signal reconnect and resume.
-- Server-driven participant/track state reducer from real LiveKit messages.
+- Wiring subscriber ICE candidates into real network connectivity.
 
 ### ICE and Networking
 
-- UDP socket gathering through `Network.framework`.
-- STUN server transactions over the network.
-- Candidate pair checklist.
-- Connectivity checks.
+- Full ICE agent orchestration against a LiveKit server.
+- Connectivity-check scheduling, retransmit, timeout, and nomination policy.
 - Consent freshness.
 - TURN UDP, TCP, or TLS behavior.
 
@@ -165,7 +217,7 @@ The following checks passed after the latest implementation pass:
 
 - Camera capture pipeline.
 - VideoToolbox H.264 encode path.
-- VideoToolbox H.264 decode/render path.
+- Full VideoToolbox H.264 decode/render path.
 - Swift VP8 decode-only path.
 - Swift Opus encode/decode path.
 - Audio capture/playout and audio session management.
@@ -188,20 +240,18 @@ The following checks passed after the latest implementation pass:
 
 ## Next Recommended Work
 
-1. Vendor generated LiveKit protobuf Swift sources from the pinned protocol
-   revision.
-2. Replace placeholder signaling tests with tests using real `SignalRequest`
-   and `SignalResponse` messages.
-3. Implement WebSocket join request/response handling in `Room.connect`.
-4. Add an SDP offer/answer model that can produce a LiveKit subscriber answer
-   from a server offer.
-5. Start ICE networking with UDP host candidates and STUN binding transactions.
-6. Add SRTP/RTCP primitives before wiring media render.
+1. Start `0.3.0` with camera capture through `AVCaptureSession`.
+2. Add VideoToolbox H.264 encoder configuration and output packetization.
+3. Wire `AddTrackRequest`, publisher transceiver bookkeeping, and publisher
+   offer/answer flow.
+4. Add mute/unmute signaling for published video tracks.
+5. Keep full DTLS-SRTP/media integration as the hardening path before a usable
+   end-to-end release.
 
 ## Practical Release Status
 
-No tag should be cut as a usable SDK yet.
+`0.2.0` scope is complete as an ICE/STUN/H.264-subscribe groundwork milestone.
+It should be treated as a developer preview, not as a usable media SDK.
 
-The repository is ready for continued implementation work toward `0.1.0`, but
-`0.1.0` should wait until a client can join a LiveKit room and complete at
-least the signaling-side room join flow.
+The repository is ready for `0.3.0` implementation work: H.264 camera publish
+through `AVFoundation` and `VideoToolbox`.

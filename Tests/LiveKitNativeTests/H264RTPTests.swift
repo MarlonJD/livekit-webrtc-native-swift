@@ -64,6 +64,57 @@ final class H264RTPTests: XCTestCase {
         XCTAssertEqual(try H264RTPDepacketizer().append(packet), [sps, pps])
     }
 
+    func testSubscribePipelineBuildsAnnexBAccessUnitOnMarker() throws {
+        let sps = Data([0x67, 0x42, 0x00, 0x1F])
+        let pps = Data([0x68, 0xCE, 0x06, 0xE2])
+        let idr = Data([0x65, 0x88, 0x84])
+        let stapA = try H264RTPPacketizer.makeSTAPA(nalUnits: [sps, pps])
+        let pipeline = H264SubscribePipeline()
+
+        let parameterSetPacket = RTPPacket(
+            marker: false,
+            payloadType: 102,
+            sequenceNumber: 1,
+            timestamp: 90_000,
+            ssrc: 99,
+            payload: stapA
+        )
+        let framePacket = RTPPacket(
+            marker: true,
+            payloadType: 102,
+            sequenceNumber: 2,
+            timestamp: 90_000,
+            ssrc: 99,
+            payload: idr
+        )
+
+        XCTAssertEqual(try pipeline.append(parameterSetPacket), [])
+        let accessUnits = try pipeline.append(framePacket)
+
+        XCTAssertEqual(accessUnits.count, 1)
+        XCTAssertEqual(accessUnits[0].timestamp, 90_000)
+        XCTAssertEqual(accessUnits[0].nalUnits, [sps, pps, idr])
+        XCTAssertEqual(
+            accessUnits[0].annexBData,
+            Data([0, 0, 0, 1]) + sps + Data([0, 0, 0, 1]) + pps + Data([0, 0, 0, 1]) + idr
+        )
+    }
+
+    func testVideoToolboxDecoderCapturesParameterSets() throws {
+        let accessUnit = H264AccessUnit(
+            timestamp: 90_000,
+            nalUnits: [
+                Data([0x67, 0x42, 0x00, 0x1F, 0xE5, 0x40, 0x28, 0x02, 0xDD, 0x80]),
+                Data([0x68, 0xCE, 0x06, 0xE2]),
+            ]
+        )
+        let decoder = H264VideoToolboxSubscribeDecoder()
+
+        decoder.configureIfPossible(from: accessUnit)
+
+        XCTAssertTrue(decoder.hasParameterSets)
+    }
+
     func testDetectsMissingFUAStart() {
         let packet = RTPPacket(
             marker: false,

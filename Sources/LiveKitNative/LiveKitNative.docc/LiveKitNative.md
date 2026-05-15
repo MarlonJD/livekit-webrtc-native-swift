@@ -10,8 +10,12 @@ keeps LiveKit client logic in Swift and builds toward a tiny internal
 `LiveKitNativeWebRTC` engine for media transport.
 
 Milestone 0 establishes the package structure and public API shape. Milestone
-0.1 adds signaling groundwork and a small SDP parser/writer foundation for the
-native WebRTC engine.
+0.1 adds generated LiveKit signaling protobufs, WebSocket frame handling,
+initial JoinResponse room state updates, a post-join signal receive loop, and
+minimal subscriber offer/answer SDP plumbing for the native WebRTC engine.
+Milestone 0.2 adds ICE/STUN groundwork, subscriber trickle handling, DTLS
+fingerprint material, candidate checklist state, and subscribe-side H.264 RTP
+assembly. Active work has moved to 0.3 camera publishing.
 
 ## Topics
 

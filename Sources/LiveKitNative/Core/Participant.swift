@@ -1,4 +1,5 @@
 import Foundation
+import LiveKitNativeProtocol
 
 public class Participant: Identifiable, Hashable, @unchecked Sendable {
     private let stateLock = NSLock()
@@ -90,7 +91,53 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
     }
 }
 
-public final class RemoteParticipant: Participant, @unchecked Sendable {}
+public final class RemoteParticipant: Participant, @unchecked Sendable {
+    private let publicationLock = NSLock()
+    private var remoteTrackPublications: [String: RemoteTrackPublication] = [:]
+
+    public var trackPublications: [RemoteTrackPublication] {
+        publicationLock.withLock {
+            remoteTrackPublications.values.sorted { $0.sid < $1.sid }
+        }
+    }
+
+    func applyTrackPublications(_ snapshots: [TrackPublicationSnapshot]) -> [RemoteTrackPublication] {
+        publicationLock.withLock {
+            var addedPublications: [RemoteTrackPublication] = []
+
+            for snapshot in snapshots where !snapshot.sid.isEmpty {
+                guard remoteTrackPublications[snapshot.sid] == nil else {
+                    continue
+                }
+
+                let publication = RemoteTrackPublication(
+                    sid: snapshot.sid,
+                    name: snapshot.name,
+                    kind: snapshot.kind,
+                    source: snapshot.source
+                )
+                remoteTrackPublications[snapshot.sid] = publication
+                addedPublications.append(publication)
+            }
+
+            return addedPublications
+        }
+    }
+
+    func removeTrackPublication(sid: String) -> RemoteTrackPublication? {
+        publicationLock.withLock {
+            remoteTrackPublications.removeValue(forKey: sid)
+        }
+    }
+
+    func removeAllTrackPublications() -> [RemoteTrackPublication] {
+        publicationLock.withLock {
+            let publications = remoteTrackPublications.values.sorted { $0.sid < $1.sid }
+            remoteTrackPublications.removeAll()
+            return publications
+        }
+    }
+}
 
 struct ParticipantSnapshot: Equatable, Sendable {
     var sid: String
@@ -98,17 +145,74 @@ struct ParticipantSnapshot: Equatable, Sendable {
     var name: String?
     var metadata: String?
     var attributes: [String: String]
+    var trackPublications: [TrackPublicationSnapshot]
+    var isDisconnected: Bool
 
-    init(sid: String, identity: String, name: String? = nil, metadata: String? = nil, attributes: [String: String] = [:]) {
+    init(
+        sid: String,
+        identity: String,
+        name: String? = nil,
+        metadata: String? = nil,
+        attributes: [String: String] = [:],
+        trackPublications: [TrackPublicationSnapshot] = [],
+        isDisconnected: Bool = false
+    ) {
         self.sid = sid
         self.identity = identity
         self.name = name
         self.metadata = metadata
         self.attributes = attributes
+        self.trackPublications = trackPublications
+        self.isDisconnected = isDisconnected
     }
 
     var stableKey: String {
         sid.isEmpty ? identity : sid
+    }
+
+    var hasStableIdentity: Bool {
+        !stableKey.isEmpty
+    }
+}
+
+extension ParticipantSnapshot {
+    init(participantInfo: Livekit_ParticipantInfo, fallbackIdentity: String? = nil) {
+        self.init(
+            sid: participantInfo.sid,
+            identity: participantInfo.identity.isEmpty ? fallbackIdentity ?? "" : participantInfo.identity,
+            name: participantInfo.name.nilIfEmpty,
+            metadata: participantInfo.metadata.nilIfEmpty,
+            attributes: participantInfo.attributes,
+            trackPublications: participantInfo.tracks.compactMap { TrackPublicationSnapshot(trackInfo: $0) },
+            isDisconnected: participantInfo.state == .disconnected
+        )
+    }
+}
+
+struct TrackPublicationSnapshot: Equatable, Sendable {
+    var sid: String
+    var name: String
+    var kind: TrackKind
+    var source: TrackSource
+
+    init(sid: String, name: String, kind: TrackKind, source: TrackSource = .unknown) {
+        self.sid = sid
+        self.name = name
+        self.kind = kind
+        self.source = source
+    }
+
+    init?(trackInfo: Livekit_TrackInfo) {
+        guard let kind = TrackKind(protocolTrackType: trackInfo.type) else {
+            return nil
+        }
+
+        self.init(
+            sid: trackInfo.sid,
+            name: trackInfo.name,
+            kind: kind,
+            source: TrackSource(protocolTrackSource: trackInfo.source)
+        )
     }
 }
 
@@ -116,6 +220,12 @@ private struct ParticipantMutableState {
     var name: String?
     var metadata: String?
     var attributes: [String: String]
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
 }
 
 extension NSLocking {

@@ -12,20 +12,28 @@ profile.
 
 Detailed project status is tracked in [docs/STATUS.md](docs/STATUS.md).
 
-This is a Milestone 0/0.1 scaffold. It contains the SwiftPM package layout,
-single public `LiveKitNative` product, public API surface, actor-backed state
-skeleton, signaling URL builder, CI workflow, privacy manifest, DocC landing
-page, and tests for the pieces that already have behavior.
+The `0.2.0` developer-preview scope is complete. The package contains the
+SwiftPM layout, single public `LiveKitNative` product, public API surface,
+actor-backed room state, signaling URL builder, CI workflow, privacy manifest,
+DocC landing page, and tests for the pieces that already have behavior.
 
-Milestone 1 signaling and tiny WebRTC groundwork has started: binary protobuf
-frame encode/decode, a WebSocket transport abstraction, ping/close lifecycle
-hooks, a `SignalConnection` actor, SDP parsing/writing, STUN packet
-encode/decode, ICE priority helpers, RTP packet encode/decode, H.264
-single-NAL/STAP-A/FU-A packetization, and mock transport tests are in place.
+Signaling and tiny WebRTC groundwork now includes generated LiveKit protobuf
+signal messages, binary protobuf frame encode/decode, a WebSocket transport
+abstraction, ping/close lifecycle hooks, a `SignalConnection` actor,
+`Room.connect` JoinResponse handling, remote track publication state updates,
+participant disconnect and track-unpublish reducers, a post-join signal receive
+loop for participant updates, refresh tokens, leave messages, subscriber offers,
+subscriber trickle candidates, SDP parsing/writing, minimal subscriber answer
+generation, STUN packet encode/decode, STUN `XOR-MAPPED-ADDRESS` handling, ICE
+priority helpers, host candidate construction, UDP STUN transport,
+connectivity-check request/response handling, candidate checklist nomination,
+DTLS fingerprint material, RTP packet encode/decode, H.264
+single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
+assembly, and mock transport tests.
 
-The full networking handshake, protobuf-generated signal messages, ICE,
-DTLS-SRTP, RTP/RTCP, media capture, data channels, reconnect, and quality
-controls are the next implementation milestones.
+The active implementation focus is now `0.3.0`: H.264 camera publish through
+`AVFoundation` and `VideoToolbox`. Data channels, reconnect, and quality
+controls follow in later milestones.
 
 ## Requirements
 

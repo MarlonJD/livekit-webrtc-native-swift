@@ -1,8 +1,22 @@
 import Foundation
+import LiveKitNativeProtocol
 
 public enum TrackKind: String, Equatable, Sendable {
     case audio
     case video
+}
+
+extension TrackKind {
+    init?(protocolTrackType: Livekit_TrackType) {
+        switch protocolTrackType {
+        case .audio:
+            self = .audio
+        case .video:
+            self = .video
+        case .data, .UNRECOGNIZED(_):
+            return nil
+        }
+    }
 }
 
 public enum TrackSource: String, Equatable, Sendable {
@@ -11,6 +25,23 @@ public enum TrackSource: String, Equatable, Sendable {
     case screenShare
     case screenShareAudio
     case unknown
+}
+
+extension TrackSource {
+    init(protocolTrackSource: Livekit_TrackSource) {
+        switch protocolTrackSource {
+        case .camera:
+            self = .camera
+        case .microphone:
+            self = .microphone
+        case .screenShare:
+            self = .screenShare
+        case .screenShareAudio:
+            self = .screenShareAudio
+        case .unknown, .UNRECOGNIZED(_):
+            self = .unknown
+        }
+    }
 }
 
 public class Track: Identifiable, Equatable, @unchecked Sendable {

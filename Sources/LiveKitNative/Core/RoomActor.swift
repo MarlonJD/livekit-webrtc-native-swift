@@ -1,4 +1,5 @@
 import Foundation
+import LiveKitNativeProtocol
 
 actor RoomActor {
     private var state: RoomState
@@ -12,12 +13,70 @@ actor RoomActor {
         return state.snapshot
     }
 
+    func applyJoin(_ join: RoomJoinSnapshot) -> (RoomSnapshot, [RoomEvent]) {
+        state.localParticipant = LocalParticipant(
+            sid: join.localParticipant.sid,
+            identity: join.localParticipant.identity,
+            name: join.localParticipant.name,
+            metadata: join.localParticipant.metadata,
+            attributes: join.localParticipant.attributes
+        )
+        state.remoteParticipants.removeAll()
+        state.connectionState = .connected
+
+        var events: [RoomEvent] = []
+        applyRemoteParticipantUpdates(join.remoteParticipants, events: &events)
+
+        return (state.snapshot, events)
+    }
+
     func applyParticipantUpdates(_ participantUpdates: [ParticipantSnapshot]) -> (RoomSnapshot, [RoomEvent]) {
         var events: [RoomEvent] = []
+        applyRemoteParticipantUpdates(participantUpdates, events: &events)
 
+        return (state.snapshot, events)
+    }
+
+    func removeTrackPublication(sid: String) -> (RoomSnapshot, [RoomEvent]) {
+        var events: [RoomEvent] = []
+
+        for participant in state.remoteParticipants.values {
+            guard let publication = participant.removeTrackPublication(sid: sid) else {
+                continue
+            }
+
+            events.append(.trackUnpublished(publication, participant: participant))
+            break
+        }
+
+        return (state.snapshot, events)
+    }
+
+    func snapshot() -> RoomSnapshot {
+        state.snapshot
+    }
+
+    private func applyRemoteParticipantUpdates(_ participantUpdates: [ParticipantSnapshot], events: inout [RoomEvent]) {
         for update in participantUpdates {
+            guard update.hasStableIdentity else {
+                continue
+            }
+
+            if update.isDisconnected {
+                guard let participant = state.remoteParticipants.removeValue(forKey: update.stableKey) else {
+                    continue
+                }
+
+                let unpublishedTracks = participant.removeAllTrackPublications()
+                events.append(contentsOf: unpublishedTracks.map { .trackUnpublished($0, participant: participant) })
+                events.append(.participantDisconnected(participant))
+                continue
+            }
+
             if let existing = state.remoteParticipants[update.stableKey] {
                 existing.apply(update)
+                let addedPublications = existing.applyTrackPublications(update.trackPublications)
+                events.append(contentsOf: addedPublications.map { .trackPublished($0, participant: existing) })
             } else {
                 let participant = RemoteParticipant(
                     sid: update.sid,
@@ -28,14 +87,28 @@ actor RoomActor {
                 )
                 state.remoteParticipants[update.stableKey] = participant
                 events.append(.participantConnected(participant))
+
+                let addedPublications = participant.applyTrackPublications(update.trackPublications)
+                events.append(contentsOf: addedPublications.map { .trackPublished($0, participant: participant) })
             }
         }
+    }
+}
 
-        return (state.snapshot, events)
+struct RoomJoinSnapshot: Equatable, Sendable {
+    var localParticipant: ParticipantSnapshot
+    var remoteParticipants: [ParticipantSnapshot]
+
+    init(localParticipant: ParticipantSnapshot, remoteParticipants: [ParticipantSnapshot]) {
+        self.localParticipant = localParticipant
+        self.remoteParticipants = remoteParticipants
     }
 
-    func snapshot() -> RoomSnapshot {
-        state.snapshot
+    init(joinResponse: Livekit_JoinResponse) {
+        self.init(
+            localParticipant: ParticipantSnapshot(participantInfo: joinResponse.participant, fallbackIdentity: "local"),
+            remoteParticipants: joinResponse.otherParticipants.map { ParticipantSnapshot(participantInfo: $0) }
+        )
     }
 }
 

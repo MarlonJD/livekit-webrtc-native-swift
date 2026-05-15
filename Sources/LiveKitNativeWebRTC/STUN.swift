@@ -6,6 +6,8 @@ package enum STUNError: Error, Equatable, Sendable {
     case invalidMagicCookie(UInt32)
     case invalidTransactionIDLength(Int)
     case invalidUTF8Attribute(UInt16)
+    case invalidAddressAttribute
+    case unsupportedAddressFamily(UInt8)
 }
 
 package struct STUNMessageType: RawRepresentable, Equatable, Sendable {
@@ -41,12 +43,24 @@ package struct STUNTransactionID: Equatable, Sendable {
 }
 
 package enum STUNAttributeType: UInt16, Equatable, Sendable {
+    case mappedAddress = 0x0001
     case username = 0x0006
+    case xorMappedAddress = 0x0020
     case priority = 0x0024
     case useCandidate = 0x0025
     case fingerprint = 0x8028
     case iceControlled = 0x8029
     case iceControlling = 0x802A
+}
+
+package struct STUNMappedAddress: Equatable, Sendable {
+    package var address: String
+    package var port: UInt16
+
+    package init(address: String, port: UInt16) {
+        self.address = address
+        self.port = port
+    }
 }
 
 package struct STUNAttribute: Equatable, Sendable {
@@ -73,6 +87,28 @@ package struct STUNAttribute: Equatable, Sendable {
     }
 
     package static let useCandidate = STUNAttribute(type: .useCandidate)
+
+    package static func xorMappedAddressIPv4(
+        address: String,
+        port: UInt16,
+        transactionID: STUNTransactionID
+    ) throws -> STUNAttribute {
+        _ = transactionID
+        let octets = try ipv4Octets(from: address)
+        let addressValue = UInt32(octets[0]) << 24 |
+            UInt32(octets[1]) << 16 |
+            UInt32(octets[2]) << 8 |
+            UInt32(octets[3])
+        let xoredPort = port ^ UInt16(STUNMessage.magicCookie >> 16)
+        let xoredAddress = addressValue ^ STUNMessage.magicCookie
+
+        var data = Data()
+        data.append(0)
+        data.append(0x01)
+        data.appendNetworkUInt16(xoredPort)
+        data.appendNetworkUInt32(xoredAddress)
+        return STUNAttribute(type: .xorMappedAddress, value: data)
+    }
 
     package static func iceControlled(tieBreaker: UInt64) -> STUNAttribute {
         var data = Data()
@@ -106,11 +142,57 @@ package struct STUNAttribute: Equatable, Sendable {
         return try? value.networkUInt64(at: 0)
     }
 
+    package var xorMappedAddressValue: STUNMappedAddress? {
+        get throws {
+            guard type == STUNAttributeType.xorMappedAddress.rawValue else {
+                return nil
+            }
+
+            guard value.count >= 8 else {
+                throw STUNError.invalidAddressAttribute
+            }
+
+            let family = value[value.index(value.startIndex, offsetBy: 1)]
+            let port = try value.networkUInt16(at: 2) ^ UInt16(STUNMessage.magicCookie >> 16)
+
+            switch family {
+            case 0x01:
+                let address = try value.networkUInt32(at: 4) ^ STUNMessage.magicCookie
+                return STUNMappedAddress(
+                    address: [
+                        String((address >> 24) & 0xFF),
+                        String((address >> 16) & 0xFF),
+                        String((address >> 8) & 0xFF),
+                        String(address & 0xFF),
+                    ].joined(separator: "."),
+                    port: port
+                )
+            default:
+                throw STUNError.unsupportedAddressFamily(family)
+            }
+        }
+    }
+
     fileprivate func encode(into data: inout Data) {
         data.appendNetworkUInt16(type)
         data.appendNetworkUInt16(UInt16(value.count))
         data.append(value)
         data.appendSTUNPadding(forValueLength: value.count)
+    }
+
+    private static func ipv4Octets(from address: String) throws -> [UInt8] {
+        let parts = address.split(separator: ".")
+        guard parts.count == 4 else {
+            throw STUNError.invalidAddressAttribute
+        }
+
+        return try parts.map { part in
+            guard let value = UInt8(part) else {
+                throw STUNError.invalidAddressAttribute
+            }
+
+            return value
+        }
     }
 }
 

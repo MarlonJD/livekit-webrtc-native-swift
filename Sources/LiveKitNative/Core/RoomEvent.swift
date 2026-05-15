@@ -15,6 +15,7 @@ public enum RoomEvent: Equatable, Sendable {
     case trackPublished(RemoteTrackPublication, participant: RemoteParticipant)
     case trackUnpublished(RemoteTrackPublication, participant: RemoteParticipant)
     case dataReceived(Data, participant: RemoteParticipant?, topic: String?)
+    case tokenRefreshed(String)
 }
 
 public protocol RoomDelegate: AnyObject, Sendable {

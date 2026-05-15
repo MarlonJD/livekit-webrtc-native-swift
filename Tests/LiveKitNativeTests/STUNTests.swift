@@ -57,4 +57,28 @@ final class STUNTests: XCTestCase {
             XCTAssertEqual(error as? STUNError, .invalidMessageLength)
         }
     }
+
+    func testDecodesXORMappedAddressFromBindingSuccessResponse() throws {
+        let transactionID = try STUNTransactionID(bytes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+        let message = STUNMessage(
+            type: .bindingSuccessResponse,
+            transactionID: transactionID,
+            attributes: [
+                try .xorMappedAddressIPv4(address: "203.0.113.5", port: 54_321, transactionID: transactionID),
+            ]
+        )
+
+        let decoded = try STUNMessage(decoding: try message.encoded())
+        let mappedAddress = try decoded.firstAttribute(.xorMappedAddress)?.xorMappedAddressValue
+
+        XCTAssertEqual(mappedAddress, STUNMappedAddress(address: "203.0.113.5", port: 54_321))
+    }
+
+    func testRejectsInvalidXORMappedAddress() throws {
+        let attribute = STUNAttribute(type: .xorMappedAddress, value: Data([0, 1, 2]))
+
+        XCTAssertThrowsError(try attribute.xorMappedAddressValue) { error in
+            XCTAssertEqual(error as? STUNError, .invalidAddressAttribute)
+        }
+    }
 }
