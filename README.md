@@ -54,7 +54,8 @@ replay rejection, actor-backed secure RTP/RTCP datagram send/receive wiring
 with RTCP mux demux, RTP rollover tracking, and nominated ICE-pair guarded
 construction, exporter-backed secure media session construction, UDP media
 datagram socket transport with loopback coverage, handshaker-backed media
-session binder coverage, RTCP
+session binder coverage, coordinator-level secure media transport startup from
+negotiated SDP and nominated ICE pairs, RTCP
 sender/receiver report and PLI/NACK feedback wire-format groundwork, H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
 assembly, native camera track scaffolding, VideoToolbox H.264 encoder
@@ -81,10 +82,10 @@ request/response signaling, data subscription update signaling, and
 `RoomEvent.dataReceived` mapping for decoded packets.
 
 The active implementation focus is now `1.0.0` hardening: implementing the
-real DTLS handshake/exporter, wiring the handshaker-backed media session binder
-into subscriber/publisher peer connection startup, reconnect, TURN, quality
-controls, real RTP sender media transport, DTLS-SCTP network transport,
-integration apps, and size gates.
+real DTLS handshake/exporter, wiring coordinator-backed secure media transport
+startup into the live Room runtime, reconnect, TURN, quality controls, real RTP
+sender media transport, DTLS-SCTP network transport, integration apps, and size
+gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -132,18 +133,18 @@ SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting and
 session-protection context, RTCP feedback, H.264, VP8, Opus RTP scaffolding,
 and SCTP data-channel message paths. On this machine, the latest
 release-readiness smoke medians include protobuf signal roundtrip at
-`8.919 us/op`, subscriber SDP answer generation at `99.606 us/op`, STUN
-binding roundtrip at `1.874 us/op`, RTP encode/decode at `0.590 us/op`, SRTP
-replay protection at `0.048 us/op`, SRTP authenticated roundtrip at
-`8.326 us/op`, SRTP AES-CM payload roundtrip at `61.736 us/op`, full SRTP
-packet protect/unprotect at `69.687 us/op`, RTCP feedback roundtrip at
-`1.735 us/op`, SRTCP packet/replay roundtrip at `0.791 us/op`, SRTCP
-authenticated roundtrip at `6.894 us/op`, full SRTCP packet protect/unprotect
-at `9.303 us/op`, DTLS-SRTP exporter split at `0.332 us/op`, DTLS-SRTP session
-protect/unprotect at `81.544 us/op`, H.264 packetize/depacketize at
-`2.474 us/op`, VP8 payload depacketize at `0.149 us/op`, Opus RTP
-packetize/depacketize at `0.026 us/op`, and SCTP DCEP open/ack roundtrip at
-`0.821 us/op`.
+`9.287 us/op`, subscriber SDP answer generation at `101.394 us/op`, STUN
+binding roundtrip at `1.834 us/op`, RTP encode/decode at `0.592 us/op`, SRTP
+replay protection at `0.047 us/op`, SRTP authenticated roundtrip at
+`8.326 us/op`, SRTP AES-CM payload roundtrip at `63.258 us/op`, full SRTP
+packet protect/unprotect at `71.503 us/op`, RTCP feedback roundtrip at
+`1.732 us/op`, SRTCP packet/replay roundtrip at `0.784 us/op`, SRTCP
+authenticated roundtrip at `6.884 us/op`, full SRTCP packet protect/unprotect
+at `9.414 us/op`, DTLS-SRTP exporter split at `0.332 us/op`, DTLS-SRTP session
+protect/unprotect at `81.446 us/op`, H.264 packetize/depacketize at
+`2.493 us/op`, VP8 payload depacketize at `0.149 us/op`, Opus RTP
+packetize/depacketize at `0.027 us/op`, and SCTP DCEP open/ack roundtrip at
+`0.804 us/op`.
 
 Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
 CSV so this package does not reintroduce the forbidden binary WebRTC dependency.
@@ -165,8 +166,8 @@ unit/integration opt-in tests, benchmark smoke, and the compressed release
 binary size proxy. The strict gate additionally requires
 `LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
 That strict gate intentionally fails today because DTLS handshake/exporter
-implementation, full ICE/TURN hardening, publisher media transport, live SCTP,
-and end-to-end LiveKit tests are still open.
+implementation, full ICE/TURN hardening, Room runtime media startup, publisher
+media transport, live SCTP, and end-to-end LiveKit tests are still open.
 
 ## Requirements
 

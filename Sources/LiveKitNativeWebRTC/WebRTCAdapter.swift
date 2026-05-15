@@ -442,6 +442,16 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         )
     }
 
+    package func makeSecureMediaTransport(
+        selectedCandidatePair: ICECandidatePair,
+        binder: DTLSSRTPMediaSessionBinder
+    ) async throws -> DTLSSRTPMediaTransport {
+        try await binder.makeMediaTransport(
+            selectedCandidatePair: selectedCandidatePair,
+            handshakeConfiguration: try makeDTLSSRTPHandshakeConfiguration()
+        )
+    }
+
     private func setRemoteICECredentials(_ credentials: ICECredentials) {
         remoteDescriptionLock.lock()
         defer { remoteDescriptionLock.unlock() }

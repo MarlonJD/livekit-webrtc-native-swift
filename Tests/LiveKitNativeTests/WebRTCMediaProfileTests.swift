@@ -196,6 +196,62 @@ final class WebRTCMediaProfileTests: XCTestCase {
         XCTAssertEqual(configuration.remoteFingerprint, DTLSSignature(hashFunction: "sha-256", value: "00:11:22"))
     }
 
+    func testPeerConnectionBuildsSecureMediaTransportFromNegotiatedAnswerAndICEPair() async throws {
+        let fingerprint = DTLSSignature(hashFunction: "sha-256", value: "00:11:22")
+        let coordinator = PeerConnectionCoordinator(configuration: .init(role: .publisher))
+        let answer = """
+        v=0
+        o=- 1 1 IN IP4 127.0.0.1
+        s=-
+        t=0 0
+        a=ice-ufrag:remote-ufrag
+        a=ice-pwd:remote-password
+        a=fingerprint:sha-256 00:11:22
+        a=setup:active
+        m=video 9 UDP/TLS/RTP/SAVPF 102
+        a=mid:0
+        a=rtcp-mux
+        a=rtpmap:102 H264/90000
+        """
+        let datagrams = WebRTCMediaProfileMockDatagramTransport()
+        let datagramFactory = WebRTCMediaProfileDatagramTransportFactory(transport: datagrams)
+        let handshaker = WebRTCMediaProfileDTLSHandshaker(
+            result: try DTLSSRTPHandshakeResult(
+                role: .server,
+                exportedKeyingMaterial: Data(
+                    (0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init)
+                ),
+                remoteFingerprint: fingerprint
+            )
+        )
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: datagramFactory,
+            handshaker: handshaker
+        )
+
+        try coordinator.applyPublisherAnswer(type: "answer", sdp: answer, id: 10)
+        let transport = try await coordinator.makeSecureMediaTransport(
+            selectedCandidatePair: candidatePair(state: .succeeded, nominated: true),
+            binder: binder
+        )
+        try await transport.sendRTP(
+            RTPPacket(
+                marker: true,
+                payloadType: 102,
+                sequenceNumber: 7,
+                timestamp: 90_000,
+                ssrc: 0x1122_3344,
+                payload: Data([0xAA, 0xBB])
+            )
+        )
+
+        let sentDatagrams = await datagrams.sentDatagramsSnapshot()
+        XCTAssertEqual(handshaker.capturedConfiguration?.role, .server)
+        XCTAssertEqual(handshaker.capturedConfiguration?.remoteFingerprint, fingerprint)
+        XCTAssertEqual(datagramFactory.capturedPair?.remote.foundation, "remote")
+        XCTAssertEqual(sentDatagrams.count, 1)
+    }
+
     func testPeerConnectionRequiresRemoteDTLSFingerprintForHandshakeConfiguration() throws {
         let coordinator = PeerConnectionCoordinator(configuration: .init(role: .subscriber))
         let offer = """
@@ -217,6 +273,71 @@ final class WebRTCMediaProfileTests: XCTestCase {
         XCTAssertThrowsError(try coordinator.makeDTLSSRTPHandshakeConfiguration()) { error in
             XCTAssertEqual(error as? PeerConnectionNegotiationError, .missingRemoteDTLSFingerprint)
         }
+    }
+}
+
+private actor WebRTCMediaProfileMockDatagramTransport: MediaDatagramTransport {
+    private var sentDatagrams: [Data] = []
+
+    func sentDatagramsSnapshot() -> [Data] {
+        sentDatagrams
+    }
+
+    func send(_ datagram: Data) async throws {
+        sentDatagrams.append(datagram)
+    }
+
+    func receive() async throws -> Data {
+        Data()
+    }
+}
+
+private final class WebRTCMediaProfileDatagramTransportFactory: MediaDatagramTransportFactory, @unchecked Sendable {
+    private let lock = NSLock()
+    private var mutableCapturedPair: ICECandidatePair?
+    private let transport: WebRTCMediaProfileMockDatagramTransport
+
+    var capturedPair: ICECandidatePair? {
+        lock.withLock {
+            mutableCapturedPair
+        }
+    }
+
+    init(transport: WebRTCMediaProfileMockDatagramTransport) {
+        self.transport = transport
+    }
+
+    func makeTransport(selectedCandidatePair: ICECandidatePair) throws -> any MediaDatagramTransport {
+        lock.withLock {
+            mutableCapturedPair = selectedCandidatePair
+        }
+        return transport
+    }
+}
+
+private final class WebRTCMediaProfileDTLSHandshaker: DTLSSRTPHandshaking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var mutableCapturedConfiguration: DTLSSRTPHandshakeConfiguration?
+    private let result: DTLSSRTPHandshakeResult
+
+    var capturedConfiguration: DTLSSRTPHandshakeConfiguration? {
+        lock.withLock {
+            mutableCapturedConfiguration
+        }
+    }
+
+    init(result: DTLSSRTPHandshakeResult) {
+        self.result = result
+    }
+
+    func performHandshake(
+        configuration: DTLSSRTPHandshakeConfiguration,
+        transport: any MediaDatagramTransport
+    ) async throws -> DTLSSRTPHandshakeResult {
+        lock.withLock {
+            mutableCapturedConfiguration = configuration
+        }
+        return result
     }
 }
 
@@ -245,4 +366,30 @@ private final class CapturingICEConnectivityChecker: ICEConnectivityChecking, @u
             response: STUNMessage(type: .bindingSuccessResponse, transactionID: transactionID)
         )
     }
+}
+
+private func candidatePair(state: ICECandidatePairState, nominated: Bool) -> ICECandidatePair {
+    ICECandidatePair(
+        local: ICECandidate(
+            foundation: "local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.10",
+            port: 50_000,
+            type: .host
+        ),
+        remote: ICECandidate(
+            foundation: "remote",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .serverReflexive, localPreference: 100).value,
+            address: "203.0.113.10",
+            port: 60_000,
+            type: .serverReflexive
+        ),
+        isControlling: true,
+        state: state,
+        nominated: nominated
+    )
 }

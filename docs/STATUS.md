@@ -285,6 +285,9 @@ The old binary WebRTC dependency path has been removed from the package model.
   - `PeerConnectionCoordinator` stores remote DTLS fingerprint/setup data from
     subscriber offers and publisher answers, then derives the local DTLS
     client/server role for handshake startup
+  - `PeerConnectionCoordinator` can hand negotiated DTLS configuration and a
+    nominated ICE pair into the handshaker-backed media session binder to build
+    a protected RTP/RTCP transport
   - RFC 3711 AES-CM session key derivation for SRTP/SRTCP encryption,
     authentication, and salting keys
   - client/server DTLS-SRTP packet-protection context that maps local/remote
@@ -321,7 +324,7 @@ The old binary WebRTC dependency path has been removed from the package model.
   - UDP media datagram socket transport for IPv4 RTP-component candidate pairs,
     including loopback send/receive coverage
   - explicit boundary before full DTLS `use_srtp` handshake implementation and
-    subscriber/publisher startup integration
+    Room runtime subscriber/publisher startup integration
 - RTP basics:
   - RTP v2 header encode/decode
   - marker bit, payload type, sequence number, timestamp, SSRC, and payload
@@ -401,7 +404,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 225 tests passed
+  - 226 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -414,7 +417,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,299,949 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,300,757 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -491,7 +494,7 @@ The following checks passed after the latest implementation pass:
 ## Next Recommended Work
 
 1. Continue `1.0.0` hardening with a real DTLS handshake/exporter
-   implementation and subscriber/publisher startup integration.
+   implementation and Room runtime subscriber/publisher startup integration.
 2. Connect queued local data publish plans to the publisher peer connection
    once data channels are open.
 3. Add ICE restart, media/data recovery after signal reconnect, TURN UDP/TCP/TLS

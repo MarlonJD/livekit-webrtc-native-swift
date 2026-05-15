@@ -68,9 +68,11 @@ subscription and subscribed track settings signaling.
 subscription permission signaling, and `LocalParticipant.updateAudioTrack` /
 `LocalParticipant.updateVideoTrack` expose local publisher track update
 signaling. Publisher publish acknowledgements now trigger send-only SDP offer
-signaling for the publisher negotiation path. Real DTLS handshake/exporter
-implementation, subscriber/publisher media startup integration, RTP sender
-transport, and reconnect media recovery remain part of production hardening.
+signaling for the publisher negotiation path. Peer connection coordinators can
+now hand negotiated DTLS configuration and nominated ICE pairs into the
+handshaker-backed media session binder. Real DTLS handshake/exporter
+implementation, Room runtime media startup integration, RTP sender transport,
+and reconnect media recovery remain part of production hardening.
 
 Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the
