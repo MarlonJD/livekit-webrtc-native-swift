@@ -4,9 +4,9 @@ Last updated: 2026-05-15
 
 ## Current State
 
-`LiveKitNative` has completed the `0.2.0` developer-preview scope and is now
-moving into the `0.3.0` H.264 camera publish phase. It is not yet a working
-end-to-end production media client.
+`LiveKitNative` has completed the `0.3.0` developer-preview scope and is now
+moving into the `0.4.0` Swift Opus audio publish/subscribe phase. It is not yet
+a working end-to-end production media client.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -48,6 +48,9 @@ The old binary WebRTC dependency path has been removed from the package model.
   - track and track publication models
   - UIKit/AppKit `VideoView`
 - Actor-backed room state with idempotent participant updates by SID/identity.
+- `LocalParticipant` has local video publication state for camera tracks,
+  including idempotent `setCamera(enabled:)`, `publish(videoTrack:)`, and
+  `unpublish(publication:)` behavior.
 
 ### Signaling Groundwork
 
@@ -164,13 +167,21 @@ The old binary WebRTC dependency path has been removed from the package model.
   - subscribe-side RTP to H.264 access-unit assembly
   - Annex-B byte-stream output for decoder handoff
   - VideoToolbox subscribe decoder adapter scaffold with SPS/PPS detection
+- H.264 camera publish groundwork:
+  - `CameraCaptureOptions` carries position, resolution, and frame-rate intent
+  - `LocalVideoTrack.createCameraTrack` creates a native camera-backed track
+  - `AVCaptureSession` camera source scaffold with sample-buffer sink
+  - VideoToolbox H.264 encoder configuration scaffold
+  - H.264 encoded-frame to RTP packetization
+  - LiveKit `AddTrackRequest` builder for H.264 camera publishes
+  - local video publication lifecycle tests
 
 ## Verified
 
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 54 tests passed
+  - 60 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -190,6 +201,8 @@ The following checks passed after the latest implementation pass:
 - Rich handling for publisher answers, speaker updates, connection quality,
   stream state, subscription permissions, room moved, and data track control
   messages.
+- Sending local video `AddTrackRequest` through the live signal connection and
+  awaiting server `TrackPublishedResponse`.
 - Alternative URL retry handling from `JoinResponse.alternative_url`.
 - Signal reconnect and resume.
 - Wiring subscriber ICE candidates into real network connectivity.
@@ -215,8 +228,8 @@ The following checks passed after the latest implementation pass:
 
 ### Media
 
-- Camera capture pipeline.
-- VideoToolbox H.264 encode path.
+- Full device camera permission UX and runtime capture integration.
+- Full VideoToolbox H.264 encoded sample extraction.
 - Full VideoToolbox H.264 decode/render path.
 - Swift VP8 decode-only path.
 - Swift Opus encode/decode path.
@@ -240,18 +253,17 @@ The following checks passed after the latest implementation pass:
 
 ## Next Recommended Work
 
-1. Start `0.3.0` with camera capture through `AVCaptureSession`.
-2. Add VideoToolbox H.264 encoder configuration and output packetization.
-3. Wire `AddTrackRequest`, publisher transceiver bookkeeping, and publisher
-   offer/answer flow.
-4. Add mute/unmute signaling for published video tracks.
-5. Keep full DTLS-SRTP/media integration as the hardening path before a usable
-   end-to-end release.
+1. Start `0.4.0` with Swift Opus packet encode/decode primitives.
+2. Add microphone capture through `AVAudioEngine` or `AVCaptureAudioDataOutput`.
+3. Add audio RTP packetization/depacketization and jitter-buffer groundwork.
+4. Wire local microphone publication state to `LocalParticipant`.
+5. Keep publisher `AddTrackRequest`, transceiver negotiation, and DTLS-SRTP
+   integration as the hardening path before a usable end-to-end release.
 
 ## Practical Release Status
 
-`0.2.0` scope is complete as an ICE/STUN/H.264-subscribe groundwork milestone.
-It should be treated as a developer preview, not as a usable media SDK.
+`0.3.0` scope is complete as an H.264 camera-publish groundwork milestone. It
+should be treated as a developer preview, not as a usable media SDK.
 
-The repository is ready for `0.3.0` implementation work: H.264 camera publish
-through `AVFoundation` and `VideoToolbox`.
+The repository is ready for `0.4.0` implementation work: Swift Opus audio
+publish/subscribe groundwork.

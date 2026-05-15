@@ -54,8 +54,32 @@ public class Participant: Identifiable, Hashable, @unchecked Sendable {
 }
 
 public final class LocalParticipant: Participant, @unchecked Sendable {
+    private let publicationLock = NSLock()
+    private var localTrackPublications: [String: LocalTrackPublication] = [:]
+
+    public var trackPublications: [LocalTrackPublication] {
+        publicationLock.withLock {
+            localTrackPublications.values.sorted { $0.sid < $1.sid }
+        }
+    }
+
     public func setCamera(enabled: Bool, options: CameraCaptureOptions = .init()) async throws {
-        throw LiveKitNativeError.notImplemented("Camera capture")
+        if enabled {
+            let hasCameraPublication = publicationLock.withLock {
+                localTrackPublications.values.contains { $0.source == .camera }
+            }
+
+            guard !hasCameraPublication else {
+                return
+            }
+
+            let track = try LocalVideoTrack.createCameraTrack(options: options)
+            _ = try await publish(videoTrack: track, options: TrackPublishOptions(source: .camera))
+        } else {
+            publicationLock.withLock {
+                localTrackPublications = localTrackPublications.filter { $0.value.source != .camera }
+            }
+        }
     }
 
     public func setMicrophone(enabled: Bool, options: AudioCaptureOptions = .init()) async throws {
@@ -63,7 +87,20 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
     }
 
     public func publish(videoTrack: LocalVideoTrack, options: TrackPublishOptions = .init()) async throws -> LocalTrackPublication {
-        throw LiveKitNativeError.notImplemented("Video publishing")
+        let plan = LocalVideoPublishPlan(track: videoTrack, options: options)
+        let publication = LocalTrackPublication(
+            sid: plan.cid,
+            name: plan.name,
+            kind: .video,
+            source: plan.source,
+            track: videoTrack
+        )
+
+        publicationLock.withLock {
+            localTrackPublications[publication.sid] = publication
+        }
+
+        return publication
     }
 
     public func publish(audioTrack: LocalAudioTrack, options: TrackPublishOptions = .init()) async throws -> LocalTrackPublication {
@@ -71,7 +108,9 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
     }
 
     public func unpublish(publication: LocalTrackPublication) async throws {
-        throw LiveKitNativeError.notImplemented("Track unpublishing")
+        publicationLock.withLock {
+            _ = localTrackPublications.removeValue(forKey: publication.sid)
+        }
     }
 
     public func publish(data: Data, options: DataPublishOptions = .init()) async throws {

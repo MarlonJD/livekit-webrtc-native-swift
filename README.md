@@ -12,7 +12,7 @@ profile.
 
 Detailed project status is tracked in [docs/STATUS.md](docs/STATUS.md).
 
-The `0.2.0` developer-preview scope is complete. The package contains the
+The `0.3.0` developer-preview scope is complete. The package contains the
 SwiftPM layout, single public `LiveKitNative` product, public API surface,
 actor-backed room state, signaling URL builder, CI workflow, privacy manifest,
 DocC landing page, and tests for the pieces that already have behavior.
@@ -29,11 +29,13 @@ priority helpers, host candidate construction, UDP STUN transport,
 connectivity-check request/response handling, candidate checklist nomination,
 DTLS fingerprint material, RTP packet encode/decode, H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
-assembly, and mock transport tests.
+assembly, native camera track scaffolding, VideoToolbox H.264 encoder
+configuration, H.264 publish RTP packetization, LiveKit `AddTrackRequest`
+construction, local video publication state, and mock transport tests.
 
-The active implementation focus is now `0.3.0`: H.264 camera publish through
-`AVFoundation` and `VideoToolbox`. Data channels, reconnect, and quality
-controls follow in later milestones.
+The active implementation focus is now `0.4.0`: Swift Opus audio
+publish/subscribe groundwork. Data channels, reconnect, and quality controls
+follow in later milestones.
 
 ## Requirements
 

@@ -1,5 +1,6 @@
 import Foundation
 import LiveKitNativeProtocol
+import LiveKitNativeWebRTC
 
 public enum TrackKind: String, Equatable, Sendable {
     case audio
@@ -77,8 +78,46 @@ public class AudioTrack: Track, @unchecked Sendable {
 }
 
 public final class LocalVideoTrack: VideoTrack, @unchecked Sendable {
+    let cameraCaptureOptions: CameraCaptureOptions?
+    let nativeCameraSource: NativeCameraVideoSource?
+
+    public override init(
+        id: String = UUID().uuidString,
+        sid: String? = nil,
+        name: String,
+        source: TrackSource = .camera
+    ) {
+        self.cameraCaptureOptions = nil
+        self.nativeCameraSource = nil
+        super.init(id: id, sid: sid, name: name, source: source)
+    }
+
+    init(
+        id: String = UUID().uuidString,
+        sid: String? = nil,
+        name: String,
+        source: TrackSource = .camera,
+        cameraCaptureOptions: CameraCaptureOptions? = nil,
+        nativeCameraSource: NativeCameraVideoSource? = nil
+    ) {
+        self.cameraCaptureOptions = cameraCaptureOptions
+        self.nativeCameraSource = nativeCameraSource
+        super.init(id: id, sid: sid, name: name, source: source)
+    }
+
     public static func createCameraTrack(options: CameraCaptureOptions = .init()) throws -> LocalVideoTrack {
-        LocalVideoTrack(name: "camera", source: .camera)
+        let nativeConfiguration = NativeCameraCaptureConfiguration(
+            position: NativeCameraPosition(cameraPosition: options.position),
+            width: options.width,
+            height: options.height,
+            framesPerSecond: options.framesPerSecond
+        )
+        return LocalVideoTrack(
+            name: "camera",
+            source: .camera,
+            cameraCaptureOptions: options,
+            nativeCameraSource: NativeCameraVideoSource(configuration: nativeConfiguration)
+        )
     }
 }
 
@@ -91,3 +130,16 @@ public final class LocalAudioTrack: AudioTrack, @unchecked Sendable {
 public final class RemoteVideoTrack: VideoTrack, @unchecked Sendable {}
 
 public final class RemoteAudioTrack: AudioTrack, @unchecked Sendable {}
+
+extension NativeCameraPosition {
+    init(cameraPosition: CameraPosition) {
+        switch cameraPosition {
+        case .front:
+            self = .front
+        case .back:
+            self = .back
+        case .unspecified:
+            self = .unspecified
+        }
+    }
+}

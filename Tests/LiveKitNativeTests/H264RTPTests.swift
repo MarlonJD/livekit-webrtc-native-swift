@@ -115,6 +115,25 @@ final class H264RTPTests: XCTestCase {
         XCTAssertTrue(decoder.hasParameterSets)
     }
 
+    func testPublishPacketizerMaintainsSequenceNumbersAcrossFrames() throws {
+        let packetizer = H264PublishRTPPacketizer(
+            payloadType: 102,
+            mtu: 1_200,
+            ssrc: 42,
+            startingSequenceNumber: 10
+        )
+        let firstFrame = H264EncodedFrame(nalUnits: [Data([0x65, 0x01])], rtpTimestamp: 90_000, isKeyFrame: true)
+        let secondFrame = H264EncodedFrame(nalUnits: [Data([0x41, 0x02])], rtpTimestamp: 93_000)
+
+        let firstPackets = try packetizer.packetize(firstFrame)
+        let secondPackets = try packetizer.packetize(secondFrame)
+
+        XCTAssertEqual(firstPackets.map(\.sequenceNumber), [10])
+        XCTAssertEqual(secondPackets.map(\.sequenceNumber), [11])
+        XCTAssertEqual(firstPackets.first?.ssrc, 42)
+        XCTAssertEqual(secondPackets.first?.timestamp, 93_000)
+    }
+
     func testDetectsMissingFUAStart() {
         let packet = RTPPacket(
             marker: false,

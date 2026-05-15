@@ -32,9 +32,20 @@ public struct ConnectOptions: Equatable, Sendable {
 
 public struct CameraCaptureOptions: Equatable, Sendable {
     public var position: CameraPosition
+    public var width: Int
+    public var height: Int
+    public var framesPerSecond: Int
 
-    public init(position: CameraPosition = .front) {
+    public init(
+        position: CameraPosition = .front,
+        width: Int = 1_280,
+        height: Int = 720,
+        framesPerSecond: Int = 30
+    ) {
         self.position = position
+        self.width = width
+        self.height = height
+        self.framesPerSecond = framesPerSecond
     }
 }
 
