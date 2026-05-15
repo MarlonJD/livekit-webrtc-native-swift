@@ -4,9 +4,9 @@ Last updated: 2026-05-15
 
 ## Current State
 
-`LiveKitNative` has completed the `0.3.0` developer-preview scope and is now
-moving into the `0.4.0` Swift Opus audio publish/subscribe phase. It is not yet
-a working end-to-end production media client.
+`LiveKitNative` has completed the `0.4.0` developer-preview scope and is now
+moving into the `0.5.0` Swift VP8 decode-only subscribe phase. It is not yet a
+working end-to-end production media client.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -175,13 +175,28 @@ The old binary WebRTC dependency path has been removed from the package model.
   - H.264 encoded-frame to RTP packetization
   - LiveKit `AddTrackRequest` builder for H.264 camera publishes
   - local video publication lifecycle tests
+- Swift Opus audio groundwork:
+  - `AudioCaptureOptions` carries echo-cancellation, sample-rate,
+    channel-count, and frame-duration intent
+  - `LocalAudioTrack.createTrack` creates a native microphone-backed track
+  - `AVAudioEngine` microphone source scaffold with frame-sink callback
+  - Opus voice profile defaults for 48 kHz, 20 ms, mono, payload type 111
+  - Opus TOC parsing and packet-duration calculation
+  - Opus RTP packetization and depacketization
+  - subscribe-side Opus packet pipeline with payload type validation and packet
+    loss accounting
+  - native audio playout scaffold using `AVAudioEngine` and
+    `AVAudioPlayerNode`
+  - LiveKit `AddTrackRequest` builder for Opus microphone publishes
+  - local audio publication lifecycle tests for `setMicrophone(enabled:)`,
+    `publish(audioTrack:)`, and `unpublish(publication:)`
 
 ## Verified
 
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 60 tests passed
+  - 73 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -232,8 +247,8 @@ The following checks passed after the latest implementation pass:
 - Full VideoToolbox H.264 encoded sample extraction.
 - Full VideoToolbox H.264 decode/render path.
 - Swift VP8 decode-only path.
-- Swift Opus encode/decode path.
-- Audio capture/playout and audio session management.
+- Full CELT/SILK Swift Opus encode/decode implementation.
+- Audio session management and production playout timing.
 
 ### Data Channels
 
@@ -253,17 +268,19 @@ The following checks passed after the latest implementation pass:
 
 ## Next Recommended Work
 
-1. Start `0.4.0` with Swift Opus packet encode/decode primitives.
-2. Add microphone capture through `AVAudioEngine` or `AVCaptureAudioDataOutput`.
-3. Add audio RTP packetization/depacketization and jitter-buffer groundwork.
-4. Wire local microphone publication state to `LocalParticipant`.
-5. Keep publisher `AddTrackRequest`, transceiver negotiation, and DTLS-SRTP
-   integration as the hardening path before a usable end-to-end release.
+1. Start `0.5.0` with Swift VP8 bitstream parsing fixtures.
+2. Add VP8 RTP depacketization and frame boundary handling.
+3. Add decode-only subscribe pipeline fixtures for Chrome/Android publisher
+   interop.
+4. Keep full CELT/SILK Opus codec work, publisher `AddTrackRequest` signaling,
+   transceiver negotiation, and DTLS-SRTP integration as the hardening path
+   before a usable end-to-end release.
 
 ## Practical Release Status
 
-`0.3.0` scope is complete as an H.264 camera-publish groundwork milestone. It
-should be treated as a developer preview, not as a usable media SDK.
+`0.4.0` scope is complete as an Opus audio publish/subscribe groundwork
+milestone. It should be treated as a developer preview, not as a usable media
+SDK.
 
-The repository is ready for `0.4.0` implementation work: Swift Opus audio
-publish/subscribe groundwork.
+The repository is ready for `0.5.0` implementation work: Swift VP8 decode-only
+subscribe groundwork.

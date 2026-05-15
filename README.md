@@ -12,7 +12,7 @@ profile.
 
 Detailed project status is tracked in [docs/STATUS.md](docs/STATUS.md).
 
-The `0.3.0` developer-preview scope is complete. The package contains the
+The `0.4.0` developer-preview scope is complete. The package contains the
 SwiftPM layout, single public `LiveKitNative` product, public API surface,
 actor-backed room state, signaling URL builder, CI workflow, privacy manifest,
 DocC landing page, and tests for the pieces that already have behavior.
@@ -33,9 +33,15 @@ assembly, native camera track scaffolding, VideoToolbox H.264 encoder
 configuration, H.264 publish RTP packetization, LiveKit `AddTrackRequest`
 construction, local video publication state, and mock transport tests.
 
-The active implementation focus is now `0.4.0`: Swift Opus audio
-publish/subscribe groundwork. Data channels, reconnect, and quality controls
-follow in later milestones.
+The audio groundwork now includes native microphone track scaffolding,
+AVAudioEngine capture and playout adapters, Opus voice profile defaults, Opus
+TOC parsing, Opus RTP packetization/depacketization, subscribe-side packet loss
+accounting, LiveKit `AddTrackRequest` construction for microphone publishes,
+and local audio publication state.
+
+The active implementation focus is now `0.5.0`: Swift VP8 decode-only
+subscribe groundwork. Data channels, reconnect, and quality controls follow in
+later milestones.
 
 ## Requirements
 
@@ -48,13 +54,13 @@ follow in later milestones.
 
 ```swift
 .package(
-    url: "https://github.com/marlonjd/livekit-native-swift.git",
+    url: "https://github.com/MarlonJD/livekit-webrtc-native-swift.git",
     from: "1.0.0"
 )
 ```
 
 ```swift
-.product(name: "LiveKitNative", package: "livekit-native-swift")
+.product(name: "LiveKitNative", package: "livekit-webrtc-native-swift")
 ```
 
 ## Usage Shape

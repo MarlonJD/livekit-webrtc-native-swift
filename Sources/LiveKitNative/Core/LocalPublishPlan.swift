@@ -88,7 +88,53 @@ struct LocalVideoPublishPlan: Equatable, Sendable {
     }
 }
 
-private extension TrackSource {
+struct LocalAudioPublishPlan: Equatable, Sendable {
+    var cid: String
+    var name: String
+    var source: TrackSource
+    var sampleRate: Int
+    var channelCount: Int
+    var frameDurationMilliseconds: Int
+    var codec: RTPCodec
+    var ssrc: UInt32
+    var payloadType: UInt8
+
+    init(
+        track: LocalAudioTrack,
+        options: TrackPublishOptions = .init(),
+        ssrc: UInt32 = UInt32.random(in: 1 ... UInt32.max),
+        payloadType: UInt8 = 111
+    ) {
+        let captureOptions = track.audioCaptureOptions ?? AudioCaptureOptions()
+        self.cid = track.id
+        self.name = options.name ?? track.name
+        self.source = options.source ?? track.source
+        self.sampleRate = max(1, captureOptions.sampleRate)
+        self.channelCount = max(1, captureOptions.channelCount)
+        self.frameDurationMilliseconds = max(1, captureOptions.frameDurationMilliseconds)
+        self.codec = .opus
+        self.ssrc = ssrc
+        self.payloadType = payloadType
+    }
+
+    var packetizer: OpusRTPPacketizer {
+        OpusRTPPacketizer(payloadType: payloadType, ssrc: ssrc)
+    }
+
+    var addTrackRequest: Livekit_AddTrackRequest {
+        var request = Livekit_AddTrackRequest()
+        request.cid = cid
+        request.name = name
+        request.type = .audio
+        request.source = source.protocolTrackSource
+        request.stereo = channelCount > 1
+        request.disableDtx = false
+        request.disableRed = true
+        return request
+    }
+}
+
+extension TrackSource {
     var protocolTrackSource: Livekit_TrackSource {
         switch self {
         case .camera:

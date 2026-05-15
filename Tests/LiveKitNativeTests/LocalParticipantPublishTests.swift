@@ -35,6 +35,39 @@ final class LocalParticipantPublishTests: XCTestCase {
         XCTAssertEqual(participant.trackPublications.count, 0)
     }
 
+    func testPublishAudioTrackCreatesLocalPublication() async throws {
+        let participant = LocalParticipant(identity: "me")
+        let track = try LocalAudioTrack.createTrack(
+            options: AudioCaptureOptions(sampleRate: 48_000, channelCount: 1, frameDurationMilliseconds: 20)
+        )
+
+        let publication = try await participant.publish(
+            audioTrack: track,
+            options: TrackPublishOptions(name: "mic-main", source: .microphone)
+        )
+
+        XCTAssertEqual(publication.sid, track.id)
+        XCTAssertEqual(publication.name, "mic-main")
+        XCTAssertEqual(publication.kind, .audio)
+        XCTAssertEqual(publication.source, .microphone)
+        XCTAssertEqual(publication.track as? LocalAudioTrack, track)
+        XCTAssertEqual(participant.trackPublications, [publication])
+    }
+
+    func testSetMicrophoneEnabledIsIdempotentAndDisableRemovesPublication() async throws {
+        let participant = LocalParticipant(identity: "me")
+
+        try await participant.setMicrophone(enabled: true)
+        try await participant.setMicrophone(enabled: true)
+
+        XCTAssertEqual(participant.trackPublications.count, 1)
+        XCTAssertEqual(participant.trackPublications.first?.source, .microphone)
+
+        try await participant.setMicrophone(enabled: false)
+
+        XCTAssertEqual(participant.trackPublications.count, 0)
+    }
+
     func testUnpublishRemovesLocalPublication() async throws {
         let participant = LocalParticipant(identity: "me")
         let track = try LocalVideoTrack.createCameraTrack()

@@ -122,8 +122,46 @@ public final class LocalVideoTrack: VideoTrack, @unchecked Sendable {
 }
 
 public final class LocalAudioTrack: AudioTrack, @unchecked Sendable {
+    let audioCaptureOptions: AudioCaptureOptions?
+    let nativeMicrophoneSource: NativeMicrophoneAudioSource?
+
+    public override init(
+        id: String = UUID().uuidString,
+        sid: String? = nil,
+        name: String,
+        source: TrackSource = .microphone
+    ) {
+        self.audioCaptureOptions = nil
+        self.nativeMicrophoneSource = nil
+        super.init(id: id, sid: sid, name: name, source: source)
+    }
+
+    init(
+        id: String = UUID().uuidString,
+        sid: String? = nil,
+        name: String,
+        source: TrackSource = .microphone,
+        audioCaptureOptions: AudioCaptureOptions? = nil,
+        nativeMicrophoneSource: NativeMicrophoneAudioSource? = nil
+    ) {
+        self.audioCaptureOptions = audioCaptureOptions
+        self.nativeMicrophoneSource = nativeMicrophoneSource
+        super.init(id: id, sid: sid, name: name, source: source)
+    }
+
     public static func createTrack(options: AudioCaptureOptions = .init()) throws -> LocalAudioTrack {
-        LocalAudioTrack(name: "microphone", source: .microphone)
+        let nativeConfiguration = NativeMicrophoneCaptureConfiguration(
+            echoCancellation: options.echoCancellation,
+            sampleRate: options.sampleRate,
+            channelCount: options.channelCount,
+            frameDurationMilliseconds: options.frameDurationMilliseconds
+        )
+        return LocalAudioTrack(
+            name: "microphone",
+            source: .microphone,
+            audioCaptureOptions: options,
+            nativeMicrophoneSource: NativeMicrophoneAudioSource(configuration: nativeConfiguration)
+        )
     }
 }
 

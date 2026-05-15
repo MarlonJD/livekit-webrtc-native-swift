@@ -57,9 +57,20 @@ public enum CameraPosition: String, Equatable, Sendable {
 
 public struct AudioCaptureOptions: Equatable, Sendable {
     public var echoCancellation: Bool
+    public var sampleRate: Int
+    public var channelCount: Int
+    public var frameDurationMilliseconds: Int
 
-    public init(echoCancellation: Bool = true) {
+    public init(
+        echoCancellation: Bool = true,
+        sampleRate: Int = 48_000,
+        channelCount: Int = 1,
+        frameDurationMilliseconds: Int = 20
+    ) {
         self.echoCancellation = echoCancellation
+        self.sampleRate = sampleRate
+        self.channelCount = channelCount
+        self.frameDurationMilliseconds = frameDurationMilliseconds
     }
 }
 

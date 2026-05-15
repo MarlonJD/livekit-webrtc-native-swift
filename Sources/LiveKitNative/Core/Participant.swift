@@ -83,7 +83,22 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
     }
 
     public func setMicrophone(enabled: Bool, options: AudioCaptureOptions = .init()) async throws {
-        throw LiveKitNativeError.notImplemented("Microphone capture")
+        if enabled {
+            let hasMicrophonePublication = publicationLock.withLock {
+                localTrackPublications.values.contains { $0.source == .microphone }
+            }
+
+            guard !hasMicrophonePublication else {
+                return
+            }
+
+            let track = try LocalAudioTrack.createTrack(options: options)
+            _ = try await publish(audioTrack: track, options: TrackPublishOptions(source: .microphone))
+        } else {
+            publicationLock.withLock {
+                localTrackPublications = localTrackPublications.filter { $0.value.source != .microphone }
+            }
+        }
     }
 
     public func publish(videoTrack: LocalVideoTrack, options: TrackPublishOptions = .init()) async throws -> LocalTrackPublication {
@@ -104,7 +119,20 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
     }
 
     public func publish(audioTrack: LocalAudioTrack, options: TrackPublishOptions = .init()) async throws -> LocalTrackPublication {
-        throw LiveKitNativeError.notImplemented("Audio publishing")
+        let plan = LocalAudioPublishPlan(track: audioTrack, options: options)
+        let publication = LocalTrackPublication(
+            sid: plan.cid,
+            name: plan.name,
+            kind: .audio,
+            source: plan.source,
+            track: audioTrack
+        )
+
+        publicationLock.withLock {
+            localTrackPublications[publication.sid] = publication
+        }
+
+        return publication
     }
 
     public func unpublish(publication: LocalTrackPublication) async throws {

@@ -17,8 +17,12 @@ Milestone 0.2 adds ICE/STUN groundwork, subscriber trickle handling, DTLS
 fingerprint material, candidate checklist state, and subscribe-side H.264 RTP
 assembly. Milestone 0.3 adds native camera track scaffolding, VideoToolbox
 H.264 encoder configuration, H.264 publish RTP packetization, LiveKit
-`AddTrackRequest` construction, and local camera publication state. Active work
-has moved to 0.4 audio.
+`AddTrackRequest` construction, and local camera publication state. Milestone
+0.4 adds native microphone track scaffolding, Opus voice profile defaults, Opus
+RTP packetization/depacketization, audio playout scaffolding, LiveKit
+`AddTrackRequest` construction for microphone publishes, and local microphone
+publication state. Active work has moved to 0.5 VP8 decode-only subscribe
+groundwork.
 
 ## Topics
 
