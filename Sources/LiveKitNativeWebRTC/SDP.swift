@@ -95,8 +95,26 @@ package struct SDPSessionDescription: Equatable, Sendable {
         }
     }
 
+    package var iceCredentials: ICECredentials? {
+        guard
+            let usernameFragment = firstAttributeValue(prefix: "ice-ufrag:"),
+            let password = firstAttributeValue(prefix: "ice-pwd:")
+        else {
+            return nil
+        }
+
+        return ICECredentials(usernameFragment: usernameFragment, password: password)
+    }
+
     package func serialized() -> String {
         lines.map(\.serialized).joined(separator: "\r\n") + "\r\n"
+    }
+
+    private func firstAttributeValue(prefix: String) -> String? {
+        lines.first { line in
+            line.field == "a" && line.value.hasPrefix(prefix)
+        }
+        .map { String($0.value.dropFirst(prefix.count)) }
     }
 
     private static func mediaSections(from lines: [SDPLine]) -> [SDPMediaSection] {

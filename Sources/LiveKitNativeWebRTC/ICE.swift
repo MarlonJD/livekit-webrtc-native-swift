@@ -196,6 +196,19 @@ package enum ICECandidatePairState: String, Equatable, Sendable {
     case failed
 }
 
+package enum ICEAgentState: String, Equatable, Sendable {
+    case new
+    case checking
+    case connected
+    case failed
+    case closed
+}
+
+package enum ICEPairNominationPolicy: String, Equatable, Sendable {
+    case validateOnly
+    case nominateFirstSuccessful
+}
+
 package struct ICECandidateChecklist: Equatable, Sendable {
     package private(set) var localCandidates: [ICECandidate]
     package private(set) var remoteCandidates: [ICECandidate]
@@ -235,6 +248,16 @@ package struct ICECandidateChecklist: Equatable, Sendable {
         updatePair(localFoundation: localFoundation, remoteFoundation: remoteFoundation) {
             $0.state = .succeeded
             $0.nominated = nominated
+        }
+    }
+
+    package mutating func nominateSucceededPair(localFoundation: String, remoteFoundation: String) {
+        updatePair(localFoundation: localFoundation, remoteFoundation: remoteFoundation) {
+            guard $0.state == .succeeded else {
+                return
+            }
+
+            $0.nominated = true
         }
     }
 
@@ -479,6 +502,212 @@ package struct ICEConnectivityCheckResult: Equatable, Sendable {
     }
 }
 
+package struct ICEAgentConfiguration: Equatable, Sendable {
+    package var localCredentials: ICECredentials
+    package var remoteCredentials: ICECredentials
+    package var role: ICEAgentRole
+    package var tieBreaker: UInt64
+    package var nominationPolicy: ICEPairNominationPolicy
+    package var retryPolicy: STUNBindingRetryPolicy
+    package var requireResponseMessageIntegrity: Bool
+    package var requireResponseFingerprint: Bool
+
+    package init(
+        localCredentials: ICECredentials,
+        remoteCredentials: ICECredentials,
+        role: ICEAgentRole,
+        tieBreaker: UInt64,
+        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        retryPolicy: STUNBindingRetryPolicy = .connectivityCheck,
+        requireResponseMessageIntegrity: Bool = false,
+        requireResponseFingerprint: Bool = false
+    ) {
+        self.localCredentials = localCredentials
+        self.remoteCredentials = remoteCredentials
+        self.role = role
+        self.tieBreaker = tieBreaker
+        self.nominationPolicy = nominationPolicy
+        self.retryPolicy = retryPolicy
+        self.requireResponseMessageIntegrity = requireResponseMessageIntegrity
+        self.requireResponseFingerprint = requireResponseFingerprint
+    }
+}
+
+package struct ICEAgentCheckSummary: Equatable, Sendable {
+    package var state: ICEAgentState
+    package var checkedPairCount: Int
+    package var failedPairCount: Int
+    package var selectedPair: ICECandidatePair?
+
+    package init(
+        state: ICEAgentState,
+        checkedPairCount: Int,
+        failedPairCount: Int,
+        selectedPair: ICECandidatePair?
+    ) {
+        self.state = state
+        self.checkedPairCount = checkedPairCount
+        self.failedPairCount = failedPairCount
+        self.selectedPair = selectedPair
+    }
+}
+
+package protocol ICEConnectivityChecking: Sendable {
+    func checkCandidatePair(
+        _ pair: ICECandidatePair,
+        configuration: ICEAgentConfiguration,
+        nominate: Bool
+    ) throws -> ICEConnectivityCheckResult
+}
+
+package struct STUNICEConnectivityChecker: ICEConnectivityChecking {
+    package var makeTransport: @Sendable (ICECandidatePair) throws -> any STUNDatagramTransport
+
+    package init(
+        makeTransport: @escaping @Sendable (ICECandidatePair) throws -> any STUNDatagramTransport = { pair in
+            STUNUDPSocketTransport(host: pair.remote.address, port: pair.remote.port)
+        }
+    ) {
+        self.makeTransport = makeTransport
+    }
+
+    package func checkCandidatePair(
+        _ pair: ICECandidatePair,
+        configuration: ICEAgentConfiguration,
+        nominate: Bool
+    ) throws -> ICEConnectivityCheckResult {
+        let client = STUNBindingClient(transport: try makeTransport(pair))
+        return try client.requestServerReflexiveAddress(
+            localCredentials: configuration.localCredentials,
+            remoteCredentials: configuration.remoteCredentials,
+            priority: pair.local.priority,
+            role: configuration.role,
+            tieBreaker: configuration.tieBreaker,
+            useCandidate: nominate,
+            requireResponseMessageIntegrity: configuration.requireResponseMessageIntegrity,
+            requireResponseFingerprint: configuration.requireResponseFingerprint,
+            retryPolicy: configuration.retryPolicy
+        )
+    }
+}
+
+package actor ICEAgent {
+    package private(set) var state: ICEAgentState
+    package private(set) var checklist: ICECandidateChecklist
+
+    private let configuration: ICEAgentConfiguration
+    private let checker: any ICEConnectivityChecking
+
+    package init(
+        localCandidates: [ICECandidate],
+        remoteCandidates: [ICECandidate],
+        configuration: ICEAgentConfiguration,
+        checker: any ICEConnectivityChecking = STUNICEConnectivityChecker()
+    ) {
+        self.state = .new
+        self.checklist = ICECandidateChecklist(
+            localCandidates: localCandidates,
+            remoteCandidates: remoteCandidates,
+            isControlling: configuration.role == .controlling
+        )
+        self.configuration = configuration
+        self.checker = checker
+    }
+
+    package var selectedCandidatePair: ICECandidatePair? {
+        checklist.nominatedPair
+    }
+
+    package func addLocalCandidate(_ candidate: ICECandidate) {
+        checklist.addLocalCandidate(candidate, isControlling: configuration.role == .controlling)
+    }
+
+    package func addRemoteCandidate(_ candidate: ICECandidate) {
+        checklist.addRemoteCandidate(candidate, isControlling: configuration.role == .controlling)
+    }
+
+    package func nominateSucceededPair(localFoundation: String, remoteFoundation: String) {
+        checklist.nominateSucceededPair(localFoundation: localFoundation, remoteFoundation: remoteFoundation)
+        if checklist.nominatedPair != nil {
+            state = .connected
+        }
+    }
+
+    package func close() {
+        state = .closed
+    }
+
+    @discardableResult
+    package func performConnectivityChecks(maxPairs: Int? = nil) async -> ICEAgentCheckSummary {
+        guard state != .closed else {
+            return summary(checkedPairCount: 0, failedPairCount: 0)
+        }
+
+        checklist.unfreezeInitialPairs()
+
+        guard !checklist.pairs.isEmpty else {
+            state = .failed
+            return summary(checkedPairCount: 0, failedPairCount: 0)
+        }
+
+        state = .checking
+        let checkLimit = maxPairs ?? Int.max
+        var checkedPairCount = 0
+        var failedPairCount = 0
+
+        while checkedPairCount < checkLimit, let pair = checklist.nextWaitingPair {
+            checklist.markInProgress(
+                localFoundation: pair.local.foundation,
+                remoteFoundation: pair.remote.foundation
+            )
+            checkedPairCount += 1
+
+            do {
+                let shouldNominate = configuration.nominationPolicy == .nominateFirstSuccessful
+                _ = try checker.checkCandidatePair(pair, configuration: configuration, nominate: shouldNominate)
+                checklist.markSucceeded(
+                    localFoundation: pair.local.foundation,
+                    remoteFoundation: pair.remote.foundation,
+                    nominated: shouldNominate
+                )
+
+                if shouldNominate {
+                    state = .connected
+                    return summary(checkedPairCount: checkedPairCount, failedPairCount: failedPairCount)
+                }
+            } catch {
+                failedPairCount += 1
+                checklist.markFailed(
+                    localFoundation: pair.local.foundation,
+                    remoteFoundation: pair.remote.foundation
+                )
+            }
+        }
+
+        if checklist.nominatedPair != nil {
+            state = .connected
+        } else if configuration.nominationPolicy == .validateOnly,
+                  checklist.pairs.contains(where: { $0.state == .succeeded }) {
+            state = .checking
+        } else if checklist.pairs.contains(where: { $0.state == .waiting }) {
+            state = .checking
+        } else {
+            state = .failed
+        }
+
+        return summary(checkedPairCount: checkedPairCount, failedPairCount: failedPairCount)
+    }
+
+    private func summary(checkedPairCount: Int, failedPairCount: Int) -> ICEAgentCheckSummary {
+        ICEAgentCheckSummary(
+            state: state,
+            checkedPairCount: checkedPairCount,
+            failedPairCount: failedPairCount,
+            selectedPair: checklist.nominatedPair
+        )
+    }
+}
+
 package enum ICEConnectivityCheckError: Error, Equatable, Sendable {
     case transactionMismatch
     case unexpectedResponseType(UInt16)
@@ -516,6 +745,7 @@ package struct STUNBindingClient: Sendable {
         role: ICEAgentRole,
         tieBreaker: UInt64,
         transactionID: STUNTransactionID = .random(),
+        useCandidate: Bool = false,
         requireResponseMessageIntegrity: Bool = false,
         requireResponseFingerprint: Bool = false,
         retryPolicy: STUNBindingRetryPolicy = .connectivityCheck
@@ -526,6 +756,7 @@ package struct STUNBindingClient: Sendable {
             priority: priority,
             role: role,
             tieBreaker: tieBreaker,
+            useCandidate: useCandidate,
             transactionID: transactionID
         )
         let requestData = try request.encoded(

@@ -227,6 +227,7 @@ package enum PeerConnectionState: String, Equatable, Sendable {
 package enum PeerConnectionNegotiationError: Error, Equatable, Sendable {
     case subscriberAnswerRequestedForPublisher
     case publisherAnswerAppliedToSubscriber
+    case missingRemoteICECredentials
 }
 
 package struct RemoteSessionDescription: Equatable, Sendable {
@@ -249,6 +250,7 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
     private var mutableRemoteICECandidates: [RemoteICECandidate] = []
     private var mutableRemoteICEGatheringComplete = false
     private var mutableRemoteAnswer: RemoteSessionDescription?
+    private var mutableRemoteICECredentials: ICECredentials?
 
     package init(configuration: NativeWebRTCConfiguration) {
         self.configuration = configuration
@@ -274,6 +276,12 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         remoteDescriptionLock.lock()
         defer { remoteDescriptionLock.unlock() }
         return mutableRemoteAnswer
+    }
+
+    package var remoteICECredentials: ICECredentials? {
+        remoteDescriptionLock.lock()
+        defer { remoteDescriptionLock.unlock() }
+        return mutableRemoteICECredentials
     }
 
     package var localCapabilities: [SDPCodecCapability] {
@@ -326,9 +334,39 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         )
     }
 
+    package func makeICEAgent(
+        localCandidates: [ICECandidate],
+        role: ICEAgentRole,
+        tieBreaker: UInt64,
+        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        checker: any ICEConnectivityChecking = STUNICEConnectivityChecker()
+    ) throws -> ICEAgent {
+        guard let remoteICECredentials else {
+            throw PeerConnectionNegotiationError.missingRemoteICECredentials
+        }
+
+        return ICEAgent(
+            localCandidates: localCandidates,
+            remoteCandidates: parsedRemoteICECandidates,
+            configuration: ICEAgentConfiguration(
+                localCredentials: configuration.iceCredentials,
+                remoteCredentials: remoteICECredentials,
+                role: role,
+                tieBreaker: tieBreaker,
+                nominationPolicy: nominationPolicy
+            ),
+            checker: checker
+        )
+    }
+
     package func makeSubscriberAnswer(for offerSDP: String) throws -> String {
         guard configuration.role == .subscriber else {
             throw PeerConnectionNegotiationError.subscriberAnswerRequestedForPublisher
+        }
+
+        let offer = try SDPSessionDescription(parsing: offerSDP)
+        if let credentials = offer.iceCredentials {
+            setRemoteICECredentials(credentials)
         }
 
         return try SubscriberSDPAnswerFactory(
@@ -343,9 +381,18 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
             throw PeerConnectionNegotiationError.publisherAnswerAppliedToSubscriber
         }
 
+        let answer = try SDPSessionDescription(parsing: sdp)
+
         remoteDescriptionLock.lock()
         defer { remoteDescriptionLock.unlock() }
+        mutableRemoteICECredentials = answer.iceCredentials
         mutableRemoteAnswer = RemoteSessionDescription(type: type, sdp: sdp, id: id)
         state = .connected
+    }
+
+    private func setRemoteICECredentials(_ credentials: ICECredentials) {
+        remoteDescriptionLock.lock()
+        defer { remoteDescriptionLock.unlock() }
+        mutableRemoteICECredentials = credentials
     }
 }

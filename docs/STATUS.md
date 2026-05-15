@@ -11,8 +11,9 @@ client.
 Production readiness is intentionally represented in code through
 `LiveKitNative.productionReadiness` and `LiveKitNative.assertProductionReady()`.
 The current status is `developerPreview`, with explicit blockers for DTLS-SRTP,
-TURN/ICE hardening, live media transport integration, DTLS-backed SCTP,
-media recovery during reconnect, and end-to-end LiveKit compatibility testing.
+completed DTLS exporter binding, TURN/ICE hardening, live media transport
+integration, DTLS-backed SCTP, media recovery during reconnect, and end-to-end
+LiveKit compatibility testing.
 Publisher `AddTrackRequest` signaling is now wired for local audio/video
 publishes, publisher answers and publisher-targeted trickle candidates are
 routed into the publisher peer connection adapter, but publisher offer
@@ -219,10 +220,17 @@ The old binary WebRTC dependency path has been removed from the package model.
   - candidate pair priority calculation
   - candidate pair checklist state and nomination tracking
   - SDP `candidate:` attribute parsing into typed ICE candidates
+  - SDP `ice-ufrag` / `ice-pwd` extraction into typed remote ICE credentials
   - trickled remote ICE candidates are exposed as parsed candidates on the peer
     connection coordinator
   - candidate checklists can accept dynamically trickled local and remote
     candidates while maintaining priority order
+  - peer connection coordinator can build an `ICEAgent` from local candidates,
+    parsed remote trickle candidates, local ICE credentials, and remote SDP
+    ICE credentials
+  - `ICEAgent` actor can unfreeze prioritized candidate pairs, run bounded
+    STUN connectivity checks, mark failed pairs, nominate the first successful
+    pair, expose the selected pair, and support validate-only nomination handoff
   - basic SDP candidate attribute serialization
   - connectivity-check Binding request construction with ICE username,
     priority, role, and use-candidate attributes
@@ -264,8 +272,10 @@ The old binary WebRTC dependency path has been removed from the package model.
     transport boundary
   - nominated ICE-pair guarded construction for secure RTP/RTCP datagram
     transport
+  - UDP media datagram socket transport for IPv4 RTP-component candidate pairs,
+    including loopback send/receive coverage
   - explicit boundary before full DTLS `use_srtp` handshake, live SRTP key
-    export, live ICE agent nomination, and UDP socket binding
+    export, and peer-connection media binding
 - RTP basics:
   - RTP v2 header encode/decode
   - marker bit, payload type, sequence number, timestamp, SSRC, and payload
@@ -345,20 +355,20 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 186 tests passed
+  - 196 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
 - `xcodebuild docbuild`
   - passes with warnings from the third-party SwiftProtobuf DocC content
 - Release-mode benchmark smoke:
-  - `swift run -c release LiveKitNativeBenchmarks --samples 300 --warmup 30 --ops-per-sample 100`
+  - `swift run -c release LiveKitNativeBenchmarks`
   - official SDK/WebRTC baseline is intentionally external and not yet measured
 - Release gates:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,225,898 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,248,931 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -386,8 +396,10 @@ The following checks passed after the latest implementation pass:
 
 ### ICE and Networking
 
-- Full ICE agent orchestration against a LiveKit server.
-- Full connectivity-check scheduling, pacing, timeout, and nomination policy.
+- Binding the `ICEAgent` into subscriber/publisher peer connection startup
+  against a real LiveKit server.
+- Full connectivity-check pacing, timeout, triggered checks, and role-conflict
+  handling.
 - Consent freshness.
 - TURN UDP, TCP, or TLS behavior.
 
@@ -396,8 +408,8 @@ The following checks passed after the latest implementation pass:
 - DTLS 1.2 handshake.
 - `use_srtp` negotiation.
 - Invoking the real DTLS exporter from a completed handshake.
-- Binding the secure RTP/RTCP datagram transport to live ICE agent nomination,
-  UDP socket transport, and completed DTLS exporter output.
+- Binding the secure RTP/RTCP datagram transport to ICE-selected candidate
+  pairs and completed DTLS exporter output.
 - Wiring RTCP feedback/report packets into live media transport.
 - TWCC, REMB, or congestion control.
 - Jitter buffer.

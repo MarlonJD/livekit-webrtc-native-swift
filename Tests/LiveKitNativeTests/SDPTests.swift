@@ -39,6 +39,24 @@ final class SDPTests: XCTestCase {
         XCTAssertEqual(description.serialized(), "v=0\r\ns=-\r\nt=0 0\r\n")
     }
 
+    func testExtractsSessionLevelICECredentials() throws {
+        let description = try SDPSessionDescription(parsing: """
+        v=0
+        o=- 1 1 IN IP4 127.0.0.1
+        s=-
+        t=0 0
+        a=ice-ufrag:remote-ufrag
+        a=ice-pwd:remote-password
+        m=audio 9 UDP/TLS/RTP/SAVPF 111
+        a=mid:0
+        """)
+
+        XCTAssertEqual(
+            description.iceCredentials,
+            ICECredentials(usernameFragment: "remote-ufrag", password: "remote-password")
+        )
+    }
+
     func testRejectsMalformedLines() {
         XCTAssertThrowsError(try SDPSessionDescription(parsing: "v=0\nthis-is-not-valid\n")) { error in
             XCTAssertEqual(error as? SDPParseError, .malformedLine("this-is-not-valid"))

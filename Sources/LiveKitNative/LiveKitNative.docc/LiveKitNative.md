@@ -17,7 +17,9 @@ Milestone 0.2 adds ICE/STUN groundwork, subscriber trickle handling, STUN
 `MESSAGE-INTEGRITY`/`FINGERPRINT` signing and validation, authenticated
 connectivity-check request sending and response validation, bounded STUN
 transport retries, DTLS fingerprint material, SDP ICE candidate parsing,
-dynamic trickle candidate checklists, and subscribe-side H.264 RTP assembly.
+dynamic trickle candidate checklists, SDP ICE credential extraction,
+coordinator-created ICE agents, use-candidate nomination, and subscribe-side
+H.264 RTP assembly.
 Milestone 0.3 adds native camera track scaffolding, VideoToolbox
 H.264 encoder configuration, H.264 publish RTP packetization, LiveKit
 `AddTrackRequest` construction, and local camera publication state. Milestone
@@ -39,8 +41,9 @@ client/server DTLS-SRTP packet-protection context wiring, SRTP replay-window
 and ROC-aware authentication groundwork, SRTP AES-CM payload
 encryption/decryption groundwork, full SRTP/SRTCP packet protect/unprotect APIs
 with replay rejection, secure RTP/RTCP datagram send/receive wiring,
-nominated ICE-pair guarded transport construction, plus RTCP report/feedback
-packet groundwork.
+nominated ICE-pair guarded transport construction, UDP media datagram socket
+transport, ICE agent connectivity-check orchestration, plus RTCP
+report/feedback packet groundwork.
 Basic signal
 resume/full-reconnect and alternative signal URL retry are implemented at
 unit-test level. Speaker, connection quality,
@@ -54,7 +57,8 @@ publish/unpublish requests now wait for matching server responses. Room-connecte
 `publish(videoTrack:)` and `publish(audioTrack:)` now send LiveKit
 `AddTrackRequest` messages and wait for matching `TrackPublishedResponse`
 acknowledgements, while publisher offer generation, live ICE/DTLS media
-transport, and reconnect media recovery remain part of production hardening.
+transport binding, and reconnect media recovery remain part of production
+hardening.
 
 Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the

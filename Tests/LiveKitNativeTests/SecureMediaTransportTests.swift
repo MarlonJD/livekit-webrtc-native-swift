@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import LiveKitNativeWebRTC
 
@@ -177,11 +178,102 @@ final class SecureMediaTransportTests: XCTestCase {
         }
     }
 
+    func testUDPMediaDatagramTransportSendsLoopbackDatagram() async throws {
+        let clientPort = try availableUDPPort()
+        let serverPort = try availableUDPPort()
+        let client = try UDPMediaDatagramTransport(
+            localCandidate: loopbackCandidate(foundation: "client", port: clientPort),
+            remoteCandidate: loopbackCandidate(foundation: "server", port: serverPort),
+            receiveTimeoutMilliseconds: 250
+        )
+        let server = try UDPMediaDatagramTransport(
+            localCandidate: loopbackCandidate(foundation: "server", port: serverPort),
+            remoteCandidate: loopbackCandidate(foundation: "client", port: clientPort),
+            receiveTimeoutMilliseconds: 250
+        )
+        let datagram = Data([0x01, 0x02, 0x03])
+
+        try await client.send(datagram)
+        let received = try await server.receive()
+
+        XCTAssertEqual(received, datagram)
+    }
+
+    func testUDPMediaDatagramTransportRejectsInvalidAddress() {
+        XCTAssertThrowsError(
+            try UDPMediaDatagramTransport(
+                localCandidate: loopbackCandidate(foundation: "local", address: "not-an-ip", port: 0),
+                remoteCandidate: loopbackCandidate(foundation: "remote", port: 9)
+            )
+        ) { error in
+            XCTAssertEqual(error as? SecureMediaTransportError, .unsupportedCandidateAddress("not-an-ip"))
+        }
+    }
+
+    func testUDPMediaDatagramTransportRejectsUnnominatedPairBeforeOpeningSocket() {
+        XCTAssertThrowsError(
+            try UDPMediaDatagramTransport(
+                selectedCandidatePair: candidatePair(state: .succeeded, nominated: false)
+            )
+        ) { error in
+            XCTAssertEqual(error as? SecureMediaTransportError, .candidatePairNotNominated)
+        }
+    }
+
     private func packetProtectionContext(role: DTLSSRTPRole) throws -> DTLSSRTPPacketProtectionContext {
         try DTLSSRTPPacketProtectionContext(
             keyMaterial: keyMaterial(),
             role: role
         )
+    }
+
+    private func loopbackCandidate(foundation: String, address: String = "127.0.0.1", port: UInt16) -> ICECandidate {
+        ICECandidate(
+            foundation: foundation,
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: address,
+            port: port,
+            type: .host
+        )
+    }
+
+    private func availableUDPPort() throws -> UInt16 {
+        let descriptor = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        guard descriptor >= 0 else {
+            throw SecureMediaTransportError.socketCreationFailed(errno)
+        }
+        defer { Darwin.close(descriptor) }
+
+        var address = sockaddr_in(
+            sin_len: UInt8(MemoryLayout<sockaddr_in>.size),
+            sin_family: sa_family_t(AF_INET),
+            sin_port: 0,
+            sin_addr: in_addr(s_addr: inet_addr("127.0.0.1")),
+            sin_zero: (0, 0, 0, 0, 0, 0, 0, 0)
+        )
+        let bindResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.bind(descriptor, socketAddress, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else {
+            throw SecureMediaTransportError.socketBindFailed(errno)
+        }
+
+        var boundAddress = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.getsockname(descriptor, socketAddress, &length)
+            }
+        }
+        guard nameResult == 0 else {
+            throw SecureMediaTransportError.socketBindFailed(errno)
+        }
+
+        return UInt16(bigEndian: boundAddress.sin_port)
     }
 
     private func keyMaterial() throws -> DTLSSRTPKeyMaterial {

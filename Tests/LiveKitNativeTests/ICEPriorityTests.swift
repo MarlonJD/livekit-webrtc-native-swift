@@ -414,6 +414,192 @@ final class ICEPriorityTests: XCTestCase {
         }
         XCTAssertEqual(recorder.attemptCount, 2)
     }
+
+    func testSTUNConnectivityCheckerSendsUseCandidateWhenNominating() throws {
+        let local = iceCandidate(foundation: "local", address: "192.0.2.10", port: 50_000)
+        let remote = iceCandidate(
+            foundation: "remote",
+            type: .serverReflexive,
+            localPreference: 100,
+            address: "203.0.113.10",
+            port: 60_000
+        )
+        let pair = ICECandidatePair(local: local, remote: remote, isControlling: true)
+        let transactionID = try STUNTransactionID(bytes: Array(repeating: 10, count: 12))
+        let checker = STUNICEConnectivityChecker { _ in
+            FakeSTUNDatagramTransport { requestData in
+                let request = try STUNMessage(decoding: requestData)
+
+                XCTAssertNotNil(request.firstAttribute(.useCandidate))
+                XCTAssertEqual(try request.firstAttribute(.username)?.stringValue, "remote:local")
+
+                let response = STUNMessage(
+                    type: .bindingSuccessResponse,
+                    transactionID: request.transactionID,
+                    attributes: [
+                        try .xorMappedAddressIPv4(
+                            address: "203.0.113.44",
+                            port: 54_321,
+                            transactionID: request.transactionID
+                        ),
+                    ]
+                )
+                return try response.encoded()
+            }
+        }
+
+        let result = try checker.checkCandidatePair(
+            pair,
+            configuration: iceAgentConfiguration(transactionIDSeed: transactionID.bytes.first ?? 10),
+            nominate: true
+        )
+
+        XCTAssertEqual(result.mappedAddress, STUNMappedAddress(address: "203.0.113.44", port: 54_321))
+    }
+
+    func testICEAgentNominatesFirstSuccessfulCandidatePair() async throws {
+        let local = iceCandidate(foundation: "local", address: "192.0.2.10", port: 50_000)
+        let remoteBad = iceCandidate(
+            foundation: "remote-bad",
+            type: .serverReflexive,
+            localPreference: 65_535,
+            address: "203.0.113.10",
+            port: 60_000
+        )
+        let remoteGood = iceCandidate(
+            foundation: "remote-good",
+            type: .relayed,
+            localPreference: 100,
+            address: "203.0.113.20",
+            port: 60_001
+        )
+        let successfulResult = try iceConnectivityResult(address: "203.0.113.99", port: 40_000)
+        let checker = FakeICEConnectivityChecker { pair, nominate in
+            XCTAssertTrue(nominate)
+            if pair.remote.foundation == "remote-good" {
+                return successfulResult
+            }
+
+            throw ICEConnectivityCheckError.missingMappedAddress
+        }
+        let agent = ICEAgent(
+            localCandidates: [local],
+            remoteCandidates: [remoteGood, remoteBad],
+            configuration: iceAgentConfiguration(),
+            checker: checker
+        )
+
+        let summary = await agent.performConnectivityChecks()
+        let selected = await agent.selectedCandidatePair
+        let state = await agent.state
+
+        XCTAssertEqual(summary.state, .connected)
+        XCTAssertEqual(summary.checkedPairCount, 2)
+        XCTAssertEqual(summary.failedPairCount, 1)
+        XCTAssertEqual(selected?.remote.foundation, "remote-good")
+        XCTAssertEqual(state, .connected)
+        XCTAssertEqual(checker.checkedPairs.map { $0.remote.foundation }, ["remote-bad", "remote-good"])
+    }
+
+    func testICEAgentAddsTrickledRemoteCandidateBeforeChecks() async throws {
+        let local = iceCandidate(foundation: "local", address: "192.0.2.10", port: 50_000)
+        let remote = iceCandidate(
+            foundation: "remote",
+            type: .serverReflexive,
+            localPreference: 100,
+            address: "203.0.113.10",
+            port: 60_000
+        )
+        let successfulResult = try iceConnectivityResult(address: "203.0.113.55", port: 40_001)
+        let checker = FakeICEConnectivityChecker { _, _ in successfulResult }
+        let agent = ICEAgent(
+            localCandidates: [local],
+            remoteCandidates: [],
+            configuration: iceAgentConfiguration(),
+            checker: checker
+        )
+
+        await agent.addRemoteCandidate(remote)
+        let summary = await agent.performConnectivityChecks()
+        let selected = await agent.selectedCandidatePair
+
+        XCTAssertEqual(summary.state, .connected)
+        XCTAssertEqual(summary.checkedPairCount, 1)
+        XCTAssertEqual(selected?.remote.foundation, "remote")
+    }
+
+    func testICEAgentValidateOnlyCanBeNominatedAfterSuccessfulCheck() async throws {
+        let local = iceCandidate(foundation: "local", address: "192.0.2.10", port: 50_000)
+        let remote = iceCandidate(
+            foundation: "remote",
+            type: .serverReflexive,
+            localPreference: 100,
+            address: "203.0.113.10",
+            port: 60_000
+        )
+        let successfulResult = try iceConnectivityResult(address: "203.0.113.56", port: 40_002)
+        let checker = FakeICEConnectivityChecker { _, nominate in
+            XCTAssertFalse(nominate)
+            return successfulResult
+        }
+        let agent = ICEAgent(
+            localCandidates: [local],
+            remoteCandidates: [remote],
+            configuration: iceAgentConfiguration(nominationPolicy: .validateOnly),
+            checker: checker
+        )
+
+        let summary = await agent.performConnectivityChecks()
+        XCTAssertEqual(summary.state, .checking)
+        XCTAssertNil(summary.selectedPair)
+
+        await agent.nominateSucceededPair(localFoundation: "local", remoteFoundation: "remote")
+        let selected = await agent.selectedCandidatePair
+        let state = await agent.state
+
+        XCTAssertEqual(selected?.remote.foundation, "remote")
+        XCTAssertEqual(state, .connected)
+    }
+
+    private func iceCandidate(
+        foundation: String,
+        type: ICECandidateType = .host,
+        localPreference: UInt16 = 65_535,
+        address: String,
+        port: UInt16
+    ) -> ICECandidate {
+        ICECandidate(
+            foundation: foundation,
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: type, localPreference: localPreference).value,
+            address: address,
+            port: port,
+            type: type
+        )
+    }
+
+    private func iceAgentConfiguration(
+        transactionIDSeed: UInt8 = 11,
+        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful
+    ) -> ICEAgentConfiguration {
+        ICEAgentConfiguration(
+            localCredentials: ICECredentials(usernameFragment: "local", password: "local-password"),
+            remoteCredentials: ICECredentials(usernameFragment: "remote", password: "remote-password"),
+            role: .controlling,
+            tieBreaker: UInt64(transactionIDSeed),
+            nominationPolicy: nominationPolicy,
+            retryPolicy: .once
+        )
+    }
+
+    private func iceConnectivityResult(address: String, port: UInt16) throws -> ICEConnectivityCheckResult {
+        let transactionID = try STUNTransactionID(bytes: Array(repeating: 12, count: 12))
+        return ICEConnectivityCheckResult(
+            mappedAddress: STUNMappedAddress(address: address, port: port),
+            response: STUNMessage(type: .bindingSuccessResponse, transactionID: transactionID)
+        )
+    }
 }
 
 private struct FakeSTUNDatagramTransport: STUNDatagramTransport {
@@ -439,5 +625,33 @@ private final class RetryRecorder: @unchecked Sendable {
         defer { lock.unlock() }
         attempts += 1
         return attempts
+    }
+}
+
+private final class FakeICEConnectivityChecker: ICEConnectivityChecking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var mutableCheckedPairs: [ICECandidatePair] = []
+    private let handler: @Sendable (ICECandidatePair, Bool) throws -> ICEConnectivityCheckResult
+
+    var checkedPairs: [ICECandidatePair] {
+        lock.lock()
+        defer { lock.unlock() }
+        return mutableCheckedPairs
+    }
+
+    init(handler: @escaping @Sendable (ICECandidatePair, Bool) throws -> ICEConnectivityCheckResult) {
+        self.handler = handler
+    }
+
+    func checkCandidatePair(
+        _ pair: ICECandidatePair,
+        configuration: ICEAgentConfiguration,
+        nominate: Bool
+    ) throws -> ICEConnectivityCheckResult {
+        lock.lock()
+        mutableCheckedPairs.append(pair)
+        lock.unlock()
+
+        return try handler(pair, nominate)
     }
 }
