@@ -81,4 +81,78 @@ final class STUNTests: XCTestCase {
             XCTAssertEqual(error as? STUNError, .invalidAddressAttribute)
         }
     }
+
+    func testValidatesRFC5769SampleRequestIntegrityAndFingerprint() throws {
+        let encoded = Data(hexString: """
+        00 01 00 58 21 12 a4 42 b7 e7 a7 01 bc 34 d6 86
+        fa 87 df ae 80 22 00 10 53 54 55 4e 20 74 65 73
+        74 20 63 6c 69 65 6e 74 00 24 00 04 6e 00 01 ff
+        80 29 00 08 93 2f f9 b1 51 26 3b 36 00 06 00 09
+        65 76 74 6a 3a 68 36 76 59 20 20 20 00 08 00 14
+        9a ea a7 0c bf d8 cb 56 78 1e f2 b5 b2 d3 f2 49
+        c1 b5 71 a2 80 28 00 04 e5 7a 3b cf
+        """)
+        let message = try STUNMessage(decoding: encoded)
+
+        XCTAssertTrue(try message.validatesMessageIntegrity(key: "VOkJxbRl1RmTxUk/WvJxBt"))
+        XCTAssertTrue(try message.validatesFingerprint())
+    }
+
+    func testSignedEncodingAppendsMessageIntegrityAndFingerprint() throws {
+        let transactionID = try STUNTransactionID(bytes: Array(repeating: 8, count: 12))
+        let message = STUNMessage(
+            type: .bindingRequest,
+            transactionID: transactionID,
+            attributes: [
+                .username("remote:local"),
+                .priority(1_864_403_327),
+                .useCandidate,
+            ]
+        )
+
+        let encoded = try message.encoded(
+            messageIntegrityKey: "shared-secret",
+            includeFingerprint: true
+        )
+        let decoded = try STUNMessage(decoding: encoded)
+
+        XCTAssertEqual(decoded.firstAttribute(.messageIntegrity)?.value.count, 20)
+        XCTAssertEqual(decoded.firstAttribute(.fingerprint)?.value.count, 4)
+        XCTAssertTrue(try decoded.validatesMessageIntegrity(key: "shared-secret"))
+        XCTAssertTrue(try decoded.validatesFingerprint())
+    }
+
+    func testDetectsTamperedMessageIntegrityAndFingerprint() throws {
+        let message = STUNMessage(
+            type: .bindingRequest,
+            transactionID: try STUNTransactionID(bytes: Array(repeating: 3, count: 12)),
+            attributes: [.username("remote:local")]
+        )
+        var encoded = try message.encoded(
+            messageIntegrityKey: "shared-secret",
+            includeFingerprint: true
+        )
+        encoded[24] ^= 0x01
+        let decoded = try STUNMessage(decoding: encoded)
+
+        XCTAssertFalse(try decoded.validatesMessageIntegrity(key: "shared-secret"))
+        XCTAssertFalse(try decoded.validatesFingerprint())
+    }
+}
+
+private extension Data {
+    init(hexString: String) {
+        let hexDigits = hexString.filter { !$0.isWhitespace }
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(hexDigits.count / 2)
+
+        var index = hexDigits.startIndex
+        while index < hexDigits.endIndex {
+            let nextIndex = hexDigits.index(index, offsetBy: 2)
+            bytes.append(UInt8(hexDigits[index..<nextIndex], radix: 16)!)
+            index = nextIndex
+        }
+
+        self.init(bytes)
+    }
 }

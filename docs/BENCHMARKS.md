@@ -17,6 +17,14 @@ package:
 - Subscriber SDP answer generation
 - STUN Binding message encode/decode
 - RTP packet encode/decode
+- SRTP replay-protector sequence tracking
+- SRTP auth-tag framing and validation
+- SRTP AES-CM payload encrypt/decrypt
+- SRTP packet protect/unprotect, including authentication and replay rejection
+- RTCP PLI/NACK feedback encode/decode
+- SRTCP packet framing, AES-CM payload encrypt/decrypt, auth-tag validation,
+  packet protect/unprotect, and replay-protector tracking
+- DTLS-SRTP exporter key/salt splitting
 - H.264 RTP packetization/depacketization
 - VP8 RTP payload depacketization
 - Opus-over-RTP packetization/depacketization scaffolding
@@ -24,8 +32,10 @@ package:
 
 These are microbenchmarks, not end-to-end media benchmarks. They do not claim
 that the SDK is production-ready, and they do not measure full ICE, DTLS-SRTP,
-SRTP, jitter buffering, VideoToolbox decode/render, Opus codec quality, or
-LiveKit server compatibility. Those remain production blockers.
+full SRTP/SRTCP KDF with live DTLS exporter output, live packet protection
+wiring into media transport, jitter buffering, VideoToolbox decode/render, Opus
+codec quality, or LiveKit server compatibility. Those remain production
+blockers.
 
 ## Running
 
@@ -75,7 +85,7 @@ swift run -c release LiveKitNativeBenchmarks --samples 300 --warmup 30 --ops-per
 
 Environment:
 
-- Generated: `2026-05-15T01:08:43Z`
+- Generated: `2026-05-15T12:37:04Z`
 - OS: `Version 26.3.1 (a) (Build 25D771280a)`
 - Architecture: `arm64`
 - Build mode: SwiftPM release
@@ -84,14 +94,23 @@ Lower median and p95 values are better. `ops/sec` is derived from the median.
 
 | Benchmark | Category | Implementation | Samples | Ops/sample | Median us/op | P95 us/op | Ops/sec |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `signal.protobuf_roundtrip` | signaling | LiveKitNative | 300 | 100 | 6.159 | 7.285 | 162370.611 |
-| `sdp.subscriber_answer` | signaling | LiveKitNative | 300 | 20 | 106.156 | 119.588 | 9420.077 |
-| `stun.binding_roundtrip` | ice | LiveKitNative | 300 | 200 | 1.806 | 2.246 | 553760.449 |
-| `rtp.packet_encode_decode` | rtp | LiveKitNative | 300 | 500 | 0.589 | 0.771 | 1696830.660 |
-| `h264.packetize_depacketize` | video | LiveKitNative | 300 | 50 | 2.513 | 2.793 | 398009.950 |
-| `vp8.payload_depacketize` | video | LiveKitNative | 300 | 500 | 0.149 | 0.161 | 6718985.164 |
-| `opus.rtp_packetize_depacketize` | audio | LiveKitNative | 300 | 500 | 0.026 | 0.028 | 38217534.205 |
-| `sctp.dcep_open_ack_roundtrip` | data | LiveKitNative | 300 | 500 | 0.818 | 1.007 | 1222990.260 |
+| `signal.protobuf_roundtrip` | signaling | LiveKitNative | 300 | 100 | 6.541 | 8.059 | 152875.979 |
+| `sdp.subscriber_answer` | signaling | LiveKitNative | 300 | 20 | 106.275 | 120.667 | 9409.551 |
+| `stun.binding_roundtrip` | ice | LiveKitNative | 300 | 200 | 1.847 | 2.154 | 541271.989 |
+| `rtp.packet_encode_decode` | rtp | LiveKitNative | 300 | 500 | 0.595 | 0.689 | 1681146.946 |
+| `srtp.replay_protector` | security | LiveKitNative | 300 | 500 | 0.046 | 0.056 | 21582423.274 |
+| `srtp.authenticated_roundtrip` | security | LiveKitNative | 300 | 200 | 8.876 | 12.453 | 112660.189 |
+| `srtp.aes_cm_payload_roundtrip` | security | LiveKitNative | 300 | 100 | 68.147 | 98.413 | 14674.233 |
+| `srtp.packet_protect_unprotect` | security | LiveKitNative | 300 | 100 | 74.986 | 87.946 | 13335.778 |
+| `rtcp.feedback_roundtrip` | rtcp | LiveKitNative | 300 | 500 | 1.795 | 2.136 | 557206.124 |
+| `srtcp.packet_replay_roundtrip` | security | LiveKitNative | 300 | 500 | 0.797 | 0.927 | 1253918.495 |
+| `srtcp.authenticated_roundtrip` | security | LiveKitNative | 300 | 200 | 7.228 | 8.731 | 138352.485 |
+| `srtcp.packet_protect_unprotect` | security | LiveKitNative | 300 | 200 | 9.589 | 10.751 | 104288.880 |
+| `dtls_srtp.exporter_split` | security | LiveKitNative | 300 | 500 | 0.321 | 0.372 | 3117692.907 |
+| `h264.packetize_depacketize` | video | LiveKitNative | 300 | 50 | 2.466 | 3.081 | 405541.317 |
+| `vp8.payload_depacketize` | video | LiveKitNative | 300 | 500 | 0.150 | 0.187 | 6666666.667 |
+| `opus.rtp_packetize_depacketize` | audio | LiveKitNative | 300 | 500 | 0.026 | 0.034 | 38095238.095 |
+| `sctp.dcep_open_ack_roundtrip` | data | LiveKitNative | 300 | 500 | 0.822 | 1.014 | 1216175.129 |
 
 ## Official SDK/WebRTC Comparison
 

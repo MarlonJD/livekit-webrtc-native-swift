@@ -24,11 +24,27 @@ abstraction, ping/close lifecycle hooks, a `SignalConnection` actor,
 `Room.connect` JoinResponse handling, remote track publication state updates,
 participant disconnect and track-unpublish reducers, a post-join signal receive
 loop for participant updates, refresh tokens, leave messages, subscriber offers,
-subscriber trickle candidates, SDP parsing/writing, minimal subscriber answer
-generation, STUN packet encode/decode, STUN `XOR-MAPPED-ADDRESS` handling, ICE
-priority helpers, host candidate construction, UDP STUN transport,
-connectivity-check request/response handling, candidate checklist nomination,
-DTLS fingerprint material, RTP packet encode/decode, H.264
+subscriber and publisher trickle candidates, publisher answer routing, speaker
+updates, connection quality events, stream state events, room updates,
+subscription permission/response events, subscribed quality events,
+track-subscribed events, media section requirements, subscribed audio codec
+updates, data-track publish/unpublish responses, data-track subscriber handle
+updates, room-moved events, SDP parsing/writing, minimal subscriber answer
+generation, STUN packet encode/decode, STUN
+`XOR-MAPPED-ADDRESS` handling, RFC-vector-tested STUN `MESSAGE-INTEGRITY` and
+`FINGERPRINT` signing/validation, authenticated ICE connectivity-check request
+sending and authenticated response validation, ICE priority helpers, host
+candidate construction, UDP STUN transport, connectivity-check
+request/response handling with bounded transport retries, candidate checklist
+nomination, DTLS fingerprint material, DTLS-SRTP protection profile and
+exporter key/salt splitting, RTP packet encode/decode, RTP sequence rollover
+tracking, SRTP replay-window protection groundwork, SRTP AES-CM payload
+encryption/decryption using RFC 3711 IV construction, SRTP authentication-tag
+framing with ROC-aware HMAC-SHA1 validation, full SRTP packet
+protect/unprotect APIs with replay rejection, SRTCP AES-CM payload protection,
+SRTCP index/authentication-tag framing, HMAC-SHA1 auth-tag validation, full
+SRTCP packet protect/unprotect APIs with replay rejection, RTCP
+sender/receiver report and PLI/NACK feedback wire-format groundwork, H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
 assembly, native camera track scaffolding, VideoToolbox H.264 encoder
 configuration, H.264 publish RTP packetization, LiveKit `AddTrackRequest`
@@ -50,7 +66,7 @@ Data channel groundwork now includes WebRTC DCEP open/ack encode/decode,
 reliable/lossy LiveKit data-channel labels, SCTP stream routing for local data
 channels, binary PPID envelopes, LiveKit `DataPacket` user-packet mapping,
 `publish(data:options:)` local publish planning, data-track publish/unpublish
-request scaffolds, data subscription update scaffolds, and
+request/response signaling, data subscription update signaling, and
 `RoomEvent.dataReceived` mapping for decoded packets.
 
 The active implementation focus is now `1.0.0` hardening: reconnect, TURN,
@@ -68,7 +84,9 @@ resume/full-reconnect and `JoinResponse.alternative_url` retry are unit-tested,
 and room-connected `publish(videoTrack:)` / `publish(audioTrack:)` calls send
 LiveKit `AddTrackRequest` messages and wait for matching
 `TrackPublishedResponse` acknowledgements before recording local publications.
-Publisher SDP/media transport, media recovery, and end-to-end reconnect
+Publisher answer routing, data-track control event mapping, and data-track
+publish/unpublish request flows are unit-tested, while publisher offer
+generation, media transport, media recovery, and end-to-end reconnect
 hardening are still open.
 
 ## Benchmarks
@@ -79,12 +97,20 @@ Release-mode microbenchmarks are available through:
 swift run -c release LiveKitNativeBenchmarks
 ```
 
-The current local run measures low-level signaling, SDP, STUN, RTP, H.264, VP8,
-Opus RTP scaffolding, and SCTP data-channel message paths. On this machine,
-sample medians include protobuf signal roundtrip at `6.159 us/op`, subscriber
-SDP answer generation at `106.156 us/op`, RTP encode/decode at `0.589 us/op`,
-H.264 packetize/depacketize at `2.513 us/op`, and SCTP DCEP open/ack roundtrip
-at `0.818 us/op`.
+The current local run measures low-level signaling, SDP, STUN, RTP, SRTP/SRTCP
+replay/authentication tracking, SRTP/SRTCP AES-CM payload protection, full
+SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting, RTCP
+feedback, H.264, VP8, Opus RTP scaffolding, and SCTP data-channel message
+paths. On this machine, sample medians include protobuf signal roundtrip at
+`6.541 us/op`, subscriber SDP answer generation at `106.275 us/op`, RTP
+encode/decode at `0.595 us/op`, SRTP replay protection at `0.046 us/op`, SRTP
+authenticated roundtrip at `8.876 us/op`, SRTP AES-CM payload roundtrip at
+`68.147 us/op`, full SRTP packet protect/unprotect at `74.986 us/op`, RTCP
+feedback roundtrip at `1.795 us/op`, SRTCP packet/replay roundtrip at
+`0.797 us/op`, SRTCP authenticated roundtrip at `7.228 us/op`, full SRTCP
+packet protect/unprotect at `9.589 us/op`, DTLS-SRTP exporter split at
+`0.321 us/op`, H.264 packetize/depacketize at `2.466 us/op`, and SCTP DCEP
+open/ack roundtrip at `0.822 us/op`.
 
 Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
 CSV so this package does not reintroduce the forbidden binary WebRTC dependency.

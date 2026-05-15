@@ -231,6 +231,38 @@ public final class Room: @unchecked Sendable {
         case let .streamStateUpdate(streamStateUpdate):
             emit(.streamStateChanged(streamStateUpdate.streamStates.map { TrackStreamStateInfo(streamStateInfo: $0) }))
             return true
+        case let .roomUpdate(roomUpdate):
+            emit(.roomUpdated(RoomUpdateInfo(room: roomUpdate.room)))
+            return true
+        case let .subscribedQualityUpdate(subscribedQualityUpdate):
+            emit(.subscribedQualityChanged(SubscribedQualityUpdateInfo(update: subscribedQualityUpdate)))
+            return true
+        case let .subscribedAudioCodecUpdate(subscribedAudioCodecUpdate):
+            emit(.subscribedAudioCodecChanged(SubscribedAudioCodecUpdateInfo(update: subscribedAudioCodecUpdate)))
+            return true
+        case let .subscriptionPermissionUpdate(subscriptionPermissionUpdate):
+            emit(.subscriptionPermissionChanged(SubscriptionPermissionUpdateInfo(update: subscriptionPermissionUpdate)))
+            return true
+        case let .subscriptionResponse(subscriptionResponse):
+            emit(.subscriptionResponded(SubscriptionResponseInfo(response: subscriptionResponse)))
+            return true
+        case let .trackSubscribed(trackSubscribed):
+            emit(.trackSubscribed(TrackSubscribedInfo(trackSID: trackSubscribed.trackSid)))
+            return true
+        case let .mediaSectionsRequirement(requirement):
+            emit(.mediaSectionsRequirementChanged(MediaSectionsRequirementInfo(requirement: requirement)))
+            return true
+        case let .publishDataTrackResponse(response):
+            await requestTracker.fulfill(response)
+            emit(.dataTrackPublished(DataTrackInfo(info: response.info)))
+            return true
+        case let .unpublishDataTrackResponse(response):
+            await requestTracker.fulfill(response)
+            emit(.dataTrackUnpublished(DataTrackInfo(info: response.info)))
+            return true
+        case let .dataTrackSubscriberHandles(handles):
+            emit(.dataTrackSubscriberHandlesChanged(DataTrackSubscriberHandlesInfo(handles: handles)))
+            return true
         case let .roomMoved(roomMoved):
             await applyRoomMoved(roomMoved)
             return true
@@ -263,11 +295,17 @@ public final class Room: @unchecked Sendable {
     }
 
     private func handleTrickle(_ trickle: Livekit_TrickleRequest) throws {
-        guard trickle.target == .subscriber else {
+        let peerConnection: PeerConnectionCoordinator
+        switch trickle.target {
+        case .publisher:
+            peerConnection = publisherPeerConnection
+        case .subscriber:
+            peerConnection = subscriberPeerConnection
+        case .UNRECOGNIZED:
             return
         }
 
-        try subscriberPeerConnection.addRemoteICECandidate(
+        try peerConnection.addRemoteICECandidate(
             candidateInitJSON: trickle.candidateInit,
             isFinal: trickle.final
         )
@@ -371,6 +409,24 @@ public final class Room: @unchecked Sendable {
                         throw LiveKitNativeError.notConnected
                     }
                     throw LiveKitNativeError.notImplemented("DTLS-backed SCTP data transport")
+                },
+                publishDataTrack: { [weak self] plan in
+                    guard let self else {
+                        throw LiveKitNativeError.notConnected
+                    }
+                    return try await self.sendPublishDataTrack(plan)
+                },
+                unpublishDataTrack: { [weak self] plan in
+                    guard let self else {
+                        throw LiveKitNativeError.notConnected
+                    }
+                    return try await self.sendUnpublishDataTrack(plan)
+                },
+                updateDataSubscription: { [weak self] plan in
+                    guard let self else {
+                        throw LiveKitNativeError.notConnected
+                    }
+                    try await self.sendUpdateDataSubscription(plan)
                 }
             )
         )
@@ -420,6 +476,41 @@ public final class Room: @unchecked Sendable {
         try await signalConnection.send(request)
         let response = try await requestTracker.waitForResponse(requestID: requestID, action: action)
         try validateRequestResponse(response, action: action)
+    }
+
+    private func sendPublishDataTrack(_ plan: LocalDataTrackPublishPlan) async throws -> DataTrackInfo {
+        let action = "publish data track"
+        var request = Livekit_SignalRequest()
+        request.publishDataTrackRequest = plan.publishRequest
+
+        try await signalConnection.send(request)
+        let response = try await requestTracker.waitForPublishDataTrack(
+            publisherHandle: plan.pubHandle,
+            action: action
+        )
+        return DataTrackInfo(info: response.info)
+    }
+
+    private func sendUnpublishDataTrack(_ plan: LocalDataTrackPublishPlan) async throws -> DataTrackInfo {
+        let action = "unpublish data track"
+        var request = Livekit_SignalRequest()
+        request.unpublishDataTrackRequest = plan.unpublishRequest
+
+        try await signalConnection.send(request)
+        let response = try await requestTracker.waitForUnpublishDataTrack(
+            publisherHandle: plan.pubHandle,
+            action: action
+        )
+        return DataTrackInfo(info: response.info)
+    }
+
+    private func sendUpdateDataSubscription(_ plan: DataSubscriptionUpdatePlan) async throws {
+        var update = Livekit_UpdateDataSubscription()
+        update.updates = [plan.update]
+
+        var request = Livekit_SignalRequest()
+        request.updateDataSubscription = update
+        try await signalConnection.send(request)
     }
 
     private func validateRequestResponse(_ response: Livekit_RequestResponse, action: String) throws {
@@ -585,6 +676,28 @@ private extension SpeakerInfo {
     }
 }
 
+private extension RoomUpdateInfo {
+    init(room: Livekit_Room) {
+        self.init(
+            sid: room.sid,
+            name: room.name,
+            metadata: room.metadata,
+            participantCount: room.numParticipants,
+            publisherCount: room.numPublishers,
+            isRecording: room.activeRecording
+        )
+    }
+}
+
+private extension MediaSectionsRequirementInfo {
+    init(requirement: Livekit_MediaSectionsRequirement) {
+        self.init(
+            audioCount: requirement.numAudios,
+            videoCount: requirement.numVideos
+        )
+    }
+}
+
 private extension ConnectionQualityInfo {
     init(qualityInfo: Livekit_ConnectionQualityInfo) {
         self.init(
@@ -632,6 +745,153 @@ private extension TrackStreamState {
         case let .UNRECOGNIZED(rawValue):
             self = .unknown(rawValue)
         }
+    }
+}
+
+private extension SubscribedQualityUpdateInfo {
+    init(update: Livekit_SubscribedQualityUpdate) {
+        self.init(
+            trackSID: update.trackSid,
+            qualities: update.subscribedQualities.map { SubscribedQualityInfo(quality: $0) },
+            codecs: update.subscribedCodecs.map { SubscribedCodecInfo(codec: $0) }
+        )
+    }
+}
+
+private extension SubscribedCodecInfo {
+    init(codec: Livekit_SubscribedCodec) {
+        self.init(
+            codec: codec.codec,
+            qualities: codec.qualities.map { SubscribedQualityInfo(quality: $0) }
+        )
+    }
+}
+
+private extension SubscribedQualityInfo {
+    init(quality: Livekit_SubscribedQuality) {
+        self.init(
+            quality: VideoQuality(protocolQuality: quality.quality),
+            isEnabled: quality.enabled
+        )
+    }
+}
+
+private extension VideoQuality {
+    init(protocolQuality: Livekit_VideoQuality) {
+        switch protocolQuality {
+        case .low:
+            self = .low
+        case .medium:
+            self = .medium
+        case .high:
+            self = .high
+        case .off:
+            self = .off
+        case let .UNRECOGNIZED(rawValue):
+            self = .unknown(rawValue)
+        }
+    }
+}
+
+private extension SubscribedAudioCodecUpdateInfo {
+    init(update: Livekit_SubscribedAudioCodecUpdate) {
+        self.init(
+            trackSID: update.trackSid,
+            codecs: update.subscribedAudioCodecs.map { SubscribedAudioCodecInfo(codec: $0) }
+        )
+    }
+}
+
+private extension SubscribedAudioCodecInfo {
+    init(codec: Livekit_SubscribedAudioCodec) {
+        self.init(
+            codec: codec.codec,
+            isEnabled: codec.enabled
+        )
+    }
+}
+
+private extension SubscriptionPermissionUpdateInfo {
+    init(update: Livekit_SubscriptionPermissionUpdate) {
+        self.init(
+            participantSID: update.participantSid,
+            trackSID: update.trackSid,
+            isAllowed: update.allowed
+        )
+    }
+}
+
+private extension SubscriptionResponseInfo {
+    init(response: Livekit_SubscriptionResponse) {
+        self.init(
+            trackSID: response.trackSid,
+            error: SubscriptionError(protocolError: response.err)
+        )
+    }
+}
+
+private extension SubscriptionError {
+    init(protocolError: Livekit_SubscriptionError) {
+        switch protocolError {
+        case .seUnknown:
+            self = .unknown
+        case .seCodecUnsupported:
+            self = .codecUnsupported
+        case .seTrackNotfound:
+            self = .trackNotFound
+        case let .UNRECOGNIZED(rawValue):
+            self = .unrecognized(rawValue)
+        }
+    }
+}
+
+private extension DataTrackInfo {
+    init(info: Livekit_DataTrackInfo) {
+        self.init(
+            publisherHandle: info.pubHandle,
+            sid: info.sid,
+            name: info.name,
+            encryption: DataTrackEncryption(protocolEncryption: info.encryption)
+        )
+    }
+}
+
+private extension DataTrackEncryption {
+    init(protocolEncryption: Livekit_Encryption.TypeEnum) {
+        switch protocolEncryption {
+        case .none:
+            self = .none
+        case .gcm:
+            self = .gcm
+        case .custom:
+            self = .custom
+        case let .UNRECOGNIZED(rawValue):
+            self = .unknown(rawValue)
+        }
+    }
+}
+
+private extension DataTrackSubscriberHandlesInfo {
+    init(handles: Livekit_DataTrackSubscriberHandles) {
+        self.init(
+            handles: handles.subHandles
+                .map { DataTrackSubscriberHandleInfo(handle: $0.key, publishedTrack: $0.value) }
+                .sorted { $0.subscriberHandle < $1.subscriberHandle }
+        )
+    }
+}
+
+private extension DataTrackSubscriberHandleInfo {
+    init(
+        handle: UInt32,
+        publishedTrack: Livekit_DataTrackSubscriberHandles.PublishedDataTrack
+    ) {
+        self.init(
+            subscriberHandle: handle,
+            publisherIdentity: publishedTrack.publisherIdentity,
+            publisherSID: publishedTrack.publisherSid,
+            trackSID: publishedTrack.trackSid
+        )
     }
 }
 

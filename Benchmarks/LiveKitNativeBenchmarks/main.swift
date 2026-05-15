@@ -353,6 +353,41 @@ func makeBenchmarks(blackhole: BenchmarkBlackhole) throws -> [BenchmarkCase] {
         ssrc: 7,
         payload: rtpPayload
     )
+    var srtpReplayProtector = SRTPReplayProtector()
+    var srtpReplaySequenceNumber: UInt16 = 0
+    var srtpAuthenticationSequenceNumber: UInt16 = 0
+    let srtpAuthenticator = try SRTPAuthenticator(authenticationKey: Data("benchmark-srtp-auth-key".utf8))
+    var srtpAESSequenceNumber: UInt16 = 0
+    let srtpAESCipher = try SRTPAESCounterModeCipher(
+        sessionEncryptionKey: Data((0..<16).map(UInt8.init)),
+        sessionSalt: Data((0..<14).map { UInt8($0 + 16) })
+    )
+    var srtpProtectionSequenceNumber: UInt16 = 0
+    let srtpPacketProtector = SRTPPacketProtector(
+        cipher: srtpAESCipher,
+        authenticator: srtpAuthenticator
+    )
+    var srtcpReplayProtector = SRTCPReplayProtector()
+    var srtcpReplayIndex: UInt32 = 0
+    var srtcpAuthenticationIndex: UInt32 = 0
+    let dtlsSRTPExporterMaterial = Data((0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init))
+    let rtcpNACK = RTCPPacket.transportLayerNACK(
+        RTCPTransportLayerNACK(
+            senderSSRC: 0x0102_0304,
+            mediaSSRC: 0x0506_0708,
+            lostPacketIDs: [100, 101, 103, 120]
+        )
+    )
+    let rtcpPLI = RTCPPacket.pictureLossIndication(
+        RTCPPictureLossIndication(senderSSRC: 0x0102_0304, mediaSSRC: 0x0506_0708)
+    )
+    let srtcpAuthenticationTag = Data(repeating: 0xCD, count: SRTCPPacket.defaultAuthenticationTagLength)
+    let srtcpAuthenticator = try SRTCPAuthenticator(authenticationKey: Data("benchmark-srtcp-auth-key".utf8))
+    let srtcpPacketProtector = SRTCPPacketProtector(
+        cipher: SRTCPAESCounterModeCipher(cipher: srtpAESCipher),
+        authenticator: srtcpAuthenticator
+    )
+    var srtcpProtectionIndex: UInt32 = 0
 
     var h264NALUnit = Data([0x65])
     h264NALUnit.append(Data(repeating: 0x11, count: 3_000))
@@ -401,6 +436,94 @@ func makeBenchmarks(blackhole: BenchmarkBlackhole) throws -> [BenchmarkCase] {
             let encoded = rtpPacket.encoded()
             let decoded = try RTPPacket(decoding: encoded)
             blackhole.consume(decoded.payload.count + encoded.count)
+        },
+        BenchmarkCase(name: "srtp.replay_protector", category: "security", operationsPerSample: 500) {
+            srtpReplaySequenceNumber &+= 1
+            if srtpReplayProtector.accept(ssrc: 7, sequenceNumber: srtpReplaySequenceNumber),
+               let highest = srtpReplayProtector.highestAcceptedIndex(for: 7) {
+                blackhole.consume(highest)
+            }
+        },
+        BenchmarkCase(name: "srtp.authenticated_roundtrip", category: "security", operationsPerSample: 200) {
+            srtpAuthenticationSequenceNumber &+= 1
+            var packet = rtpPacket
+            packet.sequenceNumber = srtpAuthenticationSequenceNumber
+            let rolloverCounter = UInt32(srtpAuthenticationSequenceNumber == 0 ? 1 : 0)
+            let authenticated = try srtpAuthenticator.authenticate(packet, rolloverCounter: rolloverCounter)
+            let decoded = try SRTPProtectedPacket(decoding: authenticated.encoded(), rolloverCounter: rolloverCounter)
+            try srtpAuthenticator.validate(decoded)
+            blackhole.consume(decoded.authenticationTag.count + Int(decoded.rtpPacket.sequenceNumber))
+        },
+        BenchmarkCase(name: "srtp.aes_cm_payload_roundtrip", category: "security", operationsPerSample: 100) {
+            srtpAESSequenceNumber &+= 1
+            var packet = rtpPacket
+            packet.sequenceNumber = srtpAESSequenceNumber
+            let rolloverCounter = UInt32(srtpAESSequenceNumber == 0 ? 1 : 0)
+            let encrypted = try srtpAESCipher.encrypt(packet, rolloverCounter: rolloverCounter)
+            let decrypted = try srtpAESCipher.decrypt(encrypted, rolloverCounter: rolloverCounter)
+            blackhole.consume(decrypted.payload.count + Int(decrypted.sequenceNumber))
+        },
+        BenchmarkCase(name: "srtp.packet_protect_unprotect", category: "security", operationsPerSample: 100) {
+            srtpProtectionSequenceNumber &+= 1
+            var packet = rtpPacket
+            packet.sequenceNumber = srtpProtectionSequenceNumber
+            let rolloverCounter = UInt32(srtpProtectionSequenceNumber == 0 ? 1 : 0)
+            let protected = try srtpPacketProtector.protect(packet, rolloverCounter: rolloverCounter)
+            let unprotected = try srtpPacketProtector.unprotect(protected)
+            blackhole.consume(unprotected.payload.count + protected.authenticationTag.count)
+        },
+        BenchmarkCase(name: "rtcp.feedback_roundtrip", category: "rtcp", operationsPerSample: 500) {
+            let nackEncoded = try rtcpNACK.encoded()
+            let pliEncoded = try rtcpPLI.encoded()
+            let nackDecoded = try RTCPPacket(decoding: nackEncoded)
+            let pliDecoded = try RTCPPacket(decoding: pliEncoded)
+            blackhole.consume(nackEncoded.count + pliEncoded.count)
+            if case let .transportLayerNACK(nack) = nackDecoded {
+                blackhole.consume(nack.lostPacketIDs.count)
+            }
+            if case let .pictureLossIndication(pli) = pliDecoded {
+                blackhole.consume(UInt64(pli.mediaSSRC))
+            }
+        },
+        BenchmarkCase(name: "srtcp.packet_replay_roundtrip", category: "security", operationsPerSample: 500) {
+            srtcpReplayIndex &+= 1
+            let packet = SRTCPPacket(
+                rtcpPacket: rtcpPLI,
+                index: try SRTCPIndex(value: srtcpReplayIndex),
+                authenticationTag: srtcpAuthenticationTag
+            )
+            let decoded = try SRTCPPacket(decoding: try packet.encoded())
+            if srtcpReplayProtector.accept(decoded),
+               let highest = srtcpReplayProtector.highestAcceptedIndex(for: decoded.senderSSRC) {
+                blackhole.consume(highest)
+            }
+        },
+        BenchmarkCase(name: "srtcp.authenticated_roundtrip", category: "security", operationsPerSample: 200) {
+            srtcpAuthenticationIndex &+= 1
+            let packet = SRTCPPacket(
+                rtcpPacket: rtcpPLI,
+                index: try SRTCPIndex(value: srtcpAuthenticationIndex)
+            )
+            let authenticated = try srtcpAuthenticator.authenticate(packet)
+            let decoded = try SRTCPPacket(decoding: try authenticated.encoded())
+            try srtcpAuthenticator.validate(decoded)
+            blackhole.consume(decoded.authenticationTag.count + Int(decoded.index.value & 0xFF))
+        },
+        BenchmarkCase(name: "srtcp.packet_protect_unprotect", category: "security", operationsPerSample: 200) {
+            srtcpProtectionIndex &+= 1
+            let packet = SRTCPPacket(
+                rtcpPacket: rtcpPLI,
+                index: try SRTCPIndex(value: srtcpProtectionIndex)
+            )
+            let protected = try srtcpPacketProtector.protect(packet)
+            let unprotected = try srtcpPacketProtector.unprotect(protected)
+            blackhole.consume(try unprotected.encoded().count + protected.authenticationTag.count)
+        },
+        BenchmarkCase(name: "dtls_srtp.exporter_split", category: "security", operationsPerSample: 500) {
+            let keyMaterial = try DTLSSRTPKeyMaterial(exportedKeyingMaterial: dtlsSRTPExporterMaterial)
+            let local = keyMaterial.localWriteMaterial(for: .client)
+            let remote = keyMaterial.remoteWriteMaterial(for: .client)
+            blackhole.consume(local.masterKey.count + local.masterSalt.count + remote.masterKey.count + remote.masterSalt.count)
         },
         BenchmarkCase(name: "h264.packetize_depacketize", category: "video", operationsPerSample: 50) {
             let packets = try h264Packetizer.packetize(

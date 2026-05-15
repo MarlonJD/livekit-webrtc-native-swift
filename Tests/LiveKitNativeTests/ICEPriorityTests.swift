@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import LiveKitNativeWebRTC
 
@@ -152,6 +153,175 @@ final class ICEPriorityTests: XCTestCase {
 
         XCTAssertEqual(result.mappedAddress, STUNMappedAddress(address: "203.0.113.5", port: 54_321))
     }
+
+    func testSTUNBindingClientSendsAuthenticatedRequestAndValidatesAuthenticatedResponse() throws {
+        let transactionID = try STUNTransactionID(bytes: Array(repeating: 5, count: 12))
+        let localCredentials = ICECredentials(usernameFragment: "local", password: "local-password")
+        let remoteCredentials = ICECredentials(usernameFragment: "remote", password: "remote-password")
+        let transport = FakeSTUNDatagramTransport { requestData in
+            let request = try STUNMessage(decoding: requestData)
+
+            XCTAssertEqual(try request.firstAttribute(.username)?.stringValue, "remote:local")
+            XCTAssertNotNil(request.firstAttribute(.messageIntegrity))
+            XCTAssertNotNil(request.firstAttribute(.fingerprint))
+            XCTAssertTrue(try request.validatesMessageIntegrity(key: "remote-password"))
+            XCTAssertTrue(try request.validatesFingerprint())
+
+            let response = STUNMessage(
+                type: .bindingSuccessResponse,
+                transactionID: request.transactionID,
+                attributes: [
+                    try .xorMappedAddressIPv4(address: "203.0.113.8", port: 12_345, transactionID: request.transactionID),
+                ]
+            )
+            return try response.encoded(
+                messageIntegrityKey: "remote-password",
+                includeFingerprint: true
+            )
+        }
+        let client = STUNBindingClient(transport: transport)
+        let result = try client.requestServerReflexiveAddress(
+            localCredentials: localCredentials,
+            remoteCredentials: remoteCredentials,
+            priority: 1_864_403_327,
+            role: .controlled,
+            tieBreaker: 0x0102_0304_0506_0708,
+            transactionID: transactionID,
+            requireResponseMessageIntegrity: true,
+            requireResponseFingerprint: true
+        )
+
+        XCTAssertEqual(result.mappedAddress, STUNMappedAddress(address: "203.0.113.8", port: 12_345))
+    }
+
+    func testSTUNBindingClientRejectsInvalidResponseFingerprint() throws {
+        let transactionID = try STUNTransactionID(bytes: Array(repeating: 6, count: 12))
+        let transport = FakeSTUNDatagramTransport { requestData in
+            let request = try STUNMessage(decoding: requestData)
+            let response = STUNMessage(
+                type: .bindingSuccessResponse,
+                transactionID: request.transactionID,
+                attributes: [
+                    try .xorMappedAddressIPv4(address: "203.0.113.9", port: 12_346, transactionID: request.transactionID),
+                ]
+            )
+            var encoded = try response.encoded(
+                messageIntegrityKey: "remote-password",
+                includeFingerprint: true
+            )
+            encoded[encoded.count - 1] ^= 0x01
+            return encoded
+        }
+        let client = STUNBindingClient(transport: transport)
+
+        XCTAssertThrowsError(
+            try client.requestServerReflexiveAddress(
+                localCredentials: ICECredentials(usernameFragment: "local", password: "local-password"),
+                remoteCredentials: ICECredentials(usernameFragment: "remote", password: "remote-password"),
+                priority: 1_864_403_327,
+                role: .controlled,
+                tieBreaker: 0x0102_0304_0506_0708,
+                transactionID: transactionID,
+                requireResponseMessageIntegrity: true,
+                requireResponseFingerprint: true
+            )
+        ) { error in
+            XCTAssertEqual(error as? ICEConnectivityCheckError, .invalidFingerprint)
+        }
+    }
+
+    func testSTUNBindingClientRejectsInvalidResponseMessageIntegrity() throws {
+        let transactionID = try STUNTransactionID(bytes: Array(repeating: 7, count: 12))
+        let transport = FakeSTUNDatagramTransport { requestData in
+            let request = try STUNMessage(decoding: requestData)
+            let response = STUNMessage(
+                type: .bindingSuccessResponse,
+                transactionID: request.transactionID,
+                attributes: [
+                    try .xorMappedAddressIPv4(address: "203.0.113.10", port: 12_347, transactionID: request.transactionID),
+                ]
+            )
+            return try response.encoded(
+                messageIntegrityKey: "wrong-password",
+                includeFingerprint: true
+            )
+        }
+        let client = STUNBindingClient(transport: transport)
+
+        XCTAssertThrowsError(
+            try client.requestServerReflexiveAddress(
+                localCredentials: ICECredentials(usernameFragment: "local", password: "local-password"),
+                remoteCredentials: ICECredentials(usernameFragment: "remote", password: "remote-password"),
+                priority: 1_864_403_327,
+                role: .controlled,
+                tieBreaker: 0x0102_0304_0506_0708,
+                transactionID: transactionID,
+                requireResponseMessageIntegrity: true,
+                requireResponseFingerprint: true
+            )
+        ) { error in
+            XCTAssertEqual(error as? ICEConnectivityCheckError, .invalidMessageIntegrity)
+        }
+    }
+
+    func testSTUNBindingClientRetriesTransportFailures() throws {
+        let transactionID = try STUNTransactionID(bytes: Array(repeating: 8, count: 12))
+        let recorder = RetryRecorder()
+        let transport = FakeSTUNDatagramTransport { requestData in
+            let attempt = recorder.nextAttempt()
+            if attempt < 3 {
+                throw ICEConnectivityCheckError.missingMappedAddress
+            }
+
+            let request = try STUNMessage(decoding: requestData)
+            let response = STUNMessage(
+                type: .bindingSuccessResponse,
+                transactionID: request.transactionID,
+                attributes: [
+                    try .xorMappedAddressIPv4(address: "203.0.113.11", port: 12_348, transactionID: request.transactionID),
+                ]
+            )
+            return try response.encoded()
+        }
+        let client = STUNBindingClient(transport: transport)
+        let result = try client.requestServerReflexiveAddress(
+            localCredentials: ICECredentials(usernameFragment: "local", password: "local-password"),
+            remoteCredentials: ICECredentials(usernameFragment: "remote", password: "remote-password"),
+            priority: 1_864_403_327,
+            role: .controlled,
+            tieBreaker: 0x0102_0304_0506_0708,
+            transactionID: transactionID,
+            retryPolicy: STUNBindingRetryPolicy(maxAttempts: 3)
+        )
+
+        XCTAssertEqual(result.mappedAddress, STUNMappedAddress(address: "203.0.113.11", port: 12_348))
+        XCTAssertEqual(recorder.attemptCount, 3)
+    }
+
+    func testSTUNBindingClientStopsAfterRetryPolicyMaxAttempts() throws {
+        let transactionID = try STUNTransactionID(bytes: Array(repeating: 9, count: 12))
+        let recorder = RetryRecorder()
+        let transport = FakeSTUNDatagramTransport { _ in
+            _ = recorder.nextAttempt()
+            throw ICEConnectivityCheckError.missingMappedAddress
+        }
+        let client = STUNBindingClient(transport: transport)
+
+        XCTAssertThrowsError(
+            try client.requestServerReflexiveAddress(
+                localCredentials: ICECredentials(usernameFragment: "local", password: "local-password"),
+                remoteCredentials: ICECredentials(usernameFragment: "remote", password: "remote-password"),
+                priority: 1_864_403_327,
+                role: .controlled,
+                tieBreaker: 0x0102_0304_0506_0708,
+                transactionID: transactionID,
+                retryPolicy: STUNBindingRetryPolicy(maxAttempts: 2)
+            )
+        ) { error in
+            XCTAssertEqual(error as? ICEConnectivityCheckError, .missingMappedAddress)
+        }
+        XCTAssertEqual(recorder.attemptCount, 2)
+    }
 }
 
 private struct FakeSTUNDatagramTransport: STUNDatagramTransport {
@@ -159,5 +329,23 @@ private struct FakeSTUNDatagramTransport: STUNDatagramTransport {
 
     func send(_ data: Data) throws -> Data {
         try handler(data)
+    }
+}
+
+private final class RetryRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var attempts = 0
+
+    var attemptCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return attempts
+    }
+
+    func nextAttempt() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        attempts += 1
+        return attempts
     }
 }

@@ -59,6 +59,8 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
     private let commandLock = NSLock()
     private var localTrackPublications: [String: LocalTrackPublication] = [:]
     private var localDataPublishPlans: [LocalDataPublishPlan] = []
+    private var localDataTrackPublications: [UInt32: DataTrackInfo] = [:]
+    private var nextDataTrackPublisherHandle: UInt32 = 1
     private var commandHandler: LocalParticipantCommandHandler?
 
     public var trackPublications: [LocalTrackPublication] {
@@ -70,6 +72,12 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
     var dataPublishPlans: [LocalDataPublishPlan] {
         dataPublicationLock.withLock {
             localDataPublishPlans
+        }
+    }
+
+    public var dataTrackPublications: [DataTrackInfo] {
+        dataPublicationLock.withLock {
+            localDataTrackPublications.values.sorted { $0.publisherHandle < $1.publisherHandle }
         }
     }
 
@@ -173,6 +181,70 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
         }
     }
 
+    @discardableResult
+    public func publishDataTrack(name: String, encryption: DataTrackEncryption = .none) async throws -> DataTrackInfo {
+        let publisherHandle = allocateDataTrackPublisherHandle()
+        let plan = LocalDataTrackPublishPlan(
+            pubHandle: publisherHandle,
+            name: name,
+            encryption: encryption.protocolEncryption
+        )
+        let dataTrack = if let commandHandler = currentCommandHandler() {
+            try await commandHandler.publishDataTrack(plan)
+        } else {
+            DataTrackInfo(
+                publisherHandle: publisherHandle,
+                sid: "",
+                name: name,
+                encryption: encryption
+            )
+        }
+
+        dataPublicationLock.withLock {
+            localDataTrackPublications[dataTrack.publisherHandle] = dataTrack
+        }
+
+        return dataTrack
+    }
+
+    @discardableResult
+    public func unpublishDataTrack(_ dataTrack: DataTrackInfo) async throws -> DataTrackInfo {
+        let plan = LocalDataTrackPublishPlan(
+            pubHandle: dataTrack.publisherHandle,
+            name: dataTrack.name,
+            encryption: dataTrack.encryption.protocolEncryption
+        )
+        let unpublishedTrack = if let commandHandler = currentCommandHandler() {
+            try await commandHandler.unpublishDataTrack(plan)
+        } else {
+            dataTrack
+        }
+
+        dataPublicationLock.withLock {
+            _ = localDataTrackPublications.removeValue(forKey: dataTrack.publisherHandle)
+        }
+
+        return unpublishedTrack
+    }
+
+    public func updateDataSubscription(
+        trackSID: String,
+        subscribe: Bool,
+        targetFPS: UInt32? = nil
+    ) async throws {
+        guard let commandHandler = currentCommandHandler() else {
+            throw LiveKitNativeError.notConnected
+        }
+
+        try await commandHandler.updateDataSubscription(
+            DataSubscriptionUpdatePlan(
+                trackSid: trackSID,
+                subscribe: subscribe,
+                targetFps: targetFPS
+            )
+        )
+    }
+
     public func setMetadata(_ metadata: String) async throws {
         guard let commandHandler = currentCommandHandler() else {
             throw LiveKitNativeError.notConnected
@@ -235,6 +307,26 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
             commandHandler
         }
     }
+
+    private func allocateDataTrackPublisherHandle() -> UInt32 {
+        dataPublicationLock.withLock {
+            while localDataTrackPublications[nextDataTrackPublisherHandle] != nil {
+                nextDataTrackPublisherHandle &+= 1
+                if nextDataTrackPublisherHandle == 0 {
+                    nextDataTrackPublisherHandle = 1
+                }
+            }
+
+            let handle = nextDataTrackPublisherHandle
+            repeat {
+                nextDataTrackPublisherHandle &+= 1
+                if nextDataTrackPublisherHandle == 0 {
+                    nextDataTrackPublisherHandle = 1
+                }
+            } while localDataTrackPublications[nextDataTrackPublisherHandle] != nil
+            return handle
+        }
+    }
 }
 
 struct ParticipantMetadataUpdate: Equatable, Sendable {
@@ -278,6 +370,9 @@ struct LocalParticipantCommandHandler: Sendable {
     var publishAudio: @Sendable (LocalAudioPublishPlan) async throws -> LocalPublishedTrack
     var updateParticipant: @Sendable (ParticipantMetadataUpdate) async throws -> Void
     var publishData: @Sendable (LocalDataPublishPlan) async throws -> Void
+    var publishDataTrack: @Sendable (LocalDataTrackPublishPlan) async throws -> DataTrackInfo
+    var unpublishDataTrack: @Sendable (LocalDataTrackPublishPlan) async throws -> DataTrackInfo
+    var updateDataSubscription: @Sendable (DataSubscriptionUpdatePlan) async throws -> Void
 }
 
 public final class RemoteParticipant: Participant, @unchecked Sendable {

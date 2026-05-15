@@ -5,6 +5,8 @@ actor SignalRequestTracker {
     private var nextRequestID: UInt32 = 1
     private var responses: [UInt32: Livekit_RequestResponse] = [:]
     private var trackPublishedResponses: [String: Livekit_TrackPublishedResponse] = [:]
+    private var publishDataTrackResponses: [UInt32: Livekit_PublishDataTrackResponse] = [:]
+    private var unpublishDataTrackResponses: [UInt32: Livekit_UnpublishDataTrackResponse] = [:]
 
     func nextID() -> UInt32 {
         let requestID = nextRequestID
@@ -21,6 +23,14 @@ actor SignalRequestTracker {
 
     func fulfill(_ response: Livekit_TrackPublishedResponse) {
         trackPublishedResponses[response.cid] = response
+    }
+
+    func fulfill(_ response: Livekit_PublishDataTrackResponse) {
+        publishDataTrackResponses[response.info.pubHandle] = response
+    }
+
+    func fulfill(_ response: Livekit_UnpublishDataTrackResponse) {
+        unpublishDataTrackResponses[response.info.pubHandle] = response
     }
 
     func waitForResponse(
@@ -65,8 +75,52 @@ actor SignalRequestTracker {
         throw LiveKitNativeError.requestTimedOut(action: action)
     }
 
+    func waitForPublishDataTrack(
+        publisherHandle: UInt32,
+        action: String,
+        timeoutNanoseconds: UInt64 = 10_000_000_000
+    ) async throws -> Livekit_PublishDataTrackResponse {
+        let pollInterval: UInt64 = 10_000_000
+        var waited: UInt64 = 0
+
+        while waited < timeoutNanoseconds {
+            if let response = publishDataTrackResponses.removeValue(forKey: publisherHandle) {
+                return response
+            }
+
+            try await Task.sleep(nanoseconds: pollInterval)
+            waited += pollInterval
+        }
+
+        publishDataTrackResponses.removeValue(forKey: publisherHandle)
+        throw LiveKitNativeError.requestTimedOut(action: action)
+    }
+
+    func waitForUnpublishDataTrack(
+        publisherHandle: UInt32,
+        action: String,
+        timeoutNanoseconds: UInt64 = 10_000_000_000
+    ) async throws -> Livekit_UnpublishDataTrackResponse {
+        let pollInterval: UInt64 = 10_000_000
+        var waited: UInt64 = 0
+
+        while waited < timeoutNanoseconds {
+            if let response = unpublishDataTrackResponses.removeValue(forKey: publisherHandle) {
+                return response
+            }
+
+            try await Task.sleep(nanoseconds: pollInterval)
+            waited += pollInterval
+        }
+
+        unpublishDataTrackResponses.removeValue(forKey: publisherHandle)
+        throw LiveKitNativeError.requestTimedOut(action: action)
+    }
+
     func clear() {
         responses.removeAll()
         trackPublishedResponses.removeAll()
+        publishDataTrackResponses.removeAll()
+        unpublishDataTrackResponses.removeAll()
     }
 }

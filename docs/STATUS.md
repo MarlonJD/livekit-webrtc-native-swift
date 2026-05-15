@@ -14,8 +14,11 @@ The current status is `developerPreview`, with explicit blockers for DTLS-SRTP,
 TURN/ICE hardening, live media transport integration, DTLS-backed SCTP,
 media recovery during reconnect, and end-to-end LiveKit compatibility testing.
 Publisher `AddTrackRequest` signaling is now wired for local audio/video
-publishes, but publisher SDP negotiation and media sender transport are still
-open.
+publishes, publisher answers and publisher-targeted trickle candidates are
+routed into the publisher peer connection adapter, but publisher offer
+generation and media sender transport are still open.
+Data-track publish/unpublish/update-subscription signaling is also wired at
+unit-test level; live SCTP transport remains open.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -118,6 +121,9 @@ The old binary WebRTC dependency path has been removed from the package model.
   publications from the server-returned `TrackInfo`.
 - `SignalResponse.trackPublished` messages are correlated by local CID for
   client-originated publish requests.
+- `SignalResponse.answer` messages are routed into the publisher peer
+  connection adapter so server answers are retained for the publish negotiation
+  path.
 - Public `Room.disconnect()` clears remote participants, removes remote track
   publications, emits cleanup lifecycle events, closes signaling, and clears
   pending request-response state.
@@ -140,6 +146,21 @@ The old binary WebRTC dependency path has been removed from the package model.
 - Subscriber-targeted trickle messages decode `RTCIceCandidateInit` JSON and
   store remote ICE candidates on the subscriber peer connection adapter,
   including end-of-candidates state.
+- Publisher-targeted trickle messages are routed to the publisher peer
+  connection adapter with the same candidate decode and end-of-candidates
+  handling.
+- `SignalResponse.speakers_changed`, `connection_quality`, and
+  `stream_state_update` now emit public `RoomEvent` values with typed payloads.
+- `SignalResponse.room_update`, `subscribed_quality_update`,
+  `subscription_permission_update`, `subscription_response`, and
+  `track_subscribed` now emit public `RoomEvent` values with typed payloads.
+- `SignalResponse.media_sections_requirement`,
+  `subscribed_audio_codec_update`, `publish_data_track_response`,
+  `unpublish_data_track_response`, and `data_track_subscriber_handles` now
+  emit public `RoomEvent` values with typed payloads.
+- `SignalResponse.room_moved` now updates local/remote participant state,
+  refreshes the reconnect token, emits `RoomEvent.roomMoved`, and publishes
+  cleanup/addition lifecycle events for participant changes.
 - Non-join initial signal frames close the connection, return the room to
   `disconnected`, and surface a typed signal frame error.
 - Mock signal transport for unit tests.
@@ -183,10 +204,14 @@ The old binary WebRTC dependency path has been removed from the package model.
     controlling
   - IPv4 `XOR-MAPPED-ADDRESS` encode/decode groundwork for Binding success
     responses
+  - `MESSAGE-INTEGRITY` HMAC-SHA1 signing and validation with RFC 5769 vector
+    coverage
+  - `FINGERPRINT` CRC32 signing and validation with tamper detection tests
 - ICE basics:
   - local ICE username fragment and password generation
   - host candidate construction from local interface addresses
   - UDP STUN datagram transport abstraction and Darwin UDP socket transport
+  - bounded STUN Binding transport retry policy for connectivity checks
   - remote trickle candidate JSON decoding and storage
   - end-of-candidates tracking
   - candidate type preferences
@@ -196,16 +221,45 @@ The old binary WebRTC dependency path has been removed from the package model.
   - basic SDP candidate attribute serialization
   - connectivity-check Binding request construction with ICE username,
     priority, role, and use-candidate attributes
+  - connectivity-check requests are sent with `MESSAGE-INTEGRITY` and
+    `FINGERPRINT`
+  - authenticated Binding responses validate `FINGERPRINT` and
+    `MESSAGE-INTEGRITY` before mapped-address handling
   - Binding success response handling for server-reflexive mapped address
     discovery
 - DTLS/SRTP groundwork:
   - SHA-256 fingerprint formatting
   - ephemeral Security framework key material for SDP fingerprint generation
+  - DTLS-SRTP protection profile metadata for
+    `SRTP_AES128_CM_HMAC_SHA1_80` and `SRTP_AES128_CM_HMAC_SHA1_32`
+  - DTLS-SRTP exporter output splitting into client/server SRTP master
+    keys and salts
+  - RTP sequence-number extension across rollover for SRTP packet indexing
+  - SRTP replay-window primitive with per-SSRC duplicate and old-packet
+    rejection
+  - SRTP AES-CM payload encryption/decryption with RFC 3711 IV construction
+    and RFC B.2 keystream-vector coverage
+  - SRTP authentication-tag framing and HMAC-SHA1 validation with rollover
+    counter included in the authentication input
+  - SRTP packet protect/unprotect API that combines AES-CM payload protection,
+    HMAC-SHA1 authentication, and replay rejection
+  - SRTCP AES-CM payload encryption/decryption with SRTCP E-flag handling
+  - SRTCP index/authentication-tag framing with configurable auth-tag length
+  - SRTCP HMAC-SHA1 auth-tag generation and constant-time validation
+  - SRTCP replay-window primitive keyed by sender SSRC and SRTCP index
+  - SRTCP packet protect/unprotect API that combines AES-CM payload protection,
+    authentication validation, and replay rejection
   - explicit boundary before full DTLS `use_srtp` handshake and SRTP key export
 - RTP basics:
   - RTP v2 header encode/decode
   - marker bit, payload type, sequence number, timestamp, SSRC, and payload
     handling
+- RTCP basics:
+  - Sender Report and Receiver Report encode/decode
+  - Reception report block encode/decode including signed 24-bit cumulative
+    packet loss
+  - Picture Loss Indication encode/decode
+  - Generic NACK encode/decode with PID/BLP bitmask packing
 - H.264 over RTP basics:
   - single NAL packetization/depacketization
   - STAP-A parameter set packing/unpacking
@@ -265,15 +319,17 @@ The old binary WebRTC dependency path has been removed from the package model.
   - incoming user-packet decode helper for future WebRTC receive plumbing
   - `RoomEvent.dataReceived` mapping from decoded data packets to remote
     participants
-  - `PublishDataTrackRequest`, `UnpublishDataTrackRequest`, and
-    `UpdateDataSubscription` scaffolds for newer data-track protocol messages
+  - `LocalParticipant.publishDataTrack`, `unpublishDataTrack`, and
+    `updateDataSubscription` send newer data-track protocol messages
+  - `PublishDataTrackResponse` and `UnpublishDataTrackResponse` are correlated
+    by publisher handle for request completion
 
 ## Verified
 
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 105 tests passed
+  - 168 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -286,7 +342,8 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary under the 5 MB proxy limit
+    `LiveKitNativeBenchmarks` release binary at 2,192,650 bytes under the 5 MB
+    proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
 - Forbidden dependency guard:
@@ -300,21 +357,21 @@ The following checks passed after the latest implementation pass:
 
 ### LiveKit Signaling
 
-- Rich handling for publisher answers, speaker updates, connection quality,
-  stream state, subscription permissions, room moved, and data track control
-  messages.
-- Publisher SDP offer/answer, transceiver negotiation, RTP sender transport,
+- Stateful handling for data-track subscriber handle updates and media section
+  requirement updates beyond typed event emission.
+- Publisher offer generation, transceiver negotiation, RTP sender transport,
   and LiveKit integration coverage for AddTrack publishes.
 - Production-hardened reconnect across ICE restart, media recovery, data
   channel recovery, and server migration.
-- Request-response coverage for all client-originated signaling commands beyond
-  participant metadata/name/attribute updates.
+- Request-response coverage for remaining client-originated signaling commands
+  beyond participant metadata/name/attribute updates, AddTrack publishes, and
+  data-track publish/unpublish.
 - Wiring subscriber ICE candidates into real network connectivity.
 
 ### ICE and Networking
 
 - Full ICE agent orchestration against a LiveKit server.
-- Connectivity-check scheduling, retransmit, timeout, and nomination policy.
+- Full connectivity-check scheduling, pacing, timeout, and nomination policy.
 - Consent freshness.
 - TURN UDP, TCP, or TLS behavior.
 
@@ -322,13 +379,13 @@ The following checks passed after the latest implementation pass:
 
 - DTLS 1.2 handshake.
 - `use_srtp` negotiation.
-- SRTP/SRTCP key export.
-- SRTP packet protection/unprotection.
-- Replay protection.
-- RTCP sender/receiver reports.
-- NACK, PLI, TWCC, REMB, or congestion control.
+- Invoking the real DTLS exporter from a completed handshake.
+- Wiring SRTP/SRTCP packet protection into live media transport.
+- Wiring SRTP/SRTCP replay protection into live media transport.
+- Wiring RTCP feedback/report packets into live media transport.
+- TWCC, REMB, or congestion control.
 - Jitter buffer.
-- RTP timestamp/sequence rollover tracking beyond packet encode/decode.
+- RTP timestamp and jitter tracking beyond packet encode/decode.
 
 ### Media
 

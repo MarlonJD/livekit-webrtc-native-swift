@@ -149,6 +149,21 @@ struct DataSubscriptionUpdatePlan: Equatable, Sendable {
     }
 }
 
+extension DataTrackEncryption {
+    var protocolEncryption: Livekit_Encryption.TypeEnum {
+        switch self {
+        case .none:
+            .none
+        case .gcm:
+            .gcm
+        case .custom:
+            .custom
+        case let .unknown(rawValue):
+            .UNRECOGNIZED(rawValue)
+        }
+    }
+}
+
 private extension String {
     var nilIfEmpty: String? {
         isEmpty ? nil : self

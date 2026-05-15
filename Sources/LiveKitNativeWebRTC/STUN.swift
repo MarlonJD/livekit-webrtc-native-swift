@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 package enum STUNError: Error, Equatable, Sendable {
@@ -7,6 +8,8 @@ package enum STUNError: Error, Equatable, Sendable {
     case invalidTransactionIDLength(Int)
     case invalidUTF8Attribute(UInt16)
     case invalidAddressAttribute
+    case missingAttribute(UInt16)
+    case invalidAttributeLength(UInt16, Int)
     case unsupportedAddressFamily(UInt8)
 }
 
@@ -45,6 +48,7 @@ package struct STUNTransactionID: Equatable, Sendable {
 package enum STUNAttributeType: UInt16, Equatable, Sendable {
     case mappedAddress = 0x0001
     case username = 0x0006
+    case messageIntegrity = 0x0008
     case xorMappedAddress = 0x0020
     case priority = 0x0024
     case useCandidate = 0x0025
@@ -87,6 +91,16 @@ package struct STUNAttribute: Equatable, Sendable {
     }
 
     package static let useCandidate = STUNAttribute(type: .useCandidate)
+
+    package static func messageIntegrity(_ value: Data) -> STUNAttribute {
+        STUNAttribute(type: .messageIntegrity, value: value)
+    }
+
+    package static func fingerprint(_ value: UInt32) -> STUNAttribute {
+        var data = Data()
+        data.appendNetworkUInt32(value)
+        return STUNAttribute(type: .fingerprint, value: data)
+    }
 
     package static func xorMappedAddressIPv4(
         address: String,
@@ -198,10 +212,18 @@ package struct STUNAttribute: Equatable, Sendable {
 
 package struct STUNMessage: Equatable, Sendable {
     package static let magicCookie: UInt32 = 0x2112A442
+    package static let fingerprintXORValue: UInt32 = 0x5354554E
 
     package var type: STUNMessageType
     package var transactionID: STUNTransactionID
     package var attributes: [STUNAttribute]
+    private var originalData: Data?
+
+    package static func == (lhs: STUNMessage, rhs: STUNMessage) -> Bool {
+        lhs.type == rhs.type &&
+            lhs.transactionID == rhs.transactionID &&
+            lhs.attributes == rhs.attributes
+    }
 
     package init(
         type: STUNMessageType,
@@ -211,6 +233,7 @@ package struct STUNMessage: Equatable, Sendable {
         self.type = type
         self.transactionID = transactionID
         self.attributes = attributes
+        self.originalData = nil
     }
 
     package init(decoding data: Data) throws {
@@ -255,30 +278,162 @@ package struct STUNMessage: Equatable, Sendable {
         self.type = STUNMessageType(rawValue: messageType)
         self.transactionID = try STUNTransactionID(bytes: transactionBytes)
         self.attributes = attributes
+        self.originalData = data
     }
 
-    package func encoded() throws -> Data {
+    package func encoded(
+        messageIntegrityKey: Data? = nil,
+        includeFingerprint: Bool = false
+    ) throws -> Data {
         var encodedAttributes = Data()
         for attribute in attributes {
             attribute.encode(into: &encodedAttributes)
         }
 
+        if let messageIntegrityKey {
+            let integrityLength = encodedAttributes.count + STUNAttribute.messageIntegrityByteCount
+            let integrityInput = try encodedMessage(
+                attributes: encodedAttributes,
+                messageLengthOverride: integrityLength
+            )
+            let integrity = STUNCrypto.hmacSHA1(
+                integrityInput,
+                key: messageIntegrityKey
+            )
+            STUNAttribute.messageIntegrity(integrity).encode(into: &encodedAttributes)
+        }
+
+        if includeFingerprint {
+            let fingerprintLength = encodedAttributes.count + STUNAttribute.fingerprintByteCount
+            let fingerprintInput = try encodedMessage(
+                attributes: encodedAttributes,
+                messageLengthOverride: fingerprintLength
+            )
+            let fingerprint = STUNCrypto.fingerprint(for: fingerprintInput)
+            STUNAttribute.fingerprint(fingerprint).encode(into: &encodedAttributes)
+        }
+
+        return try encodedMessage(attributes: encodedAttributes)
+    }
+
+    package func encoded(
+        messageIntegrityKey: String,
+        includeFingerprint: Bool = false
+    ) throws -> Data {
+        try encoded(messageIntegrityKey: Data(messageIntegrityKey.utf8), includeFingerprint: includeFingerprint)
+    }
+
+    package func validatesMessageIntegrity(key: Data) throws -> Bool {
+        let data = try validationData()
+        let location = try data.firstSTUNAttributeLocation(type: STUNAttributeType.messageIntegrity.rawValue)
+        guard location.valueLength == STUNAttribute.messageIntegrityValueLength else {
+            throw STUNError.invalidAttributeLength(STUNAttributeType.messageIntegrity.rawValue, location.valueLength)
+        }
+
+        var integrityInput = Data(data.prefix(location.headerOffset))
+        integrityInput.setSTUNMessageLength(UInt16(location.endOffset - STUNMessage.headerByteCount))
+        let expected = STUNCrypto.hmacSHA1(integrityInput, key: key)
+        let actual = Data(data[location.valueRange])
+        return expected == actual
+    }
+
+    package func validatesMessageIntegrity(key: String) throws -> Bool {
+        try validatesMessageIntegrity(key: Data(key.utf8))
+    }
+
+    package func validatesFingerprint() throws -> Bool {
+        let data = try validationData()
+        let location = try data.firstSTUNAttributeLocation(type: STUNAttributeType.fingerprint.rawValue)
+        guard location.valueLength == STUNAttribute.fingerprintValueLength else {
+            throw STUNError.invalidAttributeLength(STUNAttributeType.fingerprint.rawValue, location.valueLength)
+        }
+
+        var fingerprintInput = Data(data.prefix(location.headerOffset))
+        fingerprintInput.setSTUNMessageLength(UInt16(data.count - STUNMessage.headerByteCount))
+        let expected = STUNCrypto.fingerprint(for: fingerprintInput)
+        let actual = try data.networkUInt32(at: location.valueRange.lowerBound)
+        return expected == actual
+    }
+
+    private func encodedMessage(
+        attributes encodedAttributes: Data,
+        messageLengthOverride: Int? = nil
+    ) throws -> Data {
         guard encodedAttributes.count <= Int(UInt16.max) else {
+            throw STUNError.invalidMessageLength
+        }
+        let messageLength = messageLengthOverride ?? encodedAttributes.count
+        guard messageLength <= Int(UInt16.max), messageLength % 4 == 0 else {
             throw STUNError.invalidMessageLength
         }
 
         var data = Data()
         data.reserveCapacity(20 + encodedAttributes.count)
         data.appendNetworkUInt16(type.rawValue)
-        data.appendNetworkUInt16(UInt16(encodedAttributes.count))
+        data.appendNetworkUInt16(UInt16(messageLength))
         data.appendNetworkUInt32(Self.magicCookie)
         data.append(contentsOf: transactionID.bytes)
         data.append(encodedAttributes)
         return data
     }
 
+    private func validationData() throws -> Data {
+        if let originalData {
+            return originalData
+        }
+
+        return try encoded()
+    }
+
     package func firstAttribute(_ type: STUNAttributeType) -> STUNAttribute? {
         attributes.first { $0.type == type.rawValue }
+    }
+}
+
+private extension STUNAttribute {
+    static let messageIntegrityValueLength = 20
+    static let fingerprintValueLength = 4
+    static let headerByteCount = 4
+    static let messageIntegrityByteCount = headerByteCount + messageIntegrityValueLength
+    static let fingerprintByteCount = headerByteCount + fingerprintValueLength
+}
+
+private extension STUNMessage {
+    static let headerByteCount = 20
+}
+
+private struct STUNAttributeLocation: Equatable {
+    var headerOffset: Int
+    var valueRange: Range<Int>
+    var valueLength: Int
+
+    var endOffset: Int {
+        valueRange.upperBound
+    }
+}
+
+private enum STUNCrypto {
+    static func hmacSHA1(_ data: Data, key: Data) -> Data {
+        let key = SymmetricKey(data: key)
+        return Data(HMAC<Insecure.SHA1>.authenticationCode(for: data, using: key))
+    }
+
+    static func fingerprint(for data: Data) -> UInt32 {
+        crc32(data) ^ STUNMessage.fingerprintXORValue
+    }
+
+    private static func crc32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                let mask = 0 &- (crc & 1)
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask)
+            }
+        }
+
+        return crc ^ 0xFFFF_FFFF
     }
 }
 
@@ -289,6 +444,11 @@ private extension Int {
 }
 
 private extension Data {
+    mutating func setSTUNMessageLength(_ value: UInt16) {
+        self[index(startIndex, offsetBy: 2)] = UInt8((value >> 8) & 0xFF)
+        self[index(startIndex, offsetBy: 3)] = UInt8(value & 0xFF)
+    }
+
     mutating func appendNetworkUInt16(_ value: UInt16) {
         append(UInt8((value >> 8) & 0xFF))
         append(UInt8(value & 0xFF))
@@ -366,5 +526,40 @@ private extension Data {
             UInt64(self[sixth]) << 16 |
             UInt64(self[seventh]) << 8 |
             UInt64(self[eighth])
+    }
+
+    func firstSTUNAttributeLocation(type targetType: UInt16) throws -> STUNAttributeLocation {
+        guard count >= STUNMessage.headerByteCount else {
+            throw STUNError.packetTooShort
+        }
+
+        var offset = STUNMessage.headerByteCount
+        while offset < count {
+            guard offset + STUNAttribute.headerByteCount <= count else {
+                throw STUNError.invalidMessageLength
+            }
+
+            let type = try networkUInt16(at: offset)
+            let valueLength = Int(try networkUInt16(at: offset + 2))
+            let valueStart = offset + STUNAttribute.headerByteCount
+            let valueEnd = valueStart + valueLength
+            let nextOffset = valueStart + valueLength.stunPaddedLength
+
+            guard valueEnd <= count, nextOffset <= count else {
+                throw STUNError.invalidMessageLength
+            }
+
+            if type == targetType {
+                return STUNAttributeLocation(
+                    headerOffset: offset,
+                    valueRange: valueStart..<valueEnd,
+                    valueLength: valueLength
+                )
+            }
+
+            offset = nextOffset
+        }
+
+        throw STUNError.missingAttribute(targetType)
     }
 }

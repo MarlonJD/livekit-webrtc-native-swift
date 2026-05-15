@@ -372,10 +372,23 @@ package enum ICEConnectivityCheckError: Error, Equatable, Sendable {
     case transactionMismatch
     case unexpectedResponseType(UInt16)
     case missingMappedAddress
+    case invalidMessageIntegrity
+    case invalidFingerprint
 }
 
 package protocol STUNDatagramTransport: Sendable {
     func send(_ data: Data) throws -> Data
+}
+
+package struct STUNBindingRetryPolicy: Equatable, Sendable {
+    package var maxAttempts: Int
+
+    package init(maxAttempts: Int = 3) {
+        self.maxAttempts = max(1, maxAttempts)
+    }
+
+    package static let once = STUNBindingRetryPolicy(maxAttempts: 1)
+    package static let connectivityCheck = STUNBindingRetryPolicy(maxAttempts: 3)
 }
 
 package struct STUNBindingClient: Sendable {
@@ -391,7 +404,10 @@ package struct STUNBindingClient: Sendable {
         priority: UInt32,
         role: ICEAgentRole,
         tieBreaker: UInt64,
-        transactionID: STUNTransactionID = .random()
+        transactionID: STUNTransactionID = .random(),
+        requireResponseMessageIntegrity: Bool = false,
+        requireResponseFingerprint: Bool = false,
+        retryPolicy: STUNBindingRetryPolicy = .connectivityCheck
     ) throws -> ICEConnectivityCheckResult {
         let request = ICEConnectivityCheckRequestFactory.makeBindingRequest(
             localCredentials: localCredentials,
@@ -401,11 +417,60 @@ package struct STUNBindingClient: Sendable {
             tieBreaker: tieBreaker,
             transactionID: transactionID
         )
-        let responseData = try transport.send(try request.encoded())
+        let requestData = try request.encoded(
+            messageIntegrityKey: remoteCredentials.password,
+            includeFingerprint: true
+        )
+
+        var lastTransportError: (any Error)?
+        for _ in 0..<retryPolicy.maxAttempts {
+            let responseData: Data
+            do {
+                responseData = try transport.send(requestData)
+            } catch {
+                lastTransportError = error
+                continue
+            }
+
+            return try validateBindingResponse(
+                responseData,
+                transactionID: transactionID,
+                remoteCredentials: remoteCredentials,
+                requireResponseMessageIntegrity: requireResponseMessageIntegrity,
+                requireResponseFingerprint: requireResponseFingerprint
+            )
+        }
+
+        if let lastTransportError {
+            throw lastTransportError
+        }
+
+        throw ICEConnectivityCheckError.missingMappedAddress
+    }
+
+    private func validateBindingResponse(
+        _ responseData: Data,
+        transactionID: STUNTransactionID,
+        remoteCredentials: ICECredentials,
+        requireResponseMessageIntegrity: Bool,
+        requireResponseFingerprint: Bool
+    ) throws -> ICEConnectivityCheckResult {
         let response = try STUNMessage(decoding: responseData)
 
         guard response.transactionID == transactionID else {
             throw ICEConnectivityCheckError.transactionMismatch
+        }
+
+        if response.firstAttribute(.fingerprint) != nil || requireResponseFingerprint {
+            guard try response.validatesFingerprint() else {
+                throw ICEConnectivityCheckError.invalidFingerprint
+            }
+        }
+
+        if response.firstAttribute(.messageIntegrity) != nil || requireResponseMessageIntegrity {
+            guard try response.validatesMessageIntegrity(key: remoteCredentials.password) else {
+                throw ICEConnectivityCheckError.invalidMessageIntegrity
+            }
         }
 
         guard response.type == .bindingSuccessResponse else {
