@@ -206,6 +206,113 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(publication.sid, "TR_camera")
         XCTAssertEqual(participant.sid, "PA_alice")
     }
+
+    func testLocalParticipantMetadataUpdateSendsRequestAndAppliesAck() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let updateTask = Task {
+            try await room.localParticipant.setMetadata("updated-metadata")
+        }
+
+        let sentFrames = await waitForSentFrameCount(1, transport: transport)
+        XCTAssertEqual(sentFrames.count, 1)
+
+        guard case let .binary(data) = sentFrames[0] else {
+            return XCTFail("Expected binary metadata update request.")
+        }
+
+        let request = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: data)
+        guard case let .updateMetadata(update)? = request.message else {
+            return XCTFail("Expected SignalRequest.updateMetadata.")
+        }
+        XCTAssertEqual(update.metadata, "updated-metadata")
+        XCTAssertNotEqual(update.requestID, 0)
+
+        try await transport.enqueueIncomingFrame(
+            .binary(SignalFrameCodec().encode(makeRequestResponse(requestID: update.requestID, reason: .ok)))
+        )
+
+        try await updateTask.value
+        XCTAssertEqual(room.localParticipant.metadata, "updated-metadata")
+    }
+
+    func testLocalParticipantMetadataUpdateMapsPermissionDenied() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let updateTask = Task {
+            try await room.localParticipant.setMetadata("forbidden")
+        }
+
+        let sentFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(data) = try XCTUnwrap(sentFrames.first) else {
+            return XCTFail("Expected binary metadata update request.")
+        }
+
+        let request = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: data)
+        guard case let .updateMetadata(update)? = request.message else {
+            return XCTFail("Expected SignalRequest.updateMetadata.")
+        }
+
+        try await transport.enqueueIncomingFrame(
+            .binary(SignalFrameCodec().encode(makeRequestResponse(requestID: update.requestID, reason: .notAllowed)))
+        )
+
+        do {
+            try await updateTask.value
+            XCTFail("Expected metadata update to fail.")
+        } catch {
+            XCTAssertEqual(error as? LiveKitNativeError, .permissionDenied(action: "participant metadata update"))
+        }
+        XCTAssertNil(room.localParticipant.metadata)
+    }
+
+    func testDisconnectClearsRemoteParticipantsAndEmitsLifecycleEvents() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let eventRecorder = RoomEventRecorder()
+        room.delegate = eventRecorder
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        XCTAssertEqual(room.remoteParticipants.count, 1)
+
+        await room.disconnect()
+
+        XCTAssertEqual(room.connectionState, .disconnected)
+        XCTAssertEqual(room.remoteParticipants.count, 0)
+
+        let events = eventRecorder.recordedEvents
+        XCTAssertEqual(events.count, 8)
+        XCTAssertEqual(events[4], .connectionStateChanged(.disconnecting))
+
+        guard case let .trackUnpublished(publication, participant) = events[5] else {
+            return XCTFail("Expected remote track cleanup event.")
+        }
+        XCTAssertEqual(publication.sid, "TR_camera")
+        XCTAssertEqual(participant.sid, "PA_alice")
+        XCTAssertEqual(events[6], .participantDisconnected(participant))
+        XCTAssertEqual(events[7], .connectionStateChanged(.disconnected))
+
+        let closeCalls = await transport.closeCalls
+        XCTAssertEqual(closeCalls.count, 1)
+    }
 }
 
 private func makeJoinResponse() -> Livekit_SignalResponse {
@@ -318,6 +425,21 @@ private func makeTrackUnpublishedResponse() -> Livekit_SignalResponse {
 
     var response = Livekit_SignalResponse()
     response.trackUnpublished = trackUnpublished
+    return response
+}
+
+private func makeRequestResponse(
+    requestID: UInt32,
+    reason: Livekit_RequestResponse.Reason,
+    message: String = ""
+) -> Livekit_SignalResponse {
+    var requestResponse = Livekit_RequestResponse()
+    requestResponse.requestID = requestID
+    requestResponse.reason = reason
+    requestResponse.message = message
+
+    var response = Livekit_SignalResponse()
+    response.requestResponse = requestResponse
     return response
 }
 

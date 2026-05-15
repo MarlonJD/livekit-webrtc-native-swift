@@ -26,7 +26,10 @@ frame assembly, keyframe metadata extraction, and a decode-only frame inspector.
 Milestone 0.6 adds WebRTC data-channel DCEP open/ack messages, reliable/lossy
 SCTP channel planning, LiveKit `DataPacket` user-packet mapping,
 `publish(data:options:)` local publish planning, and data-track signaling
-scaffolds. Active work has moved to 1.0 hardening.
+scaffolds. Active work has moved to 1.0 hardening with explicit production
+readiness gates, request/response correlation for client-originated signaling,
+metadata/name/attribute update requests, configurable logging, and disconnect
+lifecycle cleanup.
 
 ## Topics
 

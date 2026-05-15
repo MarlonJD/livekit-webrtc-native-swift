@@ -9,6 +9,7 @@ public final class Room: @unchecked Sendable {
     private let options: RoomOptions
     private let actor: RoomActor
     private let signalConnection: SignalConnection
+    private let requestTracker = SignalRequestTracker()
     private let subscriberPeerConnection: PeerConnectionCoordinator
     private let snapshots: RoomSnapshotStore
     private let signalLoopLock = NSLock()
@@ -49,6 +50,8 @@ public final class Room: @unchecked Sendable {
         let stream = AsyncStream<RoomEvent>.makeStream(bufferingPolicy: .bufferingNewest(100))
         self.events = stream.stream
         self.eventContinuation = stream.continuation
+
+        configureLocalParticipant(localParticipant)
     }
 
     deinit {
@@ -60,6 +63,8 @@ public final class Room: @unchecked Sendable {
     }
 
     public func connect(url: URL, token: String, connectOptions: ConnectOptions = .init()) async throws {
+        LiveKitNativeLogging.log(.info, "Connecting room.")
+
         let autoSubscribe = connectOptions.autoSubscribe ?? options.defaultAutoSubscribe
         let signalURL = try SignalURLBuilder(serverURL: url).build(
             token: token,
@@ -75,19 +80,32 @@ public final class Room: @unchecked Sendable {
             let response = try await signalConnection.receive(Livekit_SignalResponse.self)
             try await applyInitialSignalResponse(response)
             startSignalLoop()
+            LiveKitNativeLogging.log(.info, "Room connected.")
         } catch {
             stopSignalLoop()
             await signalConnection.close()
             await transition(to: .disconnected)
+            LiveKitNativeLogging.log(.error, "Room connect failed: \(error.localizedDescription)")
             throw error
         }
     }
 
     public func disconnect() async {
+        LiveKitNativeLogging.log(.info, "Disconnecting room.")
+
         stopSignalLoop()
         await transition(to: .disconnecting)
         await signalConnection.close()
-        await transition(to: .disconnected)
+        await requestTracker.clear()
+        let result = await actor.disconnect()
+        snapshots.replace(with: result.0)
+
+        for event in result.1 {
+            emit(event)
+        }
+
+        emit(.connectionStateChanged(.disconnected))
+        LiveKitNativeLogging.log(.info, "Room disconnected.")
     }
 
     func applyRemoteParticipantSnapshots(_ participantSnapshots: [ParticipantSnapshot]) async {
@@ -116,6 +134,7 @@ public final class Room: @unchecked Sendable {
 
         let result = await actor.applyJoin(RoomJoinSnapshot(joinResponse: joinResponse))
         snapshots.replace(with: result.0)
+        configureLocalParticipant(result.0.localParticipant)
         emit(.connectionStateChanged(.connected))
 
         for event in result.1 {
@@ -147,7 +166,9 @@ public final class Room: @unchecked Sendable {
                     }
 
                     await signalConnection.close()
+                    await self.requestTracker.clear()
                     await self.transition(to: .disconnected)
+                    LiveKitNativeLogging.log(.error, "Signal loop stopped: \(error.localizedDescription)")
                     return
                 }
             }
@@ -194,6 +215,9 @@ public final class Room: @unchecked Sendable {
             return true
         case let .trackUnpublished(trackUnpublished):
             await applyTrackUnpublished(trackSID: trackUnpublished.trackSid)
+            return true
+        case let .requestResponse(response):
+            await requestTracker.fulfill(response)
             return true
         case let .leave(leave):
             await handleLeaveRequest(leave)
@@ -244,6 +268,64 @@ public final class Room: @unchecked Sendable {
         var request = Livekit_SignalRequest()
         request.answer = answer
         try await signalConnection.send(request)
+    }
+
+    private func configureLocalParticipant(_ localParticipant: LocalParticipant) {
+        localParticipant.setCommandHandler(
+            LocalParticipantCommandHandler(
+                updateParticipant: { [weak self] update in
+                    guard let self else {
+                        throw LiveKitNativeError.notConnected
+                    }
+                    try await self.sendParticipantMetadataUpdate(update)
+                },
+                publishData: { [weak self] _ in
+                    guard self != nil else {
+                        throw LiveKitNativeError.notConnected
+                    }
+                    throw LiveKitNativeError.notImplemented("DTLS-backed SCTP data transport")
+                }
+            )
+        )
+    }
+
+    private func sendParticipantMetadataUpdate(_ update: ParticipantMetadataUpdate) async throws {
+        let requestID = await requestTracker.nextID()
+        let action = "participant metadata update"
+
+        var metadataUpdate = Livekit_UpdateParticipantMetadata()
+        metadataUpdate.requestID = requestID
+        if let metadata = update.metadata {
+            metadataUpdate.metadata = metadata
+        }
+        if let name = update.name {
+            metadataUpdate.name = name
+        }
+        if let attributes = update.attributes {
+            metadataUpdate.attributes = attributes
+        }
+
+        var request = Livekit_SignalRequest()
+        request.updateMetadata = metadataUpdate
+
+        try await signalConnection.send(request)
+        let response = try await requestTracker.waitForResponse(requestID: requestID, action: action)
+        try validateRequestResponse(response, action: action)
+    }
+
+    private func validateRequestResponse(_ response: Livekit_RequestResponse, action: String) throws {
+        switch response.reason {
+        case .ok, .queued:
+            return
+        case .notAllowed:
+            throw LiveKitNativeError.permissionDenied(action: action)
+        default:
+            throw LiveKitNativeError.requestFailed(
+                action: action,
+                reason: String(describing: response.reason),
+                message: response.message
+            )
+        }
     }
 
     private func emit(_ event: RoomEvent) {

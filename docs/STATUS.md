@@ -5,8 +5,14 @@ Last updated: 2026-05-15
 ## Current State
 
 `LiveKitNative` has completed the `0.6.0` developer-preview scope and is now
-moving into `1.0.0` hardening. It is not yet a working end-to-end production
-media client.
+in `1.0.0-dev` hardening. It is not yet a working end-to-end production media
+client.
+
+Production readiness is intentionally represented in code through
+`LiveKitNative.productionReadiness` and `LiveKitNative.assertProductionReady()`.
+The current status is `developerPreview`, with explicit blockers for DTLS-SRTP,
+TURN/reconnect hardening, live media transport integration, DTLS-backed SCTP,
+and end-to-end LiveKit compatibility testing.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -48,6 +54,12 @@ The old binary WebRTC dependency path has been removed from the package model.
   - track and track publication models
   - UIKit/AppKit `VideoView`
 - Actor-backed room state with idempotent participant updates by SID/identity.
+- Explicit production-readiness API:
+  - `LiveKitNative.productionReadiness`
+  - `LiveKitNative.assertProductionReady()`
+  - typed `productionReadinessFailed` error with blocker details
+- Configurable SDK logging through `LiveKitNativeLogging` with an OSLog-backed
+  default logger.
 - `LocalParticipant` has local video publication state for camera tracks,
   including idempotent `setCamera(enabled:)`, `publish(videoTrack:)`, and
   `unpublish(publication:)` behavior.
@@ -81,6 +93,15 @@ The old binary WebRTC dependency path has been removed from the package model.
 - `refresh_token` messages emit a `RoomEvent.tokenRefreshed` event.
 - `LeaveRequest` messages transition to `disconnected` for disconnect actions
   and to `reconnecting` for resume/reconnect actions.
+- `SignalResponse.requestResponse` messages are correlated by request ID for
+  client-originated signaling requests.
+- `LocalParticipant.setMetadata`, `setName`, and `setAttributes` send
+  `UpdateParticipantMetadata` requests, await LiveKit `RequestResponse`, map
+  permission failures to typed SDK errors, and apply local state only after
+  successful acknowledgement.
+- Public `Room.disconnect()` clears remote participants, removes remote track
+  publications, emits cleanup lifecycle events, closes signaling, and clears
+  pending request-response state.
 - `SignalResponse.offer` is routed into the subscriber peer connection adapter,
   which generates a minimal SDP answer and sends it back as
   `SignalRequest.answer`.
@@ -222,7 +243,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 95 tests passed
+  - 100 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -246,6 +267,8 @@ The following checks passed after the latest implementation pass:
   awaiting server `TrackPublishedResponse`.
 - Alternative URL retry handling from `JoinResponse.alternative_url`.
 - Signal reconnect and resume.
+- Request-response coverage for all client-originated signaling commands beyond
+  participant metadata/name/attribute updates.
 - Wiring subscriber ICE candidates into real network connectivity.
 
 ### ICE and Networking
@@ -295,11 +318,13 @@ The following checks passed after the latest implementation pass:
 
 ## Next Recommended Work
 
-1. Start `1.0.0` hardening with real DTLS-backed SCTP transport wiring.
+1. Continue `1.0.0` hardening with real DTLS-backed SCTP transport wiring.
 2. Connect queued local data publish plans to the publisher peer connection
    once data channels are open.
-3. Add text streams, byte streams, RPC, and two-client data integration tests.
-4. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
+3. Add signal reconnect/resume, ICE restart, TURN UDP/TCP/TLS fallback, and
+   automated local LiveKit integration tests.
+4. Add text streams, byte streams, RPC, and two-client data integration tests.
+5. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
    publisher `AddTrackRequest` signaling, transceiver negotiation, and
    DTLS-SRTP integration as the hardening path before a usable end-to-end
    release.
@@ -307,8 +332,11 @@ The following checks passed after the latest implementation pass:
 ## Practical Release Status
 
 `0.6.0` scope is complete as an SCTP data-channel and LiveKit data-packet
-groundwork milestone. It should be treated as a developer preview, not as a
-usable media SDK.
+groundwork milestone. The repository has started `1.0.0-dev` hardening, but it
+should still be treated as a developer preview, not as a usable production
+media SDK.
 
-The repository is ready for `1.0.0` hardening work: real transport wiring,
-reconnect, TURN, quality controls, integration samples, and size gates.
+Do not tag this as production-ready `1.0.0` until
+`LiveKitNative.productionReadiness.status == .productionReady`, blockers are
+empty, local LiveKit integration tests pass, and the release size/dependency
+guards pass on CI.

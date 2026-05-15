@@ -12,7 +12,8 @@ profile.
 
 Detailed project status is tracked in [docs/STATUS.md](docs/STATUS.md).
 
-The `0.6.0` developer-preview scope is complete. The package contains the
+The `0.6.0` developer-preview scope is complete and `main` now reports SDK
+version `1.0.0-dev` while hardening continues. The package contains the
 SwiftPM layout, single public `LiveKitNative` product, public API surface,
 actor-backed room state, signaling URL builder, CI workflow, privacy manifest,
 DocC landing page, and tests for the pieces that already have behavior.
@@ -55,6 +56,14 @@ The active implementation focus is now `1.0.0` hardening: reconnect, TURN,
 quality controls, real DTLS-SCTP network transport, integration apps, and size
 gates.
 
+Current builds expose `LiveKitNative.productionReadiness` and
+`LiveKitNative.assertProductionReady()` so applications and release automation
+can fail fast while the remaining production blockers are still open.
+`LocalParticipant.setMetadata`, `setName`, and `setAttributes` now send
+LiveKit `UpdateParticipantMetadata` requests and map server
+`RequestResponse` failures to typed SDK errors. `Room.disconnect()` also clears
+remote participant state and emits cleanup lifecycle events.
+
 ## Requirements
 
 - iOS 13+
@@ -70,6 +79,9 @@ gates.
     from: "1.0.0"
 )
 ```
+
+Use the `1.0.0` requirement only after the readiness gate reports
+`productionReady`. Until then, `main` should be treated as a developer preview.
 
 ```swift
 .product(name: "LiveKitNative", package: "livekit-webrtc-native-swift")
@@ -112,6 +124,9 @@ try await room.connect(
 - `Room` owns a `RoomActor` for core state updates.
 - `RoomEvent` is available as an `AsyncStream`, with a delegate hook for UIKit
   and AppKit style integrations.
+- Production readiness is explicit through `LiveKitNative.productionReadiness`
+  and `LiveKitNative.assertProductionReady()`.
+- Logging can be configured through `LiveKitNativeLogging.configure`.
 - UIKit and AppKit `VideoView` classes are included. SwiftUI components are out
   of scope for v1 in this package.
 - The repository intentionally contains no Rust toolchain, no `.rs` sources, no

@@ -52,6 +52,22 @@ actor RoomActor {
         return (state.snapshot, events)
     }
 
+    func disconnect() -> (RoomSnapshot, [RoomEvent]) {
+        state.connectionState = .disconnected
+
+        let participants = state.remoteParticipants.values.sorted { $0.id < $1.id }
+        state.remoteParticipants.removeAll()
+
+        var events: [RoomEvent] = []
+        for participant in participants {
+            let unpublishedTracks = participant.removeAllTrackPublications()
+            events.append(contentsOf: unpublishedTracks.map { .trackUnpublished($0, participant: participant) })
+            events.append(.participantDisconnected(participant))
+        }
+
+        return (state.snapshot, events)
+    }
+
     func dataEvent(for packet: ReceivedLiveKitDataPacket) -> RoomEvent {
         .dataReceived(
             packet.payload,

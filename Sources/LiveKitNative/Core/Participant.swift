@@ -56,8 +56,10 @@ public class Participant: Identifiable, Hashable, @unchecked Sendable {
 public final class LocalParticipant: Participant, @unchecked Sendable {
     private let publicationLock = NSLock()
     private let dataPublicationLock = NSLock()
+    private let commandLock = NSLock()
     private var localTrackPublications: [String: LocalTrackPublication] = [:]
     private var localDataPublishPlans: [LocalDataPublishPlan] = []
+    private var commandHandler: LocalParticipantCommandHandler?
 
     public var trackPublications: [LocalTrackPublication] {
         publicationLock.withLock {
@@ -151,22 +153,95 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
 
     public func publish(data: Data, options: DataPublishOptions = .init()) async throws {
         let plan = try LocalDataPublishPlan(data: data, options: options, participantSid: sid, participantIdentity: identity)
+
+        if let commandHandler = currentCommandHandler() {
+            try await commandHandler.publishData(plan)
+        }
+
         dataPublicationLock.withLock {
             localDataPublishPlans.append(plan)
         }
     }
 
     public func setMetadata(_ metadata: String) async throws {
-        throw LiveKitNativeError.notImplemented("Participant metadata update")
+        guard let commandHandler = currentCommandHandler() else {
+            throw LiveKitNativeError.notConnected
+        }
+
+        try await commandHandler.updateParticipant(ParticipantMetadataUpdate(metadata: metadata))
+        apply(
+            ParticipantSnapshot(
+                sid: sid,
+                identity: identity,
+                name: name,
+                metadata: metadata,
+                attributes: attributes
+            )
+        )
     }
 
     public func setName(_ name: String) async throws {
-        throw LiveKitNativeError.notImplemented("Participant name update")
+        guard let commandHandler = currentCommandHandler() else {
+            throw LiveKitNativeError.notConnected
+        }
+
+        try await commandHandler.updateParticipant(ParticipantMetadataUpdate(name: name))
+        apply(
+            ParticipantSnapshot(
+                sid: sid,
+                identity: identity,
+                name: name,
+                metadata: metadata,
+                attributes: attributes
+            )
+        )
     }
 
     public func setAttributes(_ attributes: [String: String]) async throws {
-        throw LiveKitNativeError.notImplemented("Participant attributes update")
+        guard let commandHandler = currentCommandHandler() else {
+            throw LiveKitNativeError.notConnected
+        }
+
+        try await commandHandler.updateParticipant(ParticipantMetadataUpdate(attributes: attributes))
+        apply(
+            ParticipantSnapshot(
+                sid: sid,
+                identity: identity,
+                name: name,
+                metadata: metadata,
+                attributes: attributes
+            )
+        )
     }
+
+    func setCommandHandler(_ commandHandler: LocalParticipantCommandHandler?) {
+        commandLock.withLock {
+            self.commandHandler = commandHandler
+        }
+    }
+
+    private func currentCommandHandler() -> LocalParticipantCommandHandler? {
+        commandLock.withLock {
+            commandHandler
+        }
+    }
+}
+
+struct ParticipantMetadataUpdate: Equatable, Sendable {
+    var metadata: String?
+    var name: String?
+    var attributes: [String: String]?
+
+    init(metadata: String? = nil, name: String? = nil, attributes: [String: String]? = nil) {
+        self.metadata = metadata
+        self.name = name
+        self.attributes = attributes
+    }
+}
+
+struct LocalParticipantCommandHandler: Sendable {
+    var updateParticipant: @Sendable (ParticipantMetadataUpdate) async throws -> Void
+    var publishData: @Sendable (LocalDataPublishPlan) async throws -> Void
 }
 
 public final class RemoteParticipant: Participant, @unchecked Sendable {
