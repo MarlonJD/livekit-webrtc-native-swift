@@ -16,6 +16,8 @@ package enum SecureMediaTransportError: Error, Equatable, Sendable {
     case socketConnectFailed(Int32)
     case socketSendFailed(Int32)
     case socketReceiveFailed(Int32)
+    case missingRemoteFingerprint(DTLSSignature)
+    case remoteFingerprintMismatch(expected: DTLSSignature, actual: DTLSSignature)
 }
 
 package enum SecureMediaTransportPacket: Equatable, Sendable {
@@ -26,6 +28,32 @@ package enum SecureMediaTransportPacket: Equatable, Sendable {
 package protocol MediaDatagramTransport: Sendable {
     func send(_ datagram: Data) async throws
     func receive() async throws -> Data
+}
+
+package protocol MediaDatagramTransportFactory: Sendable {
+    func makeTransport(selectedCandidatePair: ICECandidatePair) throws -> any MediaDatagramTransport
+}
+
+package protocol DTLSSRTPHandshaking: Sendable {
+    func performHandshake(
+        configuration: DTLSSRTPHandshakeConfiguration,
+        transport: any MediaDatagramTransport
+    ) async throws -> DTLSSRTPHandshakeResult
+}
+
+package struct UDPMediaDatagramTransportFactory: MediaDatagramTransportFactory {
+    package var receiveTimeoutMilliseconds: Int
+
+    package init(receiveTimeoutMilliseconds: Int = 1_000) {
+        self.receiveTimeoutMilliseconds = receiveTimeoutMilliseconds
+    }
+
+    package func makeTransport(selectedCandidatePair: ICECandidatePair) throws -> any MediaDatagramTransport {
+        try UDPMediaDatagramTransport(
+            selectedCandidatePair: selectedCandidatePair,
+            receiveTimeoutMilliseconds: receiveTimeoutMilliseconds
+        )
+    }
 }
 
 package final class UDPMediaDatagramTransport: MediaDatagramTransport, @unchecked Sendable {
@@ -311,6 +339,115 @@ package actor DTLSSRTPMediaTransport {
         }
 
         return .rtp
+    }
+}
+
+package struct DTLSSRTPMediaSessionFactory: Sendable {
+    package var datagramTransportFactory: any MediaDatagramTransportFactory
+
+    package init(
+        datagramTransportFactory: any MediaDatagramTransportFactory = UDPMediaDatagramTransportFactory()
+    ) {
+        self.datagramTransportFactory = datagramTransportFactory
+    }
+
+    package func makeMediaTransport(
+        selectedCandidatePair: ICECandidatePair,
+        handshakeResult: DTLSSRTPHandshakeResult,
+        expectedRemoteFingerprint: DTLSSignature? = nil
+    ) throws -> DTLSSRTPMediaTransport {
+        try validateRemoteFingerprint(
+            handshakeResult.remoteFingerprint,
+            expected: expectedRemoteFingerprint
+        )
+        try UDPMediaDatagramTransport.validateCandidatePair(selectedCandidatePair)
+
+        let datagramTransport = try datagramTransportFactory.makeTransport(
+            selectedCandidatePair: selectedCandidatePair
+        )
+
+        return try makeMediaTransport(
+            selectedCandidatePair: selectedCandidatePair,
+            handshakeResult: handshakeResult,
+            expectedRemoteFingerprint: expectedRemoteFingerprint,
+            datagramTransport: datagramTransport
+        )
+    }
+
+    package func makeMediaTransport(
+        selectedCandidatePair: ICECandidatePair,
+        handshakeResult: DTLSSRTPHandshakeResult,
+        expectedRemoteFingerprint: DTLSSignature? = nil,
+        datagramTransport: any MediaDatagramTransport
+    ) throws -> DTLSSRTPMediaTransport {
+        try validateRemoteFingerprint(
+            handshakeResult.remoteFingerprint,
+            expected: expectedRemoteFingerprint
+        )
+        try UDPMediaDatagramTransport.validateCandidatePair(selectedCandidatePair)
+
+        return try DTLSSRTPMediaTransport(
+            selectedCandidatePair: selectedCandidatePair,
+            keyMaterial: try handshakeResult.keyMaterial(),
+            role: handshakeResult.role,
+            datagramTransport: datagramTransport
+        )
+    }
+
+    private func validateRemoteFingerprint(
+        _ actual: DTLSSignature?,
+        expected: DTLSSignature?
+    ) throws {
+        guard let expected else {
+            return
+        }
+
+        guard let actual else {
+            throw SecureMediaTransportError.missingRemoteFingerprint(expected)
+        }
+
+        guard actual == expected else {
+            throw SecureMediaTransportError.remoteFingerprintMismatch(
+                expected: expected,
+                actual: actual
+            )
+        }
+    }
+}
+
+package struct DTLSSRTPMediaSessionBinder: Sendable {
+    package var datagramTransportFactory: any MediaDatagramTransportFactory
+    package var handshaker: any DTLSSRTPHandshaking
+
+    package init(
+        datagramTransportFactory: any MediaDatagramTransportFactory = UDPMediaDatagramTransportFactory(),
+        handshaker: any DTLSSRTPHandshaking
+    ) {
+        self.datagramTransportFactory = datagramTransportFactory
+        self.handshaker = handshaker
+    }
+
+    package func makeMediaTransport(
+        selectedCandidatePair: ICECandidatePair,
+        handshakeConfiguration: DTLSSRTPHandshakeConfiguration
+    ) async throws -> DTLSSRTPMediaTransport {
+        try UDPMediaDatagramTransport.validateCandidatePair(selectedCandidatePair)
+        let datagramTransport = try datagramTransportFactory.makeTransport(
+            selectedCandidatePair: selectedCandidatePair
+        )
+        let handshakeResult = try await handshaker.performHandshake(
+            configuration: handshakeConfiguration,
+            transport: datagramTransport
+        )
+
+        return try DTLSSRTPMediaSessionFactory(
+            datagramTransportFactory: datagramTransportFactory
+        ).makeMediaTransport(
+            selectedCandidatePair: selectedCandidatePair,
+            handshakeResult: handshakeResult,
+            expectedRemoteFingerprint: handshakeConfiguration.remoteFingerprint,
+            datagramTransport: datagramTransport
+        )
     }
 }
 

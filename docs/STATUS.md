@@ -10,8 +10,8 @@ client.
 
 Production readiness is intentionally represented in code through
 `LiveKitNative.productionReadiness` and `LiveKitNative.assertProductionReady()`.
-The current status is `developerPreview`, with explicit blockers for DTLS-SRTP,
-completed DTLS exporter binding, TURN/ICE hardening, live media transport
+The current status is `developerPreview`, with explicit blockers for the real
+DTLS handshake/exporter implementation, TURN/ICE hardening, live media startup
 integration, DTLS-backed SCTP, media recovery during reconnect, and end-to-end
 LiveKit compatibility testing.
 Publisher `AddTrackRequest` signaling is now wired for local audio/video
@@ -243,10 +243,21 @@ The old binary WebRTC dependency path has been removed from the package model.
 - DTLS/SRTP groundwork:
   - SHA-256 fingerprint formatting
   - ephemeral Security framework key material for SDP fingerprint generation
+  - SDP `fingerprint` and `setup` role extraction for remote offers/answers
   - DTLS-SRTP protection profile metadata for
     `SRTP_AES128_CM_HMAC_SHA1_80` and `SRTP_AES128_CM_HMAC_SHA1_32`
+  - DTLS-SRTP `use_srtp` extension encode/decode, MKI handling, malformed
+    payload rejection, and first-supported profile selection
+  - `DTLSSRTPHandshakeConfiguration` carrying the local DTLS role, remote
+    fingerprint, and `use_srtp` offer data for a real handshaker
   - DTLS-SRTP exporter output splitting into client/server SRTP master
     keys and salts
+  - typed `DTLSSRTPHandshakeResult` that carries negotiated role, protection
+    profile, exported keying material, and optional remote fingerprint from a
+    completed future handshake
+  - `PeerConnectionCoordinator` stores remote DTLS fingerprint/setup data from
+    subscriber offers and publisher answers, then derives the local DTLS
+    client/server role for handshake startup
   - RFC 3711 AES-CM session key derivation for SRTP/SRTCP encryption,
     authentication, and salting keys
   - client/server DTLS-SRTP packet-protection context that maps local/remote
@@ -272,10 +283,18 @@ The old binary WebRTC dependency path has been removed from the package model.
     transport boundary
   - nominated ICE-pair guarded construction for secure RTP/RTCP datagram
     transport
+  - exporter-backed secure media session factory that validates the remote
+    DTLS fingerprint, validates the nominated ICE pair, builds the datagram
+    transport, splits exporter output into SRTP key material, and returns an
+    actor-backed `DTLSSRTPMediaTransport`
+  - handshaker-backed media session binder that validates the nominated ICE
+    pair, builds the datagram transport, invokes an injected DTLS-SRTP
+    handshaker, validates the completed remote fingerprint, and returns a
+    protected media transport
   - UDP media datagram socket transport for IPv4 RTP-component candidate pairs,
     including loopback send/receive coverage
-  - explicit boundary before full DTLS `use_srtp` handshake, live SRTP key
-    export, and peer-connection media binding
+  - explicit boundary before full DTLS `use_srtp` handshake implementation and
+    subscriber/publisher startup integration
 - RTP basics:
   - RTP v2 header encode/decode
   - marker bit, payload type, sequence number, timestamp, SSRC, and payload
@@ -355,7 +374,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 196 tests passed
+  - 211 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -368,7 +387,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,248,931 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,267,152 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -406,10 +425,10 @@ The following checks passed after the latest implementation pass:
 ### DTLS, SRTP, RTP, and RTCP
 
 - DTLS 1.2 handshake.
-- `use_srtp` negotiation.
+- Wiring `use_srtp` extension negotiation into the DTLS handshake.
 - Invoking the real DTLS exporter from a completed handshake.
-- Binding the secure RTP/RTCP datagram transport to ICE-selected candidate
-  pairs and completed DTLS exporter output.
+- Wiring the handshaker-backed secure RTP/RTCP media session binder into
+  subscriber/publisher peer connection startup.
 - Wiring RTCP feedback/report packets into live media transport.
 - TWCC, REMB, or congestion control.
 - Jitter buffer.
@@ -444,7 +463,8 @@ The following checks passed after the latest implementation pass:
 
 ## Next Recommended Work
 
-1. Continue `1.0.0` hardening with real DTLS-backed SCTP transport wiring.
+1. Continue `1.0.0` hardening with a real DTLS handshake/exporter
+   implementation and subscriber/publisher startup integration.
 2. Connect queued local data publish plans to the publisher peer connection
    once data channels are open.
 3. Add ICE restart, media/data recovery after signal reconnect, TURN UDP/TCP/TLS
@@ -454,8 +474,9 @@ The following checks passed after the latest implementation pass:
    presets, bandwidth-aware layer selection, Dynacast-style layer pausing, and
    manual subscriber quality controls for low/medium/high video reception.
 6. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
-   publisher transceiver negotiation, RTP sender transport, and DTLS-SRTP
-   integration as the hardening path before a usable end-to-end release.
+   publisher transceiver negotiation, RTP sender transport, and real DTLS
+   handshake/exporter integration as the hardening path before a usable
+   end-to-end release.
 
 ## Practical Release Status
 

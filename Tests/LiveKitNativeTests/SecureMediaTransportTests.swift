@@ -220,6 +220,168 @@ final class SecureMediaTransportTests: XCTestCase {
         }
     }
 
+    func testMediaSessionFactoryBuildsTransportFromICEPairAndHandshakeResult() async throws {
+        let datagrams = MockMediaDatagramTransport()
+        let datagramFactory = CapturingMediaDatagramTransportFactory(transport: datagrams)
+        let sessionFactory = DTLSSRTPMediaSessionFactory(datagramTransportFactory: datagramFactory)
+        let fingerprint = DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+        let transport = try sessionFactory.makeMediaTransport(
+            selectedCandidatePair: candidatePair(state: .succeeded, nominated: true),
+            handshakeResult: DTLSSRTPHandshakeResult(
+                role: .client,
+                exportedKeyingMaterial: exportedKeyingMaterial(),
+                remoteFingerprint: fingerprint
+            ),
+            expectedRemoteFingerprint: fingerprint
+        )
+        let packet = rtp(sequenceNumber: 101, payload: Data([0x01, 0x02]))
+
+        try await transport.sendRTP(packet)
+        let sentDatagrams = await datagrams.sentDatagramsSnapshot()
+
+        XCTAssertEqual(datagramFactory.capturedPair?.remote.foundation, "remote")
+        XCTAssertEqual(sentDatagrams.count, 1)
+        XCTAssertNotEqual(sentDatagrams.first, packet.encoded())
+    }
+
+    func testMediaSessionFactoryRejectsRemoteFingerprintMismatch() throws {
+        let sessionFactory = DTLSSRTPMediaSessionFactory(
+            datagramTransportFactory: CapturingMediaDatagramTransportFactory(
+                transport: MockMediaDatagramTransport()
+            )
+        )
+        let expected = DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+        let actual = DTLSSignature(hashFunction: "sha-256", value: "00:11:22")
+
+        XCTAssertThrowsError(
+            try sessionFactory.makeMediaTransport(
+                selectedCandidatePair: candidatePair(state: .succeeded, nominated: true),
+                handshakeResult: DTLSSRTPHandshakeResult(
+                    role: .client,
+                    exportedKeyingMaterial: exportedKeyingMaterial(),
+                    remoteFingerprint: actual
+                ),
+                expectedRemoteFingerprint: expected
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SecureMediaTransportError,
+                .remoteFingerprintMismatch(expected: expected, actual: actual)
+            )
+        }
+    }
+
+    func testMediaSessionFactoryRejectsMissingRemoteFingerprintWhenExpected() throws {
+        let sessionFactory = DTLSSRTPMediaSessionFactory(
+            datagramTransportFactory: CapturingMediaDatagramTransportFactory(
+                transport: MockMediaDatagramTransport()
+            )
+        )
+        let expected = DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+
+        XCTAssertThrowsError(
+            try sessionFactory.makeMediaTransport(
+                selectedCandidatePair: candidatePair(state: .succeeded, nominated: true),
+                handshakeResult: DTLSSRTPHandshakeResult(
+                    role: .client,
+                    exportedKeyingMaterial: exportedKeyingMaterial()
+                ),
+                expectedRemoteFingerprint: expected
+            )
+        ) { error in
+            XCTAssertEqual(error as? SecureMediaTransportError, .missingRemoteFingerprint(expected))
+        }
+    }
+
+    func testMediaSessionFactoryRejectsUnnominatedPairBeforeMakingDatagramTransport() throws {
+        let datagramFactory = CapturingMediaDatagramTransportFactory(
+            transport: MockMediaDatagramTransport()
+        )
+        let sessionFactory = DTLSSRTPMediaSessionFactory(datagramTransportFactory: datagramFactory)
+
+        XCTAssertThrowsError(
+            try sessionFactory.makeMediaTransport(
+                selectedCandidatePair: candidatePair(state: .succeeded, nominated: false),
+                handshakeResult: DTLSSRTPHandshakeResult(
+                    role: .client,
+                    exportedKeyingMaterial: exportedKeyingMaterial()
+                )
+            )
+        ) { error in
+            XCTAssertEqual(error as? SecureMediaTransportError, .candidatePairNotNominated)
+        }
+        XCTAssertNil(datagramFactory.capturedPair)
+    }
+
+    func testMediaSessionBinderRunsHandshakeAndBuildsProtectedTransport() async throws {
+        let datagrams = MockMediaDatagramTransport()
+        let datagramFactory = CapturingMediaDatagramTransportFactory(transport: datagrams)
+        let fingerprint = DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+        let handshakeConfiguration = try DTLSSRTPHandshakeConfiguration(
+            role: .client,
+            remoteFingerprint: fingerprint
+        )
+        let handshaker = CapturingDTLSSRTPHandshaker(
+            result: try DTLSSRTPHandshakeResult(
+                role: .client,
+                exportedKeyingMaterial: exportedKeyingMaterial(),
+                remoteFingerprint: fingerprint
+            )
+        )
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: datagramFactory,
+            handshaker: handshaker
+        )
+        let transport = try await binder.makeMediaTransport(
+            selectedCandidatePair: candidatePair(state: .succeeded, nominated: true),
+            handshakeConfiguration: handshakeConfiguration
+        )
+        let packet = rtp(sequenceNumber: 111, payload: Data([0xAA, 0xBB]))
+
+        try await transport.sendRTP(packet)
+        let sentDatagrams = await datagrams.sentDatagramsSnapshot()
+
+        XCTAssertEqual(handshaker.capturedConfiguration, handshakeConfiguration)
+        XCTAssertEqual(datagramFactory.capturedPair?.remote.foundation, "remote")
+        XCTAssertEqual(sentDatagrams.count, 1)
+        XCTAssertNotEqual(sentDatagrams.first, packet.encoded())
+    }
+
+    func testMediaSessionBinderRejectsHandshakeFingerprintMismatch() async throws {
+        let datagramFactory = CapturingMediaDatagramTransportFactory(
+            transport: MockMediaDatagramTransport()
+        )
+        let expected = DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+        let actual = DTLSSignature(hashFunction: "sha-256", value: "00:11:22")
+        let handshaker = CapturingDTLSSRTPHandshaker(
+            result: try DTLSSRTPHandshakeResult(
+                role: .client,
+                exportedKeyingMaterial: exportedKeyingMaterial(),
+                remoteFingerprint: actual
+            )
+        )
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: datagramFactory,
+            handshaker: handshaker
+        )
+
+        do {
+            _ = try await binder.makeMediaTransport(
+                selectedCandidatePair: candidatePair(state: .succeeded, nominated: true),
+                handshakeConfiguration: try DTLSSRTPHandshakeConfiguration(
+                    role: .client,
+                    remoteFingerprint: expected
+                )
+            )
+            XCTFail("Expected remote fingerprint mismatch")
+        } catch {
+            XCTAssertEqual(
+                error as? SecureMediaTransportError,
+                .remoteFingerprintMismatch(expected: expected, actual: actual)
+            )
+        }
+    }
+
     private func packetProtectionContext(role: DTLSSRTPRole) throws -> DTLSSRTPPacketProtectionContext {
         try DTLSSRTPPacketProtectionContext(
             keyMaterial: keyMaterial(),
@@ -277,9 +439,11 @@ final class SecureMediaTransportTests: XCTestCase {
     }
 
     private func keyMaterial() throws -> DTLSSRTPKeyMaterial {
-        try DTLSSRTPKeyMaterial(
-            exportedKeyingMaterial: Data((0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init))
-        )
+        try DTLSSRTPKeyMaterial(exportedKeyingMaterial: exportedKeyingMaterial())
+    }
+
+    private func exportedKeyingMaterial() -> Data {
+        Data((0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init))
     }
 
     private func candidatePair(
@@ -366,4 +530,55 @@ private actor MockMediaDatagramTransport: MediaDatagramTransport {
 
 private enum MockMediaDatagramTransportError: Error {
     case empty
+}
+
+private final class CapturingMediaDatagramTransportFactory: MediaDatagramTransportFactory, @unchecked Sendable {
+    private let lock = NSLock()
+    private var mutableCapturedPair: ICECandidatePair?
+    private let transport: MockMediaDatagramTransport
+
+    var capturedPair: ICECandidatePair? {
+        lock.lock()
+        defer { lock.unlock() }
+        return mutableCapturedPair
+    }
+
+    init(transport: MockMediaDatagramTransport) {
+        self.transport = transport
+    }
+
+    func makeTransport(selectedCandidatePair: ICECandidatePair) throws -> any MediaDatagramTransport {
+        lock.lock()
+        mutableCapturedPair = selectedCandidatePair
+        lock.unlock()
+
+        return transport
+    }
+}
+
+private final class CapturingDTLSSRTPHandshaker: DTLSSRTPHandshaking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var mutableCapturedConfiguration: DTLSSRTPHandshakeConfiguration?
+    private let result: DTLSSRTPHandshakeResult
+
+    var capturedConfiguration: DTLSSRTPHandshakeConfiguration? {
+        lock.lock()
+        defer { lock.unlock() }
+        return mutableCapturedConfiguration
+    }
+
+    init(result: DTLSSRTPHandshakeResult) {
+        self.result = result
+    }
+
+    func performHandshake(
+        configuration: DTLSSRTPHandshakeConfiguration,
+        transport: any MediaDatagramTransport
+    ) async throws -> DTLSSRTPHandshakeResult {
+        lock.withLock {
+            mutableCapturedConfiguration = configuration
+        }
+
+        return result
+    }
 }

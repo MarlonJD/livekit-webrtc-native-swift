@@ -57,6 +57,25 @@ final class SDPTests: XCTestCase {
         )
     }
 
+    func testExtractsSessionLevelDTLSFingerprintAndSetupRole() throws {
+        let description = try SDPSessionDescription(parsing: """
+        v=0
+        o=- 1 1 IN IP4 127.0.0.1
+        s=-
+        t=0 0
+        a=fingerprint:sha-256 AA:BB:CC
+        a=setup:actpass
+        m=audio 9 UDP/TLS/RTP/SAVPF 111
+        a=mid:0
+        """)
+
+        XCTAssertEqual(
+            description.dtlsFingerprint,
+            DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+        )
+        XCTAssertEqual(description.dtlsSetupRole, .actpass)
+    }
+
     func testRejectsMalformedLines() {
         XCTAssertThrowsError(try SDPSessionDescription(parsing: "v=0\nthis-is-not-valid\n")) { error in
             XCTAssertEqual(error as? SDPParseError, .malformedLine("this-is-not-valid"))

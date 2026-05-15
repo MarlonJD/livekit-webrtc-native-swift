@@ -23,6 +23,49 @@ final class DTLSSRTPTests: XCTestCase {
         }
     }
 
+    func testUseSRTExtensionEncodesAndDecodesProtectionProfilesAndMKI() throws {
+        let extensionData = try DTLSSRTPUseSRTExtension(
+            protectionProfiles: [.aes128CMHMACSHA180, .aes128CMHMACSHA132],
+            mki: Data([0xCA, 0xFE])
+        )
+
+        let encoded = try extensionData.encoded()
+        let decoded = try DTLSSRTPUseSRTExtension(decoding: encoded)
+        let prefixed = Data([0xFF]) + encoded
+        let sliced = prefixed[prefixed.index(after: prefixed.startIndex)..<prefixed.endIndex]
+
+        XCTAssertEqual(DTLSSRTPUseSRTExtension.extensionType, 14)
+        XCTAssertEqual(encoded, Data([0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x02, 0xCA, 0xFE]))
+        XCTAssertEqual(decoded, extensionData)
+        XCTAssertEqual(try DTLSSRTPUseSRTExtension(decoding: sliced), extensionData)
+    }
+
+    func testUseSRTExtensionSelectsFirstSupportedProtectionProfile() throws {
+        let extensionData = try DTLSSRTPUseSRTExtension(
+            protectionProfiles: [.aes128CMHMACSHA132, .aes128CMHMACSHA180]
+        )
+
+        XCTAssertEqual(
+            extensionData.selectedProfile(supportedProfiles: [.aes128CMHMACSHA180]),
+            .aes128CMHMACSHA180
+        )
+        XCTAssertNil(extensionData.selectedProfile(supportedProfiles: []))
+    }
+
+    func testUseSRTExtensionRejectsMalformedPayloads() {
+        XCTAssertThrowsError(try DTLSSRTPUseSRTExtension(protectionProfiles: [])) { error in
+            XCTAssertEqual(error as? DTLSSRTPError, .missingUseSRTPProtectionProfiles)
+        }
+
+        XCTAssertThrowsError(try DTLSSRTPUseSRTExtension(decoding: Data([0x00, 0x02, 0x00]))) { error in
+            XCTAssertEqual(error as? DTLSSRTPError, .invalidUseSRTExtensionLength)
+        }
+
+        XCTAssertThrowsError(try DTLSSRTPUseSRTExtension(decoding: Data([0x00, 0x02, 0x99, 0x99, 0x00]))) { error in
+            XCTAssertEqual(error as? DTLSSRTPError, .unsupportedProtectionProfile(0x9999))
+        }
+    }
+
     func testSplitsExporterMaterialIntoClientAndServerKeysAndSalts() throws {
         let exported = Data((0..<60).map(UInt8.init))
 
@@ -50,6 +93,34 @@ final class DTLSSRTPTests: XCTestCase {
         XCTAssertEqual(keyMaterial.remoteWriteMaterial(for: .client), keyMaterial.serverWrite)
         XCTAssertEqual(keyMaterial.localWriteMaterial(for: .server), keyMaterial.serverWrite)
         XCTAssertEqual(keyMaterial.remoteWriteMaterial(for: .server), keyMaterial.clientWrite)
+    }
+
+    func testHandshakeResultCarriesExporterMaterialAndRemoteFingerprint() throws {
+        let exported = Data((0..<60).map(UInt8.init))
+        let fingerprint = DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+
+        let result = try DTLSSRTPHandshakeResult(
+            role: .client,
+            exportedKeyingMaterial: exported,
+            remoteFingerprint: fingerprint
+        )
+        let keyMaterial = try result.keyMaterial()
+
+        XCTAssertEqual(result.role, .client)
+        XCTAssertEqual(result.remoteFingerprint, fingerprint)
+        XCTAssertEqual(keyMaterial.clientWrite.masterKey, Data(0..<16))
+        XCTAssertEqual(keyMaterial.serverWrite.masterSalt, Data(46..<60))
+    }
+
+    func testHandshakeResultRejectsInvalidExporterLength() {
+        XCTAssertThrowsError(
+            try DTLSSRTPHandshakeResult(
+                role: .server,
+                exportedKeyingMaterial: Data(repeating: 0, count: 59)
+            )
+        ) { error in
+            XCTAssertEqual(error as? DTLSSRTPError, .invalidExporterByteCount(expected: 60, actual: 59))
+        }
     }
 
     func testShortAuthenticationTagProfileUsesSameExporterByteCount() throws {

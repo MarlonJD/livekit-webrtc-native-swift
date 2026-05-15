@@ -28,7 +28,7 @@ public extension LiveKitNative {
     static let productionReadiness = LiveKitNativeProductionReadiness(
         status: .developerPreview,
         blockers: [
-            "ICEAgent nomination, DTLS-SRTP packet protection, UDP media datagram transport, and nominated ICE-pair guarded media transport exist, but live peer connections are not wired through a completed DTLS handshake and exporter output.",
+            "ICEAgent nomination, DTLS-SRTP packet protection, UDP media datagram transport, SDP DTLS role/fingerprint extraction, and handshaker-backed media-session binding exist, but live peer connections still need a real DTLS handshake/exporter and subscriber/publisher runtime integration.",
             "TURN TCP/TLS fallback and ICE restart hardening are not implemented.",
             "H.264/VP8/Opus media send/receive paths are not end-to-end integrated.",
             "SCTP data channel support is packet-level only and not connected to a live DTLS transport.",

@@ -144,6 +144,80 @@ final class WebRTCMediaProfileTests: XCTestCase {
             XCTAssertEqual(error as? PeerConnectionNegotiationError, .missingRemoteICECredentials)
         }
     }
+
+    func testSubscriberStoresRemoteDTLSParametersAndBuildsHandshakeConfiguration() throws {
+        let coordinator = PeerConnectionCoordinator(configuration: .init(role: .subscriber))
+        let offer = """
+        v=0
+        o=- 1 1 IN IP4 127.0.0.1
+        s=-
+        t=0 0
+        a=ice-ufrag:remote-ufrag
+        a=ice-pwd:remote-password
+        a=fingerprint:sha-256 AA:BB:CC
+        a=setup:actpass
+        m=audio 9 UDP/TLS/RTP/SAVPF 111
+        a=mid:0
+        a=rtcp-mux
+        a=rtpmap:111 opus/48000/2
+        """
+
+        _ = try coordinator.makeSubscriberAnswer(for: offer)
+        let configuration = try coordinator.makeDTLSSRTPHandshakeConfiguration()
+
+        XCTAssertEqual(coordinator.remoteDTLSFingerprint, DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC"))
+        XCTAssertEqual(coordinator.remoteDTLSSetupRole, .actpass)
+        XCTAssertEqual(configuration.role, .client)
+        XCTAssertEqual(configuration.remoteFingerprint, DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC"))
+        XCTAssertEqual(configuration.useSRTExtension.protectionProfiles, [.aes128CMHMACSHA180])
+    }
+
+    func testPublisherAnswerActiveSetupMakesLocalDTLSServer() throws {
+        let coordinator = PeerConnectionCoordinator(configuration: .init(role: .publisher))
+        let answer = """
+        v=0
+        o=- 1 1 IN IP4 127.0.0.1
+        s=-
+        t=0 0
+        a=ice-ufrag:remote-ufrag
+        a=ice-pwd:remote-password
+        a=fingerprint:sha-256 00:11:22
+        a=setup:active
+        m=audio 9 UDP/TLS/RTP/SAVPF 111
+        a=mid:0
+        a=rtcp-mux
+        a=rtpmap:111 opus/48000/2
+        """
+
+        try coordinator.applyPublisherAnswer(type: "answer", sdp: answer, id: 10)
+        let configuration = try coordinator.makeDTLSSRTPHandshakeConfiguration()
+
+        XCTAssertEqual(configuration.role, .server)
+        XCTAssertEqual(configuration.remoteFingerprint, DTLSSignature(hashFunction: "sha-256", value: "00:11:22"))
+    }
+
+    func testPeerConnectionRequiresRemoteDTLSFingerprintForHandshakeConfiguration() throws {
+        let coordinator = PeerConnectionCoordinator(configuration: .init(role: .subscriber))
+        let offer = """
+        v=0
+        o=- 1 1 IN IP4 127.0.0.1
+        s=-
+        t=0 0
+        a=ice-ufrag:remote-ufrag
+        a=ice-pwd:remote-password
+        a=setup:actpass
+        m=audio 9 UDP/TLS/RTP/SAVPF 111
+        a=mid:0
+        a=rtcp-mux
+        a=rtpmap:111 opus/48000/2
+        """
+
+        _ = try coordinator.makeSubscriberAnswer(for: offer)
+
+        XCTAssertThrowsError(try coordinator.makeDTLSSRTPHandshakeConfiguration()) { error in
+            XCTAssertEqual(error as? PeerConnectionNegotiationError, .missingRemoteDTLSFingerprint)
+        }
+    }
 }
 
 private final class CapturingICEConnectivityChecker: ICEConnectivityChecking, @unchecked Sendable {

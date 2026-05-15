@@ -40,8 +40,10 @@ nomination, SDP ICE candidate parsing, dynamic trickle candidate checklist
 updates, SDP ICE credential extraction, coordinator-created ICE agents,
 STUN-backed candidate-pair checking, use-candidate nomination,
 validate-only nomination handoff, DTLS fingerprint material, DTLS-SRTP
-protection profile and exporter key/salt splitting, RFC 3711 AES-CM SRTP/SRTCP session key
-derivation, client/server DTLS-SRTP packet-protection context wiring, RTP
+protection profile and exporter key/salt splitting, `use_srtp` extension
+encode/decode and profile selection, SDP DTLS fingerprint/setup extraction,
+peer-connection handshake configuration, typed DTLS-SRTP handshake results,
+remote fingerprint validation for media sessions, RFC 3711 AES-CM SRTP/SRTCP session key derivation, client/server DTLS-SRTP packet-protection context wiring, RTP
 packet encode/decode, RTP sequence rollover tracking, SRTP replay-window
 protection groundwork, SRTP AES-CM payload encryption/decryption using RFC
 3711 IV construction, SRTP authentication-tag framing with ROC-aware HMAC-SHA1
@@ -50,7 +52,9 @@ SRTCP AES-CM payload protection, SRTCP index/authentication-tag framing,
 HMAC-SHA1 auth-tag validation, full SRTCP packet protect/unprotect APIs with
 replay rejection, actor-backed secure RTP/RTCP datagram send/receive wiring
 with RTCP mux demux, RTP rollover tracking, and nominated ICE-pair guarded
-construction, UDP media datagram socket transport with loopback coverage, RTCP
+construction, exporter-backed secure media session construction, UDP media
+datagram socket transport with loopback coverage, handshaker-backed media
+session binder coverage, RTCP
 sender/receiver report and PLI/NACK feedback wire-format groundwork, H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
 assembly, native camera track scaffolding, VideoToolbox H.264 encoder
@@ -76,10 +80,10 @@ channels, binary PPID envelopes, LiveKit `DataPacket` user-packet mapping,
 request/response signaling, data subscription update signaling, and
 `RoomEvent.dataReceived` mapping for decoded packets.
 
-The active implementation focus is now `1.0.0` hardening: binding ICE-selected
-candidate pairs through a completed DTLS handshake and exporter output into the
-secure media datagram transport, reconnect, TURN, quality controls, real
-DTLS-SCTP network transport, integration apps, and size gates.
+The active implementation focus is now `1.0.0` hardening: implementing the
+real DTLS handshake/exporter, wiring the handshaker-backed media session binder
+into subscriber/publisher peer connection startup, reconnect, TURN, quality
+controls, real DTLS-SCTP network transport, integration apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -111,16 +115,18 @@ SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting and
 session-protection context, RTCP feedback, H.264, VP8, Opus RTP scaffolding,
 and SCTP data-channel message paths. On this machine, the latest
 release-readiness smoke medians include protobuf signal roundtrip at
-`9.022 us/op`, subscriber SDP answer generation at `102.942 us/op`, RTP
-encode/decode at `0.590 us/op`, SRTP replay protection at `0.047 us/op`, SRTP
-authenticated roundtrip at `8.368 us/op`, SRTP AES-CM payload roundtrip at
-`65.058 us/op`, full SRTP packet protect/unprotect at `72.214 us/op`, RTCP
-feedback roundtrip at `1.722 us/op`, SRTCP packet/replay roundtrip at
-`0.781 us/op`, SRTCP authenticated roundtrip at `6.837 us/op`, full SRTCP
-packet protect/unprotect at `9.332 us/op`, DTLS-SRTP exporter split at
-`0.315 us/op`, DTLS-SRTP session protect/unprotect at `87.486 us/op`, H.264
-packetize/depacketize at `2.500 us/op`, and SCTP DCEP open/ack roundtrip at
-`0.843 us/op`.
+`7.707 us/op`, subscriber SDP answer generation at `103.258 us/op`, STUN
+binding roundtrip at `1.858 us/op`, RTP encode/decode at `0.591 us/op`, SRTP
+replay protection at `0.047 us/op`, SRTP authenticated roundtrip at
+`8.547 us/op`, SRTP AES-CM payload roundtrip at `64.270 us/op`, full SRTP
+packet protect/unprotect at `76.025 us/op`, RTCP feedback roundtrip at
+`1.749 us/op`, SRTCP packet/replay roundtrip at `0.784 us/op`, SRTCP
+authenticated roundtrip at `6.995 us/op`, full SRTCP packet protect/unprotect
+at `9.851 us/op`, DTLS-SRTP exporter split at `0.343 us/op`, DTLS-SRTP session
+protect/unprotect at `83.829 us/op`, H.264 packetize/depacketize at
+`2.492 us/op`, VP8 payload depacketize at `0.158 us/op`, Opus RTP
+packetize/depacketize at `0.026 us/op`, and SCTP DCEP open/ack roundtrip at
+`0.808 us/op`.
 
 Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
 CSV so this package does not reintroduce the forbidden binary WebRTC dependency.
@@ -142,8 +148,8 @@ unit/integration opt-in tests, benchmark smoke, and the compressed release
 binary size proxy. The strict gate additionally requires
 `LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
 That strict gate intentionally fails today because DTLS handshake/exporter
-binding, full ICE/TURN hardening, publisher media transport, live SCTP, and
-end-to-end LiveKit tests are still open.
+implementation, full ICE/TURN hardening, publisher media transport, live SCTP,
+and end-to-end LiveKit tests are still open.
 
 ## Requirements
 

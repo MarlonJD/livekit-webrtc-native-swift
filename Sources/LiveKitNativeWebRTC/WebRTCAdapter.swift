@@ -228,6 +228,9 @@ package enum PeerConnectionNegotiationError: Error, Equatable, Sendable {
     case subscriberAnswerRequestedForPublisher
     case publisherAnswerAppliedToSubscriber
     case missingRemoteICECredentials
+    case missingRemoteDTLSFingerprint
+    case missingRemoteDTLSSetupRole
+    case unsupportedRemoteDTLSSetupRole(SDPDTLSSetupRole)
 }
 
 package struct RemoteSessionDescription: Equatable, Sendable {
@@ -251,6 +254,8 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
     private var mutableRemoteICEGatheringComplete = false
     private var mutableRemoteAnswer: RemoteSessionDescription?
     private var mutableRemoteICECredentials: ICECredentials?
+    private var mutableRemoteDTLSFingerprint: DTLSSignature?
+    private var mutableRemoteDTLSSetupRole: SDPDTLSSetupRole?
 
     package init(configuration: NativeWebRTCConfiguration) {
         self.configuration = configuration
@@ -282,6 +287,18 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         remoteDescriptionLock.lock()
         defer { remoteDescriptionLock.unlock() }
         return mutableRemoteICECredentials
+    }
+
+    package var remoteDTLSFingerprint: DTLSSignature? {
+        remoteDescriptionLock.lock()
+        defer { remoteDescriptionLock.unlock() }
+        return mutableRemoteDTLSFingerprint
+    }
+
+    package var remoteDTLSSetupRole: SDPDTLSSetupRole? {
+        remoteDescriptionLock.lock()
+        defer { remoteDescriptionLock.unlock() }
+        return mutableRemoteDTLSSetupRole
     }
 
     package var localCapabilities: [SDPCodecCapability] {
@@ -368,6 +385,7 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         if let credentials = offer.iceCredentials {
             setRemoteICECredentials(credentials)
         }
+        setRemoteDTLSParameters(from: offer)
 
         return try SubscriberSDPAnswerFactory(
             mediaProfile: configuration.mediaProfile,
@@ -386,13 +404,54 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         remoteDescriptionLock.lock()
         defer { remoteDescriptionLock.unlock() }
         mutableRemoteICECredentials = answer.iceCredentials
+        mutableRemoteDTLSFingerprint = answer.dtlsFingerprint
+        mutableRemoteDTLSSetupRole = answer.dtlsSetupRole
         mutableRemoteAnswer = RemoteSessionDescription(type: type, sdp: sdp, id: id)
         state = .connected
+    }
+
+    package func makeDTLSSRTPHandshakeConfiguration() throws -> DTLSSRTPHandshakeConfiguration {
+        remoteDescriptionLock.lock()
+        let fingerprint = mutableRemoteDTLSFingerprint
+        let setupRole = mutableRemoteDTLSSetupRole
+        remoteDescriptionLock.unlock()
+
+        guard let fingerprint else {
+            throw PeerConnectionNegotiationError.missingRemoteDTLSFingerprint
+        }
+        guard let setupRole else {
+            throw PeerConnectionNegotiationError.missingRemoteDTLSSetupRole
+        }
+
+        return try DTLSSRTPHandshakeConfiguration(
+            role: localDTLSRole(forRemoteSetupRole: setupRole),
+            remoteFingerprint: fingerprint
+        )
     }
 
     private func setRemoteICECredentials(_ credentials: ICECredentials) {
         remoteDescriptionLock.lock()
         defer { remoteDescriptionLock.unlock() }
         mutableRemoteICECredentials = credentials
+    }
+
+    private func setRemoteDTLSParameters(from description: SDPSessionDescription) {
+        remoteDescriptionLock.lock()
+        defer { remoteDescriptionLock.unlock() }
+        mutableRemoteDTLSFingerprint = description.dtlsFingerprint
+        mutableRemoteDTLSSetupRole = description.dtlsSetupRole
+    }
+
+    private func localDTLSRole(forRemoteSetupRole setupRole: SDPDTLSSetupRole) throws -> DTLSSRTPRole {
+        switch setupRole {
+        case .active:
+            return .server
+        case .passive:
+            return .client
+        case .actpass where configuration.role == .subscriber:
+            return .client
+        case .actpass, .holdconn:
+            throw PeerConnectionNegotiationError.unsupportedRemoteDTLSSetupRole(setupRole)
+        }
     }
 }

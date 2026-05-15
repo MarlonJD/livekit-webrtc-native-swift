@@ -8,6 +8,9 @@ package enum DTLSSRTPError: Error, Equatable, Sendable {
     case invalidMasterSaltLength(expected: Int, actual: Int)
     case keyDerivationIndexOutOfRange(UInt64)
     case aesOperationFailed(Int32)
+    case invalidUseSRTExtensionLength
+    case missingUseSRTPProtectionProfiles
+    case invalidUseSRTPMKIByteCount(Int)
 }
 
 package enum DTLSSRTPRole: Equatable, Sendable {
@@ -78,6 +81,107 @@ package struct SRTPProtectionProfile: Equatable, Sendable {
         srtpAuthenticationTagLength: 4,
         srtcpAuthenticationTagLength: 10
     )
+}
+
+package struct DTLSSRTPUseSRTExtension: Equatable, Sendable {
+    package static let extensionType: UInt16 = 14
+
+    package var protectionProfiles: [SRTPProtectionProfile]
+    package var mki: Data
+
+    package init(
+        protectionProfiles: [SRTPProtectionProfile] = [.aes128CMHMACSHA180],
+        mki: Data = Data()
+    ) throws {
+        guard !protectionProfiles.isEmpty else {
+            throw DTLSSRTPError.missingUseSRTPProtectionProfiles
+        }
+        guard mki.count <= UInt8.max else {
+            throw DTLSSRTPError.invalidUseSRTPMKIByteCount(mki.count)
+        }
+
+        self.protectionProfiles = protectionProfiles
+        self.mki = mki
+    }
+
+    package init(decoding data: Data) throws {
+        guard data.count >= 3 else {
+            throw DTLSSRTPError.invalidUseSRTExtensionLength
+        }
+
+        let profileByteCount = Int(try data.dtlsNetworkUInt16(at: 0))
+        guard profileByteCount > 0, profileByteCount.isMultiple(of: 2) else {
+            throw DTLSSRTPError.missingUseSRTPProtectionProfiles
+        }
+        guard data.count >= 2 + profileByteCount + 1 else {
+            throw DTLSSRTPError.invalidUseSRTExtensionLength
+        }
+
+        var profiles: [SRTPProtectionProfile] = []
+        var offset = 2
+        while offset < 2 + profileByteCount {
+            profiles.append(try SRTPProtectionProfile(identifier: try data.dtlsNetworkUInt16(at: offset)))
+            offset += 2
+        }
+
+        let mkiByteCount = Int(data.byte(at: offset))
+        let mkiStart = offset + 1
+        guard data.count == mkiStart + mkiByteCount else {
+            throw DTLSSRTPError.invalidUseSRTExtensionLength
+        }
+        let mkiStartIndex = data.index(data.startIndex, offsetBy: mkiStart)
+        let mkiEndIndex = data.index(mkiStartIndex, offsetBy: mkiByteCount)
+
+        try self.init(
+            protectionProfiles: profiles,
+            mki: Data(data[mkiStartIndex..<mkiEndIndex])
+        )
+    }
+
+    package func encoded() throws -> Data {
+        let profileByteCount = protectionProfiles.count * 2
+        guard profileByteCount <= UInt16.max else {
+            throw DTLSSRTPError.invalidUseSRTExtensionLength
+        }
+        guard mki.count <= UInt8.max else {
+            throw DTLSSRTPError.invalidUseSRTPMKIByteCount(mki.count)
+        }
+
+        var data = Data()
+        data.appendDTLSNetworkUInt16(UInt16(profileByteCount))
+        for profile in protectionProfiles {
+            data.appendDTLSNetworkUInt16(profile.identifier)
+        }
+        data.append(UInt8(mki.count))
+        data.append(mki)
+        return data
+    }
+
+    package func selectedProfile(supportedProfiles: [SRTPProtectionProfile]) -> SRTPProtectionProfile? {
+        protectionProfiles.first { offered in
+            supportedProfiles.contains(offered)
+        }
+    }
+}
+
+package struct DTLSSRTPHandshakeConfiguration: Equatable, Sendable {
+    package var role: DTLSSRTPRole
+    package var remoteFingerprint: DTLSSignature
+    package var useSRTExtension: DTLSSRTPUseSRTExtension
+
+    package init(
+        role: DTLSSRTPRole,
+        remoteFingerprint: DTLSSignature,
+        useSRTExtension: DTLSSRTPUseSRTExtension? = nil
+    ) throws {
+        self.role = role
+        self.remoteFingerprint = remoteFingerprint
+        if let useSRTExtension {
+            self.useSRTExtension = useSRTExtension
+        } else {
+            self.useSRTExtension = try DTLSSRTPUseSRTExtension()
+        }
+    }
 }
 
 package struct SRTPMasterKeyMaterial: Equatable, Sendable {
@@ -320,6 +424,40 @@ package struct DTLSSRTPKeyMaterial: Equatable, Sendable {
     }
 }
 
+package struct DTLSSRTPHandshakeResult: Equatable, Sendable {
+    package var role: DTLSSRTPRole
+    package var protectionProfile: SRTPProtectionProfile
+    package var exportedKeyingMaterial: Data
+    package var remoteFingerprint: DTLSSignature?
+
+    package init(
+        role: DTLSSRTPRole,
+        protectionProfile: SRTPProtectionProfile = .aes128CMHMACSHA180,
+        exportedKeyingMaterial: Data,
+        remoteFingerprint: DTLSSignature? = nil
+    ) throws {
+        let expectedByteCount = protectionProfile.exporterByteCount
+        guard exportedKeyingMaterial.count == expectedByteCount else {
+            throw DTLSSRTPError.invalidExporterByteCount(
+                expected: expectedByteCount,
+                actual: exportedKeyingMaterial.count
+            )
+        }
+
+        self.role = role
+        self.protectionProfile = protectionProfile
+        self.exportedKeyingMaterial = exportedKeyingMaterial
+        self.remoteFingerprint = remoteFingerprint
+    }
+
+    package func keyMaterial() throws -> DTLSSRTPKeyMaterial {
+        try DTLSSRTPKeyMaterial(
+            exportedKeyingMaterial: exportedKeyingMaterial,
+            protectionProfile: protectionProfile
+        )
+    }
+}
+
 private enum SRTPSessionKeyLabel: UInt8 {
     case srtpEncryption = 0x00
     case srtpAuthentication = 0x01
@@ -444,5 +582,22 @@ private extension Data {
         let end = index(start, offsetBy: count)
         offset += count
         return Data(self[start..<end])
+    }
+
+    func byte(at offset: Int) -> UInt8 {
+        self[index(startIndex, offsetBy: offset)]
+    }
+
+    func dtlsNetworkUInt16(at offset: Int) throws -> UInt16 {
+        guard offset >= 0, offset + 1 < count else {
+            throw DTLSSRTPError.invalidUseSRTExtensionLength
+        }
+
+        return UInt16(byte(at: offset)) << 8 | UInt16(byte(at: offset + 1))
+    }
+
+    mutating func appendDTLSNetworkUInt16(_ value: UInt16) {
+        append(UInt8((value >> 8) & 0xFF))
+        append(UInt8(value & 0xFF))
     }
 }

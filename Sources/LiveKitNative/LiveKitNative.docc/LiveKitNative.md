@@ -42,7 +42,11 @@ and ROC-aware authentication groundwork, SRTP AES-CM payload
 encryption/decryption groundwork, full SRTP/SRTCP packet protect/unprotect APIs
 with replay rejection, secure RTP/RTCP datagram send/receive wiring,
 nominated ICE-pair guarded transport construction, UDP media datagram socket
-transport, ICE agent connectivity-check orchestration, plus RTCP
+transport, ICE agent connectivity-check orchestration, typed DTLS-SRTP
+handshake results, `use_srtp` extension encode/decode and profile selection,
+SDP DTLS fingerprint/setup parsing, peer-connection handshake configuration,
+exporter-backed secure media session construction with remote fingerprint
+validation, handshaker-backed media session binding, plus RTCP
 report/feedback packet groundwork.
 Basic signal
 resume/full-reconnect and alternative signal URL retry are implemented at
@@ -56,9 +60,9 @@ updates are exposed as typed room events. Room-connected data-track
 publish/unpublish requests now wait for matching server responses. Room-connected
 `publish(videoTrack:)` and `publish(audioTrack:)` now send LiveKit
 `AddTrackRequest` messages and wait for matching `TrackPublishedResponse`
-acknowledgements, while publisher offer generation, live ICE/DTLS media
-transport binding, and reconnect media recovery remain part of production
-hardening.
+acknowledgements, while publisher offer generation, real DTLS
+handshake/exporter implementation, subscriber/publisher media startup
+integration, and reconnect media recovery remain part of production hardening.
 
 Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the

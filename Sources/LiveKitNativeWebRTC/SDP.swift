@@ -5,6 +5,13 @@ package enum SDPParseError: Error, Equatable, Sendable {
     case missingVersion
 }
 
+package enum SDPDTLSSetupRole: String, Equatable, Sendable {
+    case active
+    case passive
+    case actpass
+    case holdconn
+}
+
 package struct SDPLine: Equatable, Sendable {
     package var field: Character
     package var value: String
@@ -104,6 +111,23 @@ package struct SDPSessionDescription: Equatable, Sendable {
         }
 
         return ICECredentials(usernameFragment: usernameFragment, password: password)
+    }
+
+    package var dtlsFingerprint: DTLSSignature? {
+        guard let fingerprint = firstAttributeValue(prefix: "fingerprint:") else {
+            return nil
+        }
+
+        let tokens = fingerprint.split(separator: " ", maxSplits: 1).map(String.init)
+        guard tokens.count == 2 else {
+            return nil
+        }
+
+        return DTLSSignature(hashFunction: tokens[0], value: tokens[1])
+    }
+
+    package var dtlsSetupRole: SDPDTLSSetupRole? {
+        firstAttributeValue(prefix: "setup:").flatMap(SDPDTLSSetupRole.init(rawValue:))
     }
 
     package func serialized() -> String {
