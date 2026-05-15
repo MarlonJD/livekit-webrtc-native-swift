@@ -34,9 +34,11 @@ package:
 These are microbenchmarks, not end-to-end media benchmarks. They do not claim
 that the SDK is production-ready, and they do not measure full ICE, DTLS-SRTP,
 live DTLS exporter output from a completed handshake, live packet protection
-wiring into media transport, jitter buffering, VideoToolbox decode/render, Opus
-codec quality, or LiveKit server compatibility. Those remain production
-blockers.
+binding to a selected ICE candidate pair, jitter buffering, VideoToolbox
+decode/render, Opus codec quality, or LiveKit server compatibility. Those
+remain production blockers. Secure RTP/RTCP datagram send/receive behavior is
+covered by unit tests; it is intentionally not used as an end-to-end throughput
+claim yet.
 
 ## Running
 

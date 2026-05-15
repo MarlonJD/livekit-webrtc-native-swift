@@ -45,7 +45,8 @@ protection groundwork, SRTP AES-CM payload encryption/decryption using RFC
 validation, full SRTP packet protect/unprotect APIs with replay rejection,
 SRTCP AES-CM payload protection, SRTCP index/authentication-tag framing,
 HMAC-SHA1 auth-tag validation, full SRTCP packet protect/unprotect APIs with
-replay rejection, RTCP
+replay rejection, actor-backed secure RTP/RTCP datagram send/receive wiring
+with RTCP mux demux and RTP rollover tracking, RTCP
 sender/receiver report and PLI/NACK feedback wire-format groundwork, H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
 assembly, native camera track scaffolding, VideoToolbox H.264 encoder
@@ -71,9 +72,10 @@ channels, binary PPID envelopes, LiveKit `DataPacket` user-packet mapping,
 request/response signaling, data subscription update signaling, and
 `RoomEvent.dataReceived` mapping for decoded packets.
 
-The active implementation focus is now `1.0.0` hardening: reconnect, TURN,
-quality controls, real DTLS-SCTP network transport, integration apps, and size
-gates.
+The active implementation focus is now `1.0.0` hardening: binding the secure
+media datagram transport to a selected ICE candidate pair and completed DTLS
+exporter output, reconnect, TURN, quality controls, real DTLS-SCTP network
+transport, integration apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -88,7 +90,7 @@ LiveKit `AddTrackRequest` messages and wait for matching
 `TrackPublishedResponse` acknowledgements before recording local publications.
 Publisher answer routing, data-track control event mapping, and data-track
 publish/unpublish request flows are unit-tested, while publisher offer
-generation, media transport, media recovery, and end-to-end reconnect
+generation, ICE-bound media transport, media recovery, and end-to-end reconnect
 hardening are still open.
 
 ## Benchmarks
@@ -134,9 +136,9 @@ The default gate checks package shape, forbidden runtime dependencies,
 unit/integration opt-in tests, benchmark smoke, and the compressed release
 binary size proxy. The strict gate additionally requires
 `LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
-That strict gate intentionally fails today because DTLS-SRTP, full ICE/TURN,
-publisher media transport, live SCTP, and end-to-end LiveKit tests are still
-open.
+That strict gate intentionally fails today because the DTLS handshake/exporter
+binding, full ICE/TURN, publisher media transport, live SCTP, and end-to-end
+LiveKit tests are still open.
 
 ## Requirements
 

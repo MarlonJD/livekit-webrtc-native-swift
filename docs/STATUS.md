@@ -253,7 +253,12 @@ The old binary WebRTC dependency path has been removed from the package model.
   - SRTCP replay-window primitive keyed by sender SSRC and SRTCP index
   - SRTCP packet protect/unprotect API that combines AES-CM payload protection,
     authentication validation, and replay rejection
-  - explicit boundary before full DTLS `use_srtp` handshake and SRTP key export
+  - actor-backed secure RTP/RTCP datagram transport that protects outbound RTP
+    and RTCP packets, demuxes inbound RTP/SRTCP datagrams, estimates inbound
+    RTP rollover counters, and applies SRTP/SRTCP replay rejection at the
+    transport boundary
+  - explicit boundary before full DTLS `use_srtp` handshake, live SRTP key
+    export, and selected ICE candidate-pair binding
 - RTP basics:
   - RTP v2 header encode/decode
   - marker bit, payload type, sequence number, timestamp, SSRC, and payload
@@ -333,7 +338,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 172 tests passed
+  - 177 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -346,7 +351,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,207,756 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,216,582 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -384,8 +389,8 @@ The following checks passed after the latest implementation pass:
 - DTLS 1.2 handshake.
 - `use_srtp` negotiation.
 - Invoking the real DTLS exporter from a completed handshake.
-- Wiring SRTP/SRTCP packet protection into live media transport.
-- Wiring SRTP/SRTCP replay protection into live media transport.
+- Binding the secure RTP/RTCP datagram transport to the selected ICE candidate
+  pair and completed DTLS exporter output.
 - Wiring RTCP feedback/report packets into live media transport.
 - TWCC, REMB, or congestion control.
 - Jitter buffer.

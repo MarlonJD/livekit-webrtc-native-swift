@@ -38,7 +38,8 @@ sequence rollover tracking, RFC 3711 SRTP/SRTCP session key derivation,
 client/server DTLS-SRTP packet-protection context wiring, SRTP replay-window
 and ROC-aware authentication groundwork, SRTP AES-CM payload
 encryption/decryption groundwork, full SRTP/SRTCP packet protect/unprotect APIs
-with replay rejection, plus RTCP report/feedback packet groundwork.
+with replay rejection, secure RTP/RTCP datagram send/receive wiring, plus RTCP
+report/feedback packet groundwork.
 Basic signal
 resume/full-reconnect and alternative signal URL retry are implemented at
 unit-test level. Speaker, connection quality,

@@ -28,7 +28,7 @@ public extension LiveKitNative {
     static let productionReadiness = LiveKitNativeProductionReadiness(
         status: .developerPreview,
         blockers: [
-            "DTLS-SRTP media transport is not implemented.",
+            "DTLS-SRTP packet protection exists, but the secure media transport is not bound to a completed DTLS handshake, DTLS exporter output, or a selected ICE candidate pair.",
             "TURN TCP/TLS fallback and ICE restart hardening are not implemented.",
             "H.264/VP8/Opus media send/receive paths are not end-to-end integrated.",
             "SCTP data channel support is packet-level only and not connected to a live DTLS transport.",
