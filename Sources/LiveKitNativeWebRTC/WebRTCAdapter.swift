@@ -224,14 +224,29 @@ package enum PeerConnectionState: String, Equatable, Sendable {
 
 package enum PeerConnectionNegotiationError: Error, Equatable, Sendable {
     case subscriberAnswerRequestedForPublisher
+    case publisherAnswerAppliedToSubscriber
+}
+
+package struct RemoteSessionDescription: Equatable, Sendable {
+    package var type: String
+    package var sdp: String
+    package var id: UInt32
+
+    package init(type: String, sdp: String, id: UInt32) {
+        self.type = type
+        self.sdp = sdp
+        self.id = id
+    }
 }
 
 package final class PeerConnectionCoordinator: @unchecked Sendable {
     package let configuration: NativeWebRTCConfiguration
     package private(set) var state: PeerConnectionState = .new
     private let remoteCandidateLock = NSLock()
+    private let remoteDescriptionLock = NSLock()
     private var mutableRemoteICECandidates: [RemoteICECandidate] = []
     private var mutableRemoteICEGatheringComplete = false
+    private var mutableRemoteAnswer: RemoteSessionDescription?
 
     package init(configuration: NativeWebRTCConfiguration) {
         self.configuration = configuration
@@ -247,6 +262,12 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         remoteCandidateLock.lock()
         defer { remoteCandidateLock.unlock() }
         return mutableRemoteICEGatheringComplete
+    }
+
+    package var remoteAnswer: RemoteSessionDescription? {
+        remoteDescriptionLock.lock()
+        defer { remoteDescriptionLock.unlock() }
+        return mutableRemoteAnswer
     }
 
     package var localCapabilities: [SDPCodecCapability] {
@@ -298,5 +319,16 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
             iceCredentials: configuration.iceCredentials,
             dtlsFingerprint: configuration.dtlsFingerprint
         ).makeAnswer(to: offerSDP)
+    }
+
+    package func applyPublisherAnswer(type: String, sdp: String, id: UInt32) throws {
+        guard configuration.role == .publisher else {
+            throw PeerConnectionNegotiationError.publisherAnswerAppliedToSubscriber
+        }
+
+        remoteDescriptionLock.lock()
+        defer { remoteDescriptionLock.unlock() }
+        mutableRemoteAnswer = RemoteSessionDescription(type: type, sdp: sdp, id: id)
+        state = .connected
     }
 }

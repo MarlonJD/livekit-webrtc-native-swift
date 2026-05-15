@@ -14,6 +14,15 @@ actor RoomActor {
     }
 
     func applyJoin(_ join: RoomJoinSnapshot) -> (RoomSnapshot, [RoomEvent]) {
+        var events: [RoomEvent] = []
+        let previousParticipants = state.remoteParticipants.values.sorted { $0.id < $1.id }
+
+        for participant in previousParticipants {
+            let unpublishedTracks = participant.removeAllTrackPublications()
+            events.append(contentsOf: unpublishedTracks.map { .trackUnpublished($0, participant: participant) })
+            events.append(.participantDisconnected(participant))
+        }
+
         state.localParticipant = LocalParticipant(
             sid: join.localParticipant.sid,
             identity: join.localParticipant.identity,
@@ -24,7 +33,6 @@ actor RoomActor {
         state.remoteParticipants.removeAll()
         state.connectionState = .connected
 
-        var events: [RoomEvent] = []
         applyRemoteParticipantUpdates(join.remoteParticipants, events: &events)
 
         return (state.snapshot, events)

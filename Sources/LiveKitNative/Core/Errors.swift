@@ -10,6 +10,7 @@ public enum LiveKitNativeError: Error, Equatable, Sendable {
     case requestFailed(action: String, reason: String, message: String)
     case requestTimedOut(action: String)
     case productionReadinessFailed([String])
+    case reconnectFailed(String)
     case notImplemented(String)
 }
 
@@ -34,6 +35,8 @@ extension LiveKitNativeError: LocalizedError {
             "LiveKit request timed out for \(action)."
         case let .productionReadinessFailed(blockers):
             "LiveKitNative is not production-ready: \(blockers.joined(separator: "; "))"
+        case let .reconnectFailed(reason):
+            "LiveKit reconnect failed: \(reason)"
         case let .notImplemented(feature):
             "\(feature) is not implemented yet."
         }

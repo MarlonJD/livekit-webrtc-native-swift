@@ -11,8 +11,11 @@ client.
 Production readiness is intentionally represented in code through
 `LiveKitNative.productionReadiness` and `LiveKitNative.assertProductionReady()`.
 The current status is `developerPreview`, with explicit blockers for DTLS-SRTP,
-TURN/reconnect hardening, live media transport integration, DTLS-backed SCTP,
-and end-to-end LiveKit compatibility testing.
+TURN/ICE hardening, live media transport integration, DTLS-backed SCTP,
+media recovery during reconnect, and end-to-end LiveKit compatibility testing.
+Publisher `AddTrackRequest` signaling is now wired for local audio/video
+publishes, but publisher SDP negotiation and media sender transport are still
+open.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -25,6 +28,8 @@ The old binary WebRTC dependency path has been removed from the package model.
 - Internal implementation targets:
   - `LiveKitNativeProtocol`
   - `LiveKitNativeWebRTC`
+- Benchmark target:
+  - `LiveKitNativeBenchmarks`
 - Test targets:
   - `LiveKitNativeTests`
   - `LiveKitNativeIntegrationTests`
@@ -60,6 +65,14 @@ The old binary WebRTC dependency path has been removed from the package model.
   - typed `productionReadinessFailed` error with blocker details
 - Configurable SDK logging through `LiveKitNativeLogging` with an OSLog-backed
   default logger.
+- Release-mode microbenchmark executable and documentation:
+  - `swift run -c release LiveKitNativeBenchmarks`
+  - `docs/BENCHMARKS.md`
+  - optional external CSV baseline comparison for official SDK/WebRTC numbers
+- Release-readiness scripts:
+  - `scripts/check_release_readiness.sh`
+  - `scripts/check_release_size.sh`
+  - strict production mode through `REQUIRE_PRODUCTION_READY=1`
 - `LocalParticipant` has local video publication state for camera tracks,
   including idempotent `setCamera(enabled:)`, `publish(videoTrack:)`, and
   `unpublish(publication:)` behavior.
@@ -99,9 +112,22 @@ The old binary WebRTC dependency path has been removed from the package model.
   `UpdateParticipantMetadata` requests, await LiveKit `RequestResponse`, map
   permission failures to typed SDK errors, and apply local state only after
   successful acknowledgement.
+- `LocalParticipant.publish(videoTrack:)` and `publish(audioTrack:)` send
+  LiveKit `AddTrackRequest` messages over the active signal connection, await
+  the matching `TrackPublishedResponse` by local CID, and record local
+  publications from the server-returned `TrackInfo`.
+- `SignalResponse.trackPublished` messages are correlated by local CID for
+  client-originated publish requests.
 - Public `Room.disconnect()` clears remote participants, removes remote track
   publications, emits cleanup lifecycle events, closes signaling, and clears
   pending request-response state.
+- `JoinResponse.alternative_url` is retried with a bounded redirect budget.
+- `LeaveRequest.resume` reconnects the signal socket with `reconnect=true` and
+  accepts `ReconnectResponse`.
+- `LeaveRequest.reconnect` performs a fresh signal join with `reconnect=false`
+  and replaces stale remote participant state with cleanup events.
+- `ConnectOptions` exposes reconnect attempt, retry delay, and alternative URL
+  redirect limits.
 - `SignalResponse.offer` is routed into the subscriber peer connection adapter,
   which generates a minimal SDP answer and sends it back as
   `SignalRequest.answer`.
@@ -195,6 +221,8 @@ The old binary WebRTC dependency path has been removed from the package model.
   - VideoToolbox H.264 encoder configuration scaffold
   - H.264 encoded-frame to RTP packetization
   - LiveKit `AddTrackRequest` builder for H.264 camera publishes
+  - room-connected publish signaling through `AddTrackRequest` and
+    `TrackPublishedResponse`
   - local video publication lifecycle tests
 - Swift Opus audio groundwork:
   - `AudioCaptureOptions` carries echo-cancellation, sample-rate,
@@ -209,6 +237,8 @@ The old binary WebRTC dependency path has been removed from the package model.
   - native audio playout scaffold using `AVAudioEngine` and
     `AVAudioPlayerNode`
   - LiveKit `AddTrackRequest` builder for Opus microphone publishes
+  - room-connected publish signaling through `AddTrackRequest` and
+    `TrackPublishedResponse`
   - local audio publication lifecycle tests for `setMicrophone(enabled:)`,
     `publish(audioTrack:)`, and `unpublish(publication:)`
 - Swift VP8 decode-only subscribe groundwork:
@@ -243,12 +273,22 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 100 tests passed
+  - 105 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
 - `xcodebuild docbuild`
   - passes with warnings from the third-party SwiftProtobuf DocC content
+- Release-mode benchmark smoke:
+  - `swift run -c release LiveKitNativeBenchmarks --samples 300 --warmup 30 --ops-per-sample 100`
+  - official SDK/WebRTC baseline is intentionally external and not yet measured
+- Release gates:
+  - `scripts/check_release_readiness.sh` validates package shape, dependency
+    guard, tests, benchmark smoke, and size gate in non-strict mode
+  - `scripts/check_release_size.sh` passes with the current compressed
+    `LiveKitNativeBenchmarks` release binary under the 5 MB proxy limit
+  - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
+    to fail until production blockers are removed
 - Forbidden dependency guard:
   - no Rust, UniFFI, LiveKitWebRTC XCFramework, BoringSSL, libopus, or libvpx
     artifacts found
@@ -263,10 +303,10 @@ The following checks passed after the latest implementation pass:
 - Rich handling for publisher answers, speaker updates, connection quality,
   stream state, subscription permissions, room moved, and data track control
   messages.
-- Sending local video `AddTrackRequest` through the live signal connection and
-  awaiting server `TrackPublishedResponse`.
-- Alternative URL retry handling from `JoinResponse.alternative_url`.
-- Signal reconnect and resume.
+- Publisher SDP offer/answer, transceiver negotiation, RTP sender transport,
+  and LiveKit integration coverage for AddTrack publishes.
+- Production-hardened reconnect across ICE restart, media recovery, data
+  channel recovery, and server migration.
 - Request-response coverage for all client-originated signaling commands beyond
   participant metadata/name/attribute updates.
 - Wiring subscriber ICE candidates into real network connectivity.
@@ -314,20 +354,20 @@ The following checks passed after the latest implementation pass:
 - Publish path.
 - Two-client media/data test.
 - Reconnect integration test.
-- Size gate using a minimal release app.
+- Final size gate using a minimal release app, beyond the current compressed
+  benchmark-binary proxy gate.
 
 ## Next Recommended Work
 
 1. Continue `1.0.0` hardening with real DTLS-backed SCTP transport wiring.
 2. Connect queued local data publish plans to the publisher peer connection
    once data channels are open.
-3. Add signal reconnect/resume, ICE restart, TURN UDP/TCP/TLS fallback, and
-   automated local LiveKit integration tests.
+3. Add ICE restart, media/data recovery after signal reconnect, TURN UDP/TCP/TLS
+   fallback, and automated local LiveKit integration tests.
 4. Add text streams, byte streams, RPC, and two-client data integration tests.
 5. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
-   publisher `AddTrackRequest` signaling, transceiver negotiation, and
-   DTLS-SRTP integration as the hardening path before a usable end-to-end
-   release.
+   publisher transceiver negotiation, RTP sender transport, and DTLS-SRTP
+   integration as the hardening path before a usable end-to-end release.
 
 ## Practical Release Status
 
@@ -340,3 +380,15 @@ Do not tag this as production-ready `1.0.0` until
 `LiveKitNative.productionReadiness.status == .productionReady`, blockers are
 empty, local LiveKit integration tests pass, and the release size/dependency
 guards pass on CI.
+
+For current CI hardening, use:
+
+```sh
+scripts/check_release_readiness.sh
+```
+
+For an actual production tag gate, use:
+
+```sh
+REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh
+```

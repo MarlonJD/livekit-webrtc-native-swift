@@ -53,6 +53,15 @@ let package = Package(
                 .linkedFramework("VideoToolbox", .when(platforms: [.iOS, .macOS])),
             ]
         ),
+        .executableTarget(
+            name: "LiveKitNativeBenchmarks",
+            dependencies: [
+                "LiveKitNative",
+                "LiveKitNativeProtocol",
+                "LiveKitNativeWebRTC",
+            ],
+            path: "Benchmarks/LiveKitNativeBenchmarks"
+        ),
         .testTarget(
             name: "LiveKitNativeTests",
             dependencies: [

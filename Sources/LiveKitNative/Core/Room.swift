@@ -11,10 +11,13 @@ public final class Room: @unchecked Sendable {
     private let signalConnection: SignalConnection
     private let requestTracker = SignalRequestTracker()
     private let subscriberPeerConnection: PeerConnectionCoordinator
+    private let publisherPeerConnection: PeerConnectionCoordinator
     private let snapshots: RoomSnapshotStore
     private let signalLoopLock = NSLock()
+    private let connectionContextLock = NSLock()
     private let eventContinuation: AsyncStream<RoomEvent>.Continuation
     private var signalLoopTask: Task<Void, Never>?
+    private var connectionContext: RoomConnectionContext?
 
     public var localParticipant: LocalParticipant {
         snapshots.localParticipant
@@ -37,11 +40,15 @@ public final class Room: @unchecked Sendable {
         signalConnection: SignalConnection,
         subscriberPeerConnection: PeerConnectionCoordinator = PeerConnectionCoordinator(
             configuration: NativeWebRTCConfiguration(role: .subscriber)
+        ),
+        publisherPeerConnection: PeerConnectionCoordinator = PeerConnectionCoordinator(
+            configuration: NativeWebRTCConfiguration(role: .publisher)
         )
     ) {
         self.options = options
         self.signalConnection = signalConnection
         self.subscriberPeerConnection = subscriberPeerConnection
+        self.publisherPeerConnection = publisherPeerConnection
 
         let localParticipant = LocalParticipant(identity: "local")
         self.actor = RoomActor(localParticipant: localParticipant)
@@ -64,26 +71,23 @@ public final class Room: @unchecked Sendable {
 
     public func connect(url: URL, token: String, connectOptions: ConnectOptions = .init()) async throws {
         LiveKitNativeLogging.log(.info, "Connecting room.")
-
-        let autoSubscribe = connectOptions.autoSubscribe ?? options.defaultAutoSubscribe
-        let signalURL = try SignalURLBuilder(serverURL: url).build(
-            token: token,
-            reconnect: connectOptions.reconnect,
-            autoSubscribe: autoSubscribe,
-            connectOptions: connectOptions
-        )
+        let context = RoomConnectionContext(serverURL: url, token: token, connectOptions: connectOptions)
+        setConnectionContext(context)
 
         await transition(to: .connecting)
 
         do {
-            try await signalConnection.connect(to: signalURL)
-            let response = try await signalConnection.receive(Livekit_SignalResponse.self)
-            try await applyInitialSignalResponse(response)
+            try await connectSignalAndApplyInitialResponse(
+                context: context,
+                reconnect: connectOptions.reconnect,
+                alternativeURLRedirects: max(0, connectOptions.maxAlternativeURLRedirects)
+            )
             startSignalLoop()
             LiveKitNativeLogging.log(.info, "Room connected.")
         } catch {
             stopSignalLoop()
             await signalConnection.close()
+            clearConnectionContext()
             await transition(to: .disconnected)
             LiveKitNativeLogging.log(.error, "Room connect failed: \(error.localizedDescription)")
             throw error
@@ -97,6 +101,7 @@ public final class Room: @unchecked Sendable {
         await transition(to: .disconnecting)
         await signalConnection.close()
         await requestTracker.clear()
+        clearConnectionContext()
         let result = await actor.disconnect()
         snapshots.replace(with: result.0)
 
@@ -167,6 +172,7 @@ public final class Room: @unchecked Sendable {
 
                     await signalConnection.close()
                     await self.requestTracker.clear()
+                    self.clearConnectionContext()
                     await self.transition(to: .disconnected)
                     LiveKitNativeLogging.log(.error, "Signal loop stopped: \(error.localizedDescription)")
                     return
@@ -210,18 +216,35 @@ public final class Room: @unchecked Sendable {
         case let .offer(offer):
             try await answerSubscriberOffer(offer)
             return true
+        case let .answer(answer):
+            try handlePublisherAnswer(answer)
+            return true
         case let .trickle(trickle):
             try handleTrickle(trickle)
             return true
+        case let .speakersChanged(speakers):
+            emit(.speakersChanged(speakers.speakers.map { SpeakerInfo(speakerInfo: $0) }))
+            return true
+        case let .connectionQuality(connectionQuality):
+            emit(.connectionQualityChanged(connectionQuality.updates.map { ConnectionQualityInfo(qualityInfo: $0) }))
+            return true
+        case let .streamStateUpdate(streamStateUpdate):
+            emit(.streamStateChanged(streamStateUpdate.streamStates.map { TrackStreamStateInfo(streamStateInfo: $0) }))
+            return true
+        case let .roomMoved(roomMoved):
+            await applyRoomMoved(roomMoved)
+            return true
         case let .trackUnpublished(trackUnpublished):
             await applyTrackUnpublished(trackSID: trackUnpublished.trackSid)
+            return true
+        case let .trackPublished(trackPublished):
+            await requestTracker.fulfill(trackPublished)
             return true
         case let .requestResponse(response):
             await requestTracker.fulfill(response)
             return true
         case let .leave(leave):
-            await handleLeaveRequest(leave)
-            return false
+            return await handleLeaveRequest(leave)
         case .reconnect(_):
             await transition(to: .connected)
             return true
@@ -250,12 +273,50 @@ public final class Room: @unchecked Sendable {
         )
     }
 
-    private func handleLeaveRequest(_ leave: Livekit_LeaveRequest) async {
+    private func handlePublisherAnswer(_ answer: Livekit_SessionDescription) throws {
+        try publisherPeerConnection.applyPublisherAnswer(type: answer.type, sdp: answer.sdp, id: answer.id)
+    }
+
+    private func applyRoomMoved(_ roomMoved: Livekit_RoomMovedResponse) async {
+        if !roomMoved.token.isEmpty {
+            updateConnectionToken(roomMoved.token)
+        }
+
+        let movedInfo = RoomMovedInfo(roomMovedResponse: roomMoved)
+        var joinResponse = Livekit_JoinResponse()
+        joinResponse.participant = roomMoved.participant
+        joinResponse.otherParticipants = roomMoved.otherParticipants
+
+        let result = await actor.applyJoin(RoomJoinSnapshot(joinResponse: joinResponse))
+        snapshots.replace(with: result.0)
+        configureLocalParticipant(result.0.localParticipant)
+        emit(.roomMoved(movedInfo))
+
+        for event in result.1 {
+            emit(event)
+        }
+    }
+
+    private func handleLeaveRequest(_ leave: Livekit_LeaveRequest) async -> Bool {
         if leave.canReconnect || leave.action == .resume || leave.action == .reconnect {
             await transition(to: .reconnecting)
+            do {
+                try await reconnectAfterLeave(leave)
+                return true
+            } catch {
+                LiveKitNativeLogging.log(.error, "Reconnect failed: \(error.localizedDescription)")
+                await signalConnection.close()
+                await requestTracker.clear()
+                clearConnectionContext()
+                await transition(to: .disconnected)
+                return false
+            }
         } else {
             await signalConnection.close()
+            await requestTracker.clear()
+            clearConnectionContext()
             await transition(to: .disconnected)
+            return false
         }
     }
 
@@ -273,6 +334,32 @@ public final class Room: @unchecked Sendable {
     private func configureLocalParticipant(_ localParticipant: LocalParticipant) {
         localParticipant.setCommandHandler(
             LocalParticipantCommandHandler(
+                publishVideo: { [weak self] plan in
+                    guard let self else {
+                        throw LiveKitNativeError.notConnected
+                    }
+                    return try await self.sendAddTrack(
+                        plan.addTrackRequest,
+                        cid: plan.cid,
+                        fallbackName: plan.name,
+                        fallbackKind: .video,
+                        fallbackSource: plan.source,
+                        action: "publish video track"
+                    )
+                },
+                publishAudio: { [weak self] plan in
+                    guard let self else {
+                        throw LiveKitNativeError.notConnected
+                    }
+                    return try await self.sendAddTrack(
+                        plan.addTrackRequest,
+                        cid: plan.cid,
+                        fallbackName: plan.name,
+                        fallbackKind: .audio,
+                        fallbackSource: plan.source,
+                        action: "publish audio track"
+                    )
+                },
                 updateParticipant: { [weak self] update in
                     guard let self else {
                         throw LiveKitNativeError.notConnected
@@ -286,6 +373,28 @@ public final class Room: @unchecked Sendable {
                     throw LiveKitNativeError.notImplemented("DTLS-backed SCTP data transport")
                 }
             )
+        )
+    }
+
+    private func sendAddTrack(
+        _ addTrackRequest: Livekit_AddTrackRequest,
+        cid: String,
+        fallbackName: String,
+        fallbackKind: TrackKind,
+        fallbackSource: TrackSource,
+        action: String
+    ) async throws -> LocalPublishedTrack {
+        var request = Livekit_SignalRequest()
+        request.addTrack = addTrackRequest
+
+        try await signalConnection.send(request)
+        let response = try await requestTracker.waitForTrackPublished(cid: cid, action: action)
+        return LocalPublishedTrack(
+            trackInfo: response.track,
+            fallbackCID: cid,
+            fallbackName: fallbackName,
+            fallbackKind: fallbackKind,
+            fallbackSource: fallbackSource
         )
     }
 
@@ -328,8 +437,213 @@ public final class Room: @unchecked Sendable {
         }
     }
 
+    private func connectSignalAndApplyInitialResponse(
+        context: RoomConnectionContext,
+        reconnect: Bool,
+        alternativeURLRedirects: Int
+    ) async throws {
+        var serverURL = context.serverURL
+        var remainingRedirects = alternativeURLRedirects
+
+        while true {
+            let response = try await connectSignalAndReceiveInitialResponse(
+                serverURL: serverURL,
+                context: context,
+                reconnect: reconnect
+            )
+
+            if case let .join(joinResponse)? = response.message, !joinResponse.alternativeURL.isEmpty {
+                guard remainingRedirects > 0 else {
+                    throw LiveKitNativeError.reconnectFailed("Alternative signal URL redirect limit exceeded.")
+                }
+
+                guard let alternativeURL = URL(string: joinResponse.alternativeURL) else {
+                    throw LiveKitNativeError.invalidURL("Invalid alternative signal URL: \(joinResponse.alternativeURL)")
+                }
+
+                remainingRedirects -= 1
+                serverURL = alternativeURL
+                await signalConnection.close()
+                LiveKitNativeLogging.log(.info, "Retrying signal connection with alternative URL.")
+                continue
+            }
+
+            try await applyInitialOrReconnectResponse(response, reconnect: reconnect)
+            return
+        }
+    }
+
+    private func connectSignalAndReceiveInitialResponse(
+        serverURL: URL,
+        context: RoomConnectionContext,
+        reconnect: Bool
+    ) async throws -> Livekit_SignalResponse {
+        let autoSubscribe = context.connectOptions.autoSubscribe ?? options.defaultAutoSubscribe
+        let signalURL = try SignalURLBuilder(serverURL: serverURL).build(
+            token: context.token,
+            reconnect: reconnect,
+            autoSubscribe: autoSubscribe,
+            connectOptions: context.connectOptions
+        )
+
+        try await signalConnection.connect(to: signalURL)
+        return try await signalConnection.receive(Livekit_SignalResponse.self)
+    }
+
+    private func applyInitialOrReconnectResponse(_ response: Livekit_SignalResponse, reconnect: Bool) async throws {
+        switch response.message {
+        case .join?:
+            try await applyInitialSignalResponse(response)
+        case .reconnect?:
+            await transition(to: .connected)
+        default:
+            let expected = reconnect ? "ReconnectResponse or JoinResponse" : "JoinResponse"
+            throw LiveKitNativeError.invalidSignalFrame("Expected initial \(expected) from LiveKit signaling.")
+        }
+    }
+
+    private func reconnectAfterLeave(_ leave: Livekit_LeaveRequest) async throws {
+        guard let context = currentConnectionContext() else {
+            throw LiveKitNativeError.reconnectFailed("Missing previous connection context.")
+        }
+
+        let shouldResume = leave.action == .resume || (leave.canReconnect && leave.action != .reconnect)
+        let attempts = max(1, context.connectOptions.maxReconnectAttempts)
+        let delay = max(0, context.connectOptions.reconnectRetryDelayMilliseconds)
+        var lastError: (any Error)?
+
+        for attempt in 0..<attempts {
+            if attempt > 0, delay > 0 {
+                try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
+            }
+
+            do {
+                await signalConnection.close()
+                try await connectSignalAndApplyInitialResponse(
+                    context: context,
+                    reconnect: shouldResume,
+                    alternativeURLRedirects: max(0, context.connectOptions.maxAlternativeURLRedirects)
+                )
+                return
+            } catch {
+                lastError = error
+                LiveKitNativeLogging.log(.warning, "Reconnect attempt \(attempt + 1) failed: \(error.localizedDescription)")
+            }
+        }
+
+        throw LiveKitNativeError.reconnectFailed(lastError?.localizedDescription ?? "No reconnect attempts were made.")
+    }
+
+    private func setConnectionContext(_ context: RoomConnectionContext) {
+        connectionContextLock.withLock {
+            connectionContext = context
+        }
+    }
+
+    private func currentConnectionContext() -> RoomConnectionContext? {
+        connectionContextLock.withLock {
+            connectionContext
+        }
+    }
+
+    private func clearConnectionContext() {
+        connectionContextLock.withLock {
+            connectionContext = nil
+        }
+    }
+
+    private func updateConnectionToken(_ token: String) {
+        connectionContextLock.withLock {
+            guard var context = connectionContext else {
+                return
+            }
+
+            context.token = token
+            connectionContext = context
+        }
+    }
+
     private func emit(_ event: RoomEvent) {
         eventContinuation.yield(event)
         delegate?.room(self, didEmit: event)
+    }
+}
+
+private struct RoomConnectionContext: Sendable {
+    var serverURL: URL
+    var token: String
+    var connectOptions: ConnectOptions
+}
+
+private extension SpeakerInfo {
+    init(speakerInfo: Livekit_SpeakerInfo) {
+        self.init(
+            participantSID: speakerInfo.sid,
+            level: speakerInfo.level,
+            isActive: speakerInfo.active
+        )
+    }
+}
+
+private extension ConnectionQualityInfo {
+    init(qualityInfo: Livekit_ConnectionQualityInfo) {
+        self.init(
+            participantSID: qualityInfo.participantSid,
+            quality: ConnectionQuality(protocolQuality: qualityInfo.quality),
+            score: qualityInfo.score
+        )
+    }
+}
+
+private extension ConnectionQuality {
+    init(protocolQuality: Livekit_ConnectionQuality) {
+        switch protocolQuality {
+        case .poor:
+            self = .poor
+        case .good:
+            self = .good
+        case .excellent:
+            self = .excellent
+        case .lost:
+            self = .lost
+        case let .UNRECOGNIZED(rawValue):
+            self = .unknown(rawValue)
+        }
+    }
+}
+
+private extension TrackStreamStateInfo {
+    init(streamStateInfo: Livekit_StreamStateInfo) {
+        self.init(
+            participantSID: streamStateInfo.participantSid,
+            trackSID: streamStateInfo.trackSid,
+            state: TrackStreamState(protocolState: streamStateInfo.state)
+        )
+    }
+}
+
+private extension TrackStreamState {
+    init(protocolState: Livekit_StreamState) {
+        switch protocolState {
+        case .active:
+            self = .active
+        case .paused:
+            self = .paused
+        case let .UNRECOGNIZED(rawValue):
+            self = .unknown(rawValue)
+        }
+    }
+}
+
+private extension RoomMovedInfo {
+    init(roomMovedResponse: Livekit_RoomMovedResponse) {
+        self.init(
+            roomSID: roomMovedResponse.room.sid,
+            roomName: roomMovedResponse.room.name,
+            reconnectToken: roomMovedResponse.token,
+            participantSID: roomMovedResponse.participant.sid,
+            participantIdentity: roomMovedResponse.participant.identity,
+            remoteParticipantIdentities: roomMovedResponse.otherParticipants.map(\.identity)
+        )
     }
 }

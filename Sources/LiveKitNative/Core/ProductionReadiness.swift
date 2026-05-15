@@ -32,7 +32,7 @@ public extension LiveKitNative {
             "TURN TCP/TLS fallback and ICE restart hardening are not implemented.",
             "H.264/VP8/Opus media send/receive paths are not end-to-end integrated.",
             "SCTP data channel support is packet-level only and not connected to a live DTLS transport.",
-            "Reconnect resume and full reconnect fallback are not production-hardened.",
+            "Signal reconnect is unit-tested only; ICE restart, media recovery, and LiveKit integration hardening are incomplete.",
             "End-to-end LiveKit server compatibility tests are not automated in CI."
         ],
         warnings: [

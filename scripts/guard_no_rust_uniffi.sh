@@ -32,7 +32,7 @@ if command -v rg >/dev/null 2>&1; then
     --glob '!scripts/guard_no_rust_uniffi.sh' \
     --glob '!README.md' \
     "$blocked_dependency_pattern" \
-    Package.swift Package.resolved Sources Tests .github scripts || true)"
+    Package.swift Package.resolved Sources Tests Benchmarks .github scripts || true)"
 else
   bridge_matches=""
   while IFS= read -r file; do
@@ -46,7 +46,7 @@ else
     if [[ -n "$matches" ]]; then
       bridge_matches+="${file}:${matches}"$'\n'
     fi
-  done < <(find Package.swift Package.resolved Sources Tests .github scripts \
+  done < <(find Package.swift Package.resolved Sources Tests Benchmarks .github scripts \
     -path './.git' -prune -o \
     -path './.build' -prune -o \
     -type f -print 2>/dev/null)

@@ -113,11 +113,16 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
 
     public func publish(videoTrack: LocalVideoTrack, options: TrackPublishOptions = .init()) async throws -> LocalTrackPublication {
         let plan = LocalVideoPublishPlan(track: videoTrack, options: options)
+        let publishedTrack = if let commandHandler = currentCommandHandler() {
+            try await commandHandler.publishVideo(plan)
+        } else {
+            LocalPublishedTrack(sid: plan.cid, name: plan.name, kind: .video, source: plan.source)
+        }
         let publication = LocalTrackPublication(
-            sid: plan.cid,
-            name: plan.name,
-            kind: .video,
-            source: plan.source,
+            sid: publishedTrack.sid,
+            name: publishedTrack.name,
+            kind: publishedTrack.kind,
+            source: publishedTrack.source,
             track: videoTrack
         )
 
@@ -130,11 +135,16 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
 
     public func publish(audioTrack: LocalAudioTrack, options: TrackPublishOptions = .init()) async throws -> LocalTrackPublication {
         let plan = LocalAudioPublishPlan(track: audioTrack, options: options)
+        let publishedTrack = if let commandHandler = currentCommandHandler() {
+            try await commandHandler.publishAudio(plan)
+        } else {
+            LocalPublishedTrack(sid: plan.cid, name: plan.name, kind: .audio, source: plan.source)
+        }
         let publication = LocalTrackPublication(
-            sid: plan.cid,
-            name: plan.name,
-            kind: .audio,
-            source: plan.source,
+            sid: publishedTrack.sid,
+            name: publishedTrack.name,
+            kind: publishedTrack.kind,
+            source: publishedTrack.source,
             track: audioTrack
         )
 
@@ -239,7 +249,33 @@ struct ParticipantMetadataUpdate: Equatable, Sendable {
     }
 }
 
+struct LocalPublishedTrack: Equatable, Sendable {
+    var sid: String
+    var name: String
+    var kind: TrackKind
+    var source: TrackSource
+
+    init(sid: String, name: String, kind: TrackKind, source: TrackSource) {
+        self.sid = sid
+        self.name = name
+        self.kind = kind
+        self.source = source
+    }
+
+    init(trackInfo: Livekit_TrackInfo, fallbackCID: String, fallbackName: String, fallbackKind: TrackKind, fallbackSource: TrackSource) {
+        self.sid = trackInfo.sid.isEmpty ? fallbackCID : trackInfo.sid
+        self.name = trackInfo.name.isEmpty ? fallbackName : trackInfo.name
+        self.kind = TrackKind(protocolTrackType: trackInfo.type) ?? fallbackKind
+        self.source = TrackSource(protocolTrackSource: trackInfo.source)
+        if self.source == .unknown {
+            self.source = fallbackSource
+        }
+    }
+}
+
 struct LocalParticipantCommandHandler: Sendable {
+    var publishVideo: @Sendable (LocalVideoPublishPlan) async throws -> LocalPublishedTrack
+    var publishAudio: @Sendable (LocalAudioPublishPlan) async throws -> LocalPublishedTrack
     var updateParticipant: @Sendable (ParticipantMetadataUpdate) async throws -> Void
     var publishData: @Sendable (LocalDataPublishPlan) async throws -> Void
 }

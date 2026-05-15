@@ -1,0 +1,9 @@
+benchmark,implementation,median_us,p95_us,ops_per_second,notes
+signal.protobuf_roundtrip,Official LiveKit Swift SDK + WebRTC baseline,0,0,0,replace with measured release-build value
+sdp.subscriber_answer,Official LiveKit Swift SDK + WebRTC baseline,0,0,0,replace with measured release-build value
+stun.binding_roundtrip,Official LiveKit Swift SDK + WebRTC baseline,0,0,0,replace with measured release-build value
+rtp.packet_encode_decode,Official LiveKit Swift SDK + WebRTC baseline,0,0,0,replace with measured release-build value
+h264.packetize_depacketize,Official LiveKit Swift SDK + WebRTC baseline,0,0,0,replace with measured release-build value
+vp8.payload_depacketize,Official LiveKit Swift SDK + WebRTC baseline,0,0,0,replace with measured release-build value
+opus.rtp_packetize_depacketize,Official LiveKit Swift SDK + WebRTC baseline,0,0,0,replace with measured release-build value
+sctp.dcep_open_ack_roundtrip,Official LiveKit Swift SDK + WebRTC baseline,0,0,0,replace with measured release-build value

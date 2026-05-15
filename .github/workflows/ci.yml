@@ -17,6 +17,12 @@ jobs:
         run: swift package resolve
       - name: Run tests
         run: swift test
+      - name: Validate release gate shape
+        run: LIVEKIT_NATIVE_RELEASE_RUN_TESTS=0 LIVEKIT_NATIVE_RELEASE_RUN_BENCHMARKS=0 LIVEKIT_NATIVE_RELEASE_RUN_SIZE_GATE=0 scripts/check_release_readiness.sh
+      - name: Benchmark smoke
+        run: swift run -c release LiveKitNativeBenchmarks --samples 30 --warmup 5 --ops-per-sample 50
+      - name: Size gate
+        run: scripts/check_release_size.sh
 
   apple-builds:
     name: Apple platform builds

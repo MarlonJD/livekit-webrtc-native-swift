@@ -14,19 +14,28 @@ public struct ConnectOptions: Equatable, Sendable {
     public var sdk: String
     public var version: String
     public var protocolVersion: Int
+    public var maxReconnectAttempts: Int
+    public var reconnectRetryDelayMilliseconds: Int
+    public var maxAlternativeURLRedirects: Int
 
     public init(
         autoSubscribe: Bool? = nil,
         reconnect: Bool = false,
         sdk: String = LiveKitNative.sdkName,
         version: String = LiveKitNative.version,
-        protocolVersion: Int = LiveKitNative.protocolVersion
+        protocolVersion: Int = LiveKitNative.protocolVersion,
+        maxReconnectAttempts: Int = 1,
+        reconnectRetryDelayMilliseconds: Int = 250,
+        maxAlternativeURLRedirects: Int = 1
     ) {
         self.autoSubscribe = autoSubscribe
         self.reconnect = reconnect
         self.sdk = sdk
         self.version = version
         self.protocolVersion = protocolVersion
+        self.maxReconnectAttempts = maxReconnectAttempts
+        self.reconnectRetryDelayMilliseconds = reconnectRetryDelayMilliseconds
+        self.maxAlternativeURLRedirects = maxAlternativeURLRedirects
     }
 }
 

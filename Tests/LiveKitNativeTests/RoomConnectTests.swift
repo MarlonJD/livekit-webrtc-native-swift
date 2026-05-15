@@ -78,6 +78,29 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(closeCalls.count, 1)
     }
 
+    func testConnectRetriesAlternativeSignalURL() async throws {
+        let frames = try [
+            makeJoinResponse(alternativeURL: "https://alt.example.test/edge?region=eu"),
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+
+        try await room.connect(url: URL(string: "https://example.test")!, token: "token")
+
+        let connectedURLs = await transport.connectedURLs
+        XCTAssertEqual(connectedURLs.count, 2)
+        XCTAssertEqual(connectedURLs[0].host, "example.test")
+        XCTAssertEqual(connectedURLs[1].host, "alt.example.test")
+        XCTAssertEqual(connectedURLs[1].path, "/edge/rtc")
+        XCTAssertEqual(room.connectionState, .connected)
+        XCTAssertEqual(room.remoteParticipants.count, 1)
+
+        let closeCalls = await transport.closeCalls
+        XCTAssertEqual(closeCalls.count, 1)
+    }
+
     func testSignalLoopAppliesParticipantUpdatesRefreshTokenAndLeave() async throws {
         let frames = try [
             makeJoinResponse(),
@@ -118,6 +141,79 @@ final class RoomConnectTests: XCTestCase {
 
         let closeCalls = await transport.closeCalls
         XCTAssertEqual(closeCalls.count, 1)
+    }
+
+    func testLeaveResumeReconnectsWithReconnectQueryAndAppliesReconnectResponse() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeLeaveResponse(action: .resume),
+            makeReconnectResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let eventRecorder = RoomEventRecorder()
+        room.delegate = eventRecorder
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let events = await eventRecorder.waitForEventCount(6)
+        XCTAssertEqual(room.connectionState, .connected)
+        XCTAssertEqual(events[4], .connectionStateChanged(.reconnecting))
+        XCTAssertEqual(events[5], .connectionStateChanged(.connected))
+
+        let connectedURLs = await transport.connectedURLs
+        XCTAssertEqual(connectedURLs.count, 2)
+        let reconnectQueryItems = URLComponents(url: connectedURLs[1], resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(reconnectQueryItems.first(where: { $0.name == "reconnect" })?.value, "true")
+
+        let closeCalls = await transport.closeCalls
+        XCTAssertEqual(closeCalls.count, 1)
+    }
+
+    func testLeaveFullReconnectUsesFreshJoinAndReplacesRemoteParticipants() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeLeaveResponse(action: .reconnect),
+            makeJoinResponse(remoteSID: "PA_bob", remoteIdentity: "bob", remoteName: "Bob", remoteTrackSID: "TR_bob_camera"),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let eventRecorder = RoomEventRecorder()
+        room.delegate = eventRecorder
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let events = await eventRecorder.waitForEventCount(10)
+        XCTAssertEqual(room.connectionState, .connected)
+        XCTAssertEqual(room.remoteParticipants.map(\.identity), ["bob"])
+
+        XCTAssertEqual(events[4], .connectionStateChanged(.reconnecting))
+        XCTAssertEqual(events[5], .connectionStateChanged(.connected))
+
+        guard case let .trackUnpublished(oldPublication, oldParticipant) = events[6] else {
+            return XCTFail("Expected stale remote track cleanup event.")
+        }
+        XCTAssertEqual(oldPublication.sid, "TR_camera")
+        XCTAssertEqual(oldParticipant.identity, "alice")
+        XCTAssertEqual(events[7], .participantDisconnected(oldParticipant))
+
+        guard case let .participantConnected(newParticipant) = events[8] else {
+            return XCTFail("Expected fresh remote participant after full reconnect.")
+        }
+        XCTAssertEqual(newParticipant.identity, "bob")
+
+        guard case let .trackPublished(newPublication, participant) = events[9] else {
+            return XCTFail("Expected fresh remote track after full reconnect.")
+        }
+        XCTAssertEqual(newPublication.sid, "TR_bob_camera")
+        XCTAssertEqual(participant.identity, "bob")
+
+        let connectedURLs = await transport.connectedURLs
+        XCTAssertEqual(connectedURLs.count, 2)
+        let reconnectQueryItems = URLComponents(url: connectedURLs[1], resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(reconnectQueryItems.first(where: { $0.name == "reconnect" })?.value, "false")
     }
 
     func testSignalLoopAnswersSubscriberOffer() async throws {
@@ -280,6 +376,112 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertNil(room.localParticipant.metadata)
     }
 
+    func testPublishVideoTrackSendsAddTrackAndAppliesTrackPublishedResponse() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let track = LocalVideoTrack(name: "camera", source: .camera)
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let publishTask = Task {
+            try await room.localParticipant.publish(
+                videoTrack: track,
+                options: TrackPublishOptions(name: "main-camera", source: .camera)
+            )
+        }
+
+        let sentFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(data) = try XCTUnwrap(sentFrames.first) else {
+            return XCTFail("Expected binary AddTrack request.")
+        }
+
+        let request = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: data)
+        guard case let .addTrack(addTrack)? = request.message else {
+            return XCTFail("Expected SignalRequest.addTrack.")
+        }
+        XCTAssertEqual(addTrack.cid, track.id)
+        XCTAssertEqual(addTrack.name, "main-camera")
+        XCTAssertEqual(addTrack.type, .video)
+        XCTAssertEqual(addTrack.source, .camera)
+
+        try await transport.enqueueIncomingFrame(
+            .binary(
+                SignalFrameCodec().encode(
+                    makeTrackPublishedResponse(
+                        cid: addTrack.cid,
+                        sid: "TR_local_camera",
+                        name: "main-camera",
+                        type: .video,
+                        source: .camera
+                    )
+                )
+            )
+        )
+
+        let publication = try await publishTask.value
+        XCTAssertEqual(publication.sid, "TR_local_camera")
+        XCTAssertEqual(publication.name, "main-camera")
+        XCTAssertEqual(publication.kind, .video)
+        XCTAssertEqual(room.localParticipant.trackPublications.map(\.sid), ["TR_local_camera"])
+    }
+
+    func testPublishAudioTrackSendsAddTrackAndAppliesTrackPublishedResponse() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let track = LocalAudioTrack(name: "microphone", source: .microphone)
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let publishTask = Task {
+            try await room.localParticipant.publish(
+                audioTrack: track,
+                options: TrackPublishOptions(name: "main-mic", source: .microphone)
+            )
+        }
+
+        let sentFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(data) = try XCTUnwrap(sentFrames.first) else {
+            return XCTFail("Expected binary AddTrack request.")
+        }
+
+        let request = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: data)
+        guard case let .addTrack(addTrack)? = request.message else {
+            return XCTFail("Expected SignalRequest.addTrack.")
+        }
+        XCTAssertEqual(addTrack.cid, track.id)
+        XCTAssertEqual(addTrack.name, "main-mic")
+        XCTAssertEqual(addTrack.type, .audio)
+        XCTAssertEqual(addTrack.source, .microphone)
+
+        try await transport.enqueueIncomingFrame(
+            .binary(
+                SignalFrameCodec().encode(
+                    makeTrackPublishedResponse(
+                        cid: addTrack.cid,
+                        sid: "TR_local_microphone",
+                        name: "main-mic",
+                        type: .audio,
+                        source: .microphone
+                    )
+                )
+            )
+        )
+
+        let publication = try await publishTask.value
+        XCTAssertEqual(publication.sid, "TR_local_microphone")
+        XCTAssertEqual(publication.name, "main-mic")
+        XCTAssertEqual(publication.kind, .audio)
+        XCTAssertEqual(room.localParticipant.trackPublications.map(\.sid), ["TR_local_microphone"])
+    }
+
     func testDisconnectClearsRemoteParticipantsAndEmitsLifecycleEvents() async throws {
         let frames = try [
             makeJoinResponse(),
@@ -315,7 +517,13 @@ final class RoomConnectTests: XCTestCase {
     }
 }
 
-private func makeJoinResponse() -> Livekit_SignalResponse {
+private func makeJoinResponse(
+    alternativeURL: String = "",
+    remoteSID: String = "PA_alice",
+    remoteIdentity: String = "alice",
+    remoteName: String = "Alice",
+    remoteTrackSID: String = "TR_camera"
+) -> Livekit_SignalResponse {
     var localParticipant = Livekit_ParticipantInfo()
     localParticipant.sid = "PA_local"
     localParticipant.identity = "marlon"
@@ -323,24 +531,25 @@ private func makeJoinResponse() -> Livekit_SignalResponse {
     localParticipant.attributes = ["role": "host"]
 
     var remoteParticipant = Livekit_ParticipantInfo()
-    remoteParticipant.sid = "PA_alice"
-    remoteParticipant.identity = "alice"
-    remoteParticipant.name = "Alice"
+    remoteParticipant.sid = remoteSID
+    remoteParticipant.identity = remoteIdentity
+    remoteParticipant.name = remoteName
     remoteParticipant.metadata = "remote-metadata"
-    remoteParticipant.tracks = [makeRemoteCameraTrack()]
+    remoteParticipant.tracks = [makeRemoteCameraTrack(sid: remoteTrackSID)]
 
     var join = Livekit_JoinResponse()
     join.participant = localParticipant
     join.otherParticipants = [remoteParticipant]
+    join.alternativeURL = alternativeURL
 
     var response = Livekit_SignalResponse()
     response.join = join
     return response
 }
 
-private func makeRemoteCameraTrack() -> Livekit_TrackInfo {
+private func makeRemoteCameraTrack(sid: String = "TR_camera") -> Livekit_TrackInfo {
     var track = Livekit_TrackInfo()
-    track.sid = "TR_camera"
+    track.sid = sid
     track.name = "camera"
     track.type = .video
     track.source = .camera
@@ -377,12 +586,21 @@ private func makeRefreshTokenResponse() -> Livekit_SignalResponse {
     return response
 }
 
-private func makeLeaveResponse() -> Livekit_SignalResponse {
+private func makeLeaveResponse(action: Livekit_LeaveRequest.Action = .disconnect) -> Livekit_SignalResponse {
     var leave = Livekit_LeaveRequest()
-    leave.action = .disconnect
+    leave.action = action
 
     var response = Livekit_SignalResponse()
     response.leave = leave
+    return response
+}
+
+private func makeReconnectResponse() -> Livekit_SignalResponse {
+    var reconnect = Livekit_ReconnectResponse()
+    reconnect.lastMessageSeq = 5
+
+    var response = Livekit_SignalResponse()
+    response.reconnect = reconnect
     return response
 }
 
@@ -440,6 +658,28 @@ private func makeRequestResponse(
 
     var response = Livekit_SignalResponse()
     response.requestResponse = requestResponse
+    return response
+}
+
+private func makeTrackPublishedResponse(
+    cid: String,
+    sid: String,
+    name: String,
+    type: Livekit_TrackType,
+    source: Livekit_TrackSource
+) -> Livekit_SignalResponse {
+    var track = Livekit_TrackInfo()
+    track.sid = sid
+    track.name = name
+    track.type = type
+    track.source = source
+
+    var trackPublished = Livekit_TrackPublishedResponse()
+    trackPublished.cid = cid
+    trackPublished.track = track
+
+    var response = Livekit_SignalResponse()
+    response.trackPublished = trackPublished
     return response
 }
 

@@ -32,13 +32,14 @@ DTLS fingerprint material, RTP packet encode/decode, H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
 assembly, native camera track scaffolding, VideoToolbox H.264 encoder
 configuration, H.264 publish RTP packetization, LiveKit `AddTrackRequest`
-construction, local video publication state, and mock transport tests.
+construction, `TrackPublishedResponse` correlation, local video publication
+state, and mock transport tests.
 
 The audio groundwork now includes native microphone track scaffolding,
 AVAudioEngine capture and playout adapters, Opus voice profile defaults, Opus
 TOC parsing, Opus RTP packetization/depacketization, subscribe-side packet loss
 accounting, LiveKit `AddTrackRequest` construction for microphone publishes,
-and local audio publication state.
+`TrackPublishedResponse` correlation, and local audio publication state.
 
 VP8 subscribe groundwork now includes RTP payload descriptor parsing, PictureID
 and layer metadata parsing, VP8 frame assembly from single-packet and fragmented
@@ -62,7 +63,51 @@ can fail fast while the remaining production blockers are still open.
 `LocalParticipant.setMetadata`, `setName`, and `setAttributes` now send
 LiveKit `UpdateParticipantMetadata` requests and map server
 `RequestResponse` failures to typed SDK errors. `Room.disconnect()` also clears
-remote participant state and emits cleanup lifecycle events.
+remote participant state and emits cleanup lifecycle events. Basic signal
+resume/full-reconnect and `JoinResponse.alternative_url` retry are unit-tested,
+and room-connected `publish(videoTrack:)` / `publish(audioTrack:)` calls send
+LiveKit `AddTrackRequest` messages and wait for matching
+`TrackPublishedResponse` acknowledgements before recording local publications.
+Publisher SDP/media transport, media recovery, and end-to-end reconnect
+hardening are still open.
+
+## Benchmarks
+
+Release-mode microbenchmarks are available through:
+
+```sh
+swift run -c release LiveKitNativeBenchmarks
+```
+
+The current local run measures low-level signaling, SDP, STUN, RTP, H.264, VP8,
+Opus RTP scaffolding, and SCTP data-channel message paths. On this machine,
+sample medians include protobuf signal roundtrip at `6.159 us/op`, subscriber
+SDP answer generation at `106.156 us/op`, RTP encode/decode at `0.589 us/op`,
+H.264 packetize/depacketize at `2.513 us/op`, and SCTP DCEP open/ack roundtrip
+at `0.818 us/op`.
+
+Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
+CSV so this package does not reintroduce the forbidden binary WebRTC dependency.
+See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the full methodology,
+current results, and comparison workflow.
+
+## Release Gates
+
+The repository now has a non-strict release-readiness gate for CI and a strict
+gate for real `1.0.0` tagging:
+
+```sh
+scripts/check_release_readiness.sh
+REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh
+```
+
+The default gate checks package shape, forbidden runtime dependencies,
+unit/integration opt-in tests, benchmark smoke, and the compressed release
+binary size proxy. The strict gate additionally requires
+`LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
+That strict gate intentionally fails today because DTLS-SRTP, full ICE/TURN,
+publisher media transport, live SCTP, and end-to-end LiveKit tests are still
+open.
 
 ## Requirements
 
