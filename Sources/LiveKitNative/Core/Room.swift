@@ -98,6 +98,7 @@ public final class Room: @unchecked Sendable {
         LiveKitNativeLogging.log(.info, "Disconnecting room.")
 
         stopSignalLoop()
+        await sendLeaveIfConnected()
         await transition(to: .disconnecting)
         await signalConnection.close()
         await requestTracker.clear()
@@ -131,10 +132,6 @@ public final class Room: @unchecked Sendable {
     private func applyInitialSignalResponse(_ response: Livekit_SignalResponse) async throws {
         guard case let .join(joinResponse)? = response.message else {
             throw LiveKitNativeError.invalidSignalFrame("Expected initial JoinResponse from LiveKit signaling.")
-        }
-
-        guard joinResponse.alternativeURL.isEmpty else {
-            throw LiveKitNativeError.notImplemented("Alternative signal URL retry")
         }
 
         let result = await actor.applyJoin(RoomJoinSnapshot(joinResponse: joinResponse))
@@ -211,6 +208,7 @@ public final class Room: @unchecked Sendable {
             await applyRemoteParticipantSnapshots(update.participants.map { ParticipantSnapshot(participantInfo: $0) })
             return true
         case let .refreshToken(token):
+            updateConnectionToken(token)
             emit(.tokenRefreshed(token))
             return true
         case let .offer(offer):
@@ -511,6 +509,25 @@ public final class Room: @unchecked Sendable {
         var request = Livekit_SignalRequest()
         request.updateDataSubscription = update
         try await signalConnection.send(request)
+    }
+
+    private func sendLeaveIfConnected() async {
+        guard await signalConnection.state == .connected else {
+            return
+        }
+
+        var leave = Livekit_LeaveRequest()
+        leave.action = .disconnect
+        leave.reason = .clientInitiated
+
+        var request = Livekit_SignalRequest()
+        request.leave = leave
+
+        do {
+            try await signalConnection.send(request)
+        } catch {
+            LiveKitNativeLogging.log(.warning, "Failed to send leave request before disconnect: \(error.localizedDescription)")
+        }
     }
 
     private func validateRequestResponse(_ response: Livekit_RequestResponse, action: String) throws {

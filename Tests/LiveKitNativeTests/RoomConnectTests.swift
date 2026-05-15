@@ -171,6 +171,33 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(closeCalls.count, 1)
     }
 
+    func testRefreshTokenIsUsedForSignalResume() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeRefreshTokenResponse(),
+            makeLeaveResponse(action: .resume),
+            makeReconnectResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let eventRecorder = RoomEventRecorder()
+        room.delegate = eventRecorder
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "initial-token")
+
+        let events = await eventRecorder.waitForEventCount(7)
+        XCTAssertEqual(events[4], .tokenRefreshed("refreshed-token"))
+        XCTAssertEqual(events[5], .connectionStateChanged(.reconnecting))
+        XCTAssertEqual(events[6], .connectionStateChanged(.connected))
+
+        let connectedURLs = await transport.connectedURLs
+        XCTAssertEqual(connectedURLs.count, 2)
+        let reconnectQueryItems = URLComponents(url: connectedURLs[1], resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(reconnectQueryItems.first(where: { $0.name == "access_token" })?.value, "refreshed-token")
+        XCTAssertEqual(reconnectQueryItems.first(where: { $0.name == "reconnect" })?.value, "true")
+    }
+
     func testLeaveFullReconnectUsesFreshJoinAndReplacesRemoteParticipants() async throws {
         let frames = try [
             makeJoinResponse(),
@@ -939,6 +966,19 @@ final class RoomConnectTests: XCTestCase {
 
         let closeCalls = await transport.closeCalls
         XCTAssertEqual(closeCalls.count, 1)
+
+        let sentFrames = await transport.sentFrames
+        XCTAssertEqual(sentFrames.count, 1)
+        guard case let .binary(data) = sentFrames[0] else {
+            return XCTFail("Expected binary leave request.")
+        }
+
+        let request = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: data)
+        guard case let .leave(leave)? = request.message else {
+            return XCTFail("Expected SignalRequest.leave.")
+        }
+        XCTAssertEqual(leave.action, .disconnect)
+        XCTAssertEqual(leave.reason, .clientInitiated)
     }
 }
 

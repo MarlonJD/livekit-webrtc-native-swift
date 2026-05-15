@@ -108,6 +108,8 @@ The old binary WebRTC dependency path has been removed from the package model.
 - `TrackUnpublishedResponse` removes the matching remote publication and emits a
   `trackUnpublished` event.
 - `refresh_token` messages emit a `RoomEvent.tokenRefreshed` event.
+- Refreshed signal tokens are retained and used by later resume/full reconnect
+  attempts.
 - `LeaveRequest` messages transition to `disconnected` for disconnect actions
   and to `reconnecting` for resume/reconnect actions.
 - `SignalResponse.requestResponse` messages are correlated by request ID for
@@ -126,8 +128,9 @@ The old binary WebRTC dependency path has been removed from the package model.
   connection adapter so server answers are retained for the publish negotiation
   path.
 - Public `Room.disconnect()` clears remote participants, removes remote track
-  publications, emits cleanup lifecycle events, closes signaling, and clears
-  pending request-response state.
+  publications, sends a client-initiated `LeaveRequest`, emits cleanup
+  lifecycle events, closes signaling, and clears pending request-response
+  state.
 - `JoinResponse.alternative_url` is retried with a bounded redirect budget.
 - `LeaveRequest.resume` reconnects the signal socket with `reconnect=true` and
   accepts `ReconnectResponse`.
@@ -374,7 +377,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 211 tests passed
+  - 212 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -387,7 +390,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,267,152 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,267,533 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed

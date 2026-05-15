@@ -91,11 +91,13 @@ can fail fast while the remaining production blockers are still open.
 `LocalParticipant.setMetadata`, `setName`, and `setAttributes` now send
 LiveKit `UpdateParticipantMetadata` requests and map server
 `RequestResponse` failures to typed SDK errors. `Room.disconnect()` also clears
-remote participant state and emits cleanup lifecycle events. Basic signal
-resume/full-reconnect and `JoinResponse.alternative_url` retry are unit-tested,
-and room-connected `publish(videoTrack:)` / `publish(audioTrack:)` calls send
-LiveKit `AddTrackRequest` messages and wait for matching
-`TrackPublishedResponse` acknowledgements before recording local publications.
+remote participant state, sends a client-initiated `LeaveRequest`, and emits
+cleanup lifecycle events. Refreshed signal tokens are retained for subsequent
+resume reconnects. Basic signal resume/full-reconnect and
+`JoinResponse.alternative_url` retry are unit-tested, and room-connected
+`publish(videoTrack:)` / `publish(audioTrack:)` calls send LiveKit
+`AddTrackRequest` messages and wait for matching `TrackPublishedResponse`
+acknowledgements before recording local publications.
 Publisher answer routing, data-track control event mapping, and data-track
 publish/unpublish request flows are unit-tested, while publisher offer
 generation, ICE-bound media transport, media recovery, and end-to-end reconnect
