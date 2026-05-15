@@ -4,9 +4,9 @@ Last updated: 2026-05-15
 
 ## Current State
 
-`LiveKitNative` has completed the `0.4.0` developer-preview scope and is now
-moving into the `0.5.0` Swift VP8 decode-only subscribe phase. It is not yet a
-working end-to-end production media client.
+`LiveKitNative` has completed the `0.5.0` developer-preview scope and is now
+moving into the `0.6.0` SCTP data channel and LiveKit data packet phase. It is
+not yet a working end-to-end production media client.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -190,13 +190,25 @@ The old binary WebRTC dependency path has been removed from the package model.
   - LiveKit `AddTrackRequest` builder for Opus microphone publishes
   - local audio publication lifecycle tests for `setMicrophone(enabled:)`,
     `publish(audioTrack:)`, and `unpublish(publication:)`
+- Swift VP8 decode-only subscribe groundwork:
+  - VP8 RTP payload descriptor parsing, including PictureID, TL0PICIDX,
+    temporal layer, layer-sync, and key index fields
+  - VP8 RTP depacketization into frame fragments
+  - subscribe-side VP8 frame assembly from single-packet and fragmented RTP
+    frames
+  - VP8 keyframe header parsing with start-code validation and width/height
+    extraction
+  - sequence-gap, missing-start, payload-type mismatch, and invalid descriptor
+    error paths
+  - decode-only frame inspector that records keyframe metadata for the future
+    pixel decoder/render path
 
 ## Verified
 
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 73 tests passed
+  - 84 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -246,7 +258,7 @@ The following checks passed after the latest implementation pass:
 - Full device camera permission UX and runtime capture integration.
 - Full VideoToolbox H.264 encoded sample extraction.
 - Full VideoToolbox H.264 decode/render path.
-- Swift VP8 decode-only path.
+- Full Swift VP8 pixel reconstruction and renderer handoff.
 - Full CELT/SILK Swift Opus encode/decode implementation.
 - Audio session management and production playout timing.
 
@@ -268,19 +280,19 @@ The following checks passed after the latest implementation pass:
 
 ## Next Recommended Work
 
-1. Start `0.5.0` with Swift VP8 bitstream parsing fixtures.
-2. Add VP8 RTP depacketization and frame boundary handling.
-3. Add decode-only subscribe pipeline fixtures for Chrome/Android publisher
-   interop.
-4. Keep full CELT/SILK Opus codec work, publisher `AddTrackRequest` signaling,
-   transceiver negotiation, and DTLS-SRTP integration as the hardening path
-   before a usable end-to-end release.
+1. Start `0.6.0` with SCTP data channel packet and control-message fixtures.
+2. Add WebRTC data channel open/ack state and LiveKit data packet mapping.
+3. Add reliable/lossy packet send/receive tests before text streams, byte
+   streams, and RPC.
+4. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
+   publisher `AddTrackRequest` signaling, transceiver negotiation, and
+   DTLS-SRTP integration as the hardening path before a usable end-to-end
+   release.
 
 ## Practical Release Status
 
-`0.4.0` scope is complete as an Opus audio publish/subscribe groundwork
-milestone. It should be treated as a developer preview, not as a usable media
-SDK.
+`0.5.0` scope is complete as a VP8 decode-only subscribe groundwork milestone.
+It should be treated as a developer preview, not as a usable media SDK.
 
-The repository is ready for `0.5.0` implementation work: Swift VP8 decode-only
-subscribe groundwork.
+The repository is ready for `0.6.0` implementation work: SCTP data channel and
+LiveKit data packet groundwork.

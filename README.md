@@ -12,7 +12,7 @@ profile.
 
 Detailed project status is tracked in [docs/STATUS.md](docs/STATUS.md).
 
-The `0.4.0` developer-preview scope is complete. The package contains the
+The `0.5.0` developer-preview scope is complete. The package contains the
 SwiftPM layout, single public `LiveKitNative` product, public API surface,
 actor-backed room state, signaling URL builder, CI workflow, privacy manifest,
 DocC landing page, and tests for the pieces that already have behavior.
@@ -39,9 +39,14 @@ TOC parsing, Opus RTP packetization/depacketization, subscribe-side packet loss
 accounting, LiveKit `AddTrackRequest` construction for microphone publishes,
 and local audio publication state.
 
-The active implementation focus is now `0.5.0`: Swift VP8 decode-only
-subscribe groundwork. Data channels, reconnect, and quality controls follow in
-later milestones.
+VP8 subscribe groundwork now includes RTP payload descriptor parsing, PictureID
+and layer metadata parsing, VP8 frame assembly from single-packet and fragmented
+RTP frames, keyframe width/height extraction, sequence-gap validation, and a
+decode-only frame inspector for future renderer integration.
+
+The active implementation focus is now `0.6.0`: SCTP data channel and LiveKit
+data packet groundwork. Reconnect and quality controls follow in later
+milestones.
 
 ## Requirements
 

@@ -21,7 +21,9 @@ H.264 encoder configuration, H.264 publish RTP packetization, LiveKit
 0.4 adds native microphone track scaffolding, Opus voice profile defaults, Opus
 RTP packetization/depacketization, audio playout scaffolding, LiveKit
 `AddTrackRequest` construction for microphone publishes, and local microphone
-publication state. Active work has moved to 0.5 VP8 decode-only subscribe
+publication state. Milestone 0.5 adds VP8 RTP payload descriptor parsing, VP8
+frame assembly, keyframe metadata extraction, and a decode-only frame inspector.
+Active work has moved to 0.6 SCTP data channel and LiveKit data packet
 groundwork.
 
 ## Topics
