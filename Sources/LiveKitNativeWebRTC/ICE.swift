@@ -94,9 +94,72 @@ package struct ICECandidate: Equatable, Sendable {
         self.type = type
     }
 
+    package init(sdpAttributeValue: String) throws {
+        let candidateLine = sdpAttributeValue.hasPrefix("a=")
+            ? String(sdpAttributeValue.dropFirst(2))
+            : sdpAttributeValue
+        let candidatePrefix = "candidate:"
+        guard candidateLine.hasPrefix(candidatePrefix) else {
+            throw ICECandidateSDPError.missingCandidatePrefix
+        }
+
+        let fields = candidateLine
+            .dropFirst(candidatePrefix.count)
+            .split(separator: " ")
+            .map(String.init)
+
+        guard fields.count >= 8 else {
+            throw ICECandidateSDPError.malformedCandidate
+        }
+
+        guard let componentRawValue = UInt8(fields[1]),
+              let componentID = ICEComponentID(rawValue: componentRawValue)
+        else {
+            throw ICECandidateSDPError.unsupportedComponent(fields[1])
+        }
+
+        guard let transport = ICETransportProtocol(sdpToken: fields[2]) else {
+            throw ICECandidateSDPError.unsupportedTransport(fields[2])
+        }
+
+        guard let priority = UInt32(fields[3]) else {
+            throw ICECandidateSDPError.invalidPriority(fields[3])
+        }
+
+        guard let port = UInt16(fields[5]) else {
+            throw ICECandidateSDPError.invalidPort(fields[5])
+        }
+
+        guard fields[6].lowercased() == "typ",
+              let type = ICECandidateType(sdpToken: fields[7])
+        else {
+            throw ICECandidateSDPError.unsupportedType(fields.indices.contains(7) ? fields[7] : "")
+        }
+
+        self.init(
+            foundation: fields[0],
+            componentID: componentID,
+            transport: transport,
+            priority: priority,
+            address: fields[4],
+            port: port,
+            type: type
+        )
+    }
+
     package var sdpAttributeValue: String {
         "candidate:\(foundation) \(componentID.rawValue) \(transport.rawValue.uppercased()) \(priority) \(address) \(port) typ \(type.sdpToken)"
     }
+}
+
+package enum ICECandidateSDPError: Error, Equatable, Sendable {
+    case missingCandidatePrefix
+    case malformedCandidate
+    case unsupportedComponent(String)
+    case unsupportedTransport(String)
+    case invalidPriority(String)
+    case invalidPort(String)
+    case unsupportedType(String)
 }
 
 package struct ICECandidatePair: Equatable, Sendable {
@@ -134,15 +197,18 @@ package enum ICECandidatePairState: String, Equatable, Sendable {
 }
 
 package struct ICECandidateChecklist: Equatable, Sendable {
+    package private(set) var localCandidates: [ICECandidate]
+    package private(set) var remoteCandidates: [ICECandidate]
     package private(set) var pairs: [ICECandidatePair]
 
     package init(localCandidates: [ICECandidate], remoteCandidates: [ICECandidate], isControlling: Bool) {
-        self.pairs = localCandidates.flatMap { local in
-            remoteCandidates.map { remote in
-                ICECandidatePair(local: local, remote: remote, isControlling: isControlling)
-            }
-        }
-        .sorted { $0.priority > $1.priority }
+        self.localCandidates = localCandidates
+        self.remoteCandidates = remoteCandidates
+        self.pairs = Self.makePairs(
+            localCandidates: localCandidates,
+            remoteCandidates: remoteCandidates,
+            isControlling: isControlling
+        )
     }
 
     package var nextWaitingPair: ICECandidatePair? {
@@ -178,6 +244,34 @@ package struct ICECandidateChecklist: Equatable, Sendable {
         }
     }
 
+    package mutating func addLocalCandidate(_ candidate: ICECandidate, isControlling: Bool) {
+        guard !localCandidates.contains(candidate) else {
+            return
+        }
+
+        localCandidates.append(candidate)
+        pairs.append(
+            contentsOf: remoteCandidates.map { remote in
+                ICECandidatePair(local: candidate, remote: remote, isControlling: isControlling)
+            }
+        )
+        sortPairs()
+    }
+
+    package mutating func addRemoteCandidate(_ candidate: ICECandidate, isControlling: Bool) {
+        guard !remoteCandidates.contains(candidate) else {
+            return
+        }
+
+        remoteCandidates.append(candidate)
+        pairs.append(
+            contentsOf: localCandidates.map { local in
+                ICECandidatePair(local: local, remote: candidate, isControlling: isControlling)
+            }
+        )
+        sortPairs()
+    }
+
     private mutating func updatePair(
         localFoundation: String,
         remoteFoundation: String,
@@ -190,6 +284,23 @@ package struct ICECandidateChecklist: Equatable, Sendable {
         }
 
         update(&pairs[index])
+    }
+
+    private mutating func sortPairs() {
+        pairs.sort { $0.priority > $1.priority }
+    }
+
+    private static func makePairs(
+        localCandidates: [ICECandidate],
+        remoteCandidates: [ICECandidate],
+        isControlling: Bool
+    ) -> [ICECandidatePair] {
+        localCandidates.flatMap { local in
+            remoteCandidates.map { remote in
+                ICECandidatePair(local: local, remote: remote, isControlling: isControlling)
+            }
+        }
+        .sorted { $0.priority > $1.priority }
     }
 }
 
@@ -558,6 +669,21 @@ package final class STUNUDPSocketTransport: STUNDatagramTransport, @unchecked Se
 }
 
 private extension ICECandidateType {
+    init?(sdpToken: String) {
+        switch sdpToken.lowercased() {
+        case "host":
+            self = .host
+        case "prflx":
+            self = .peerReflexive
+        case "srflx":
+            self = .serverReflexive
+        case "relay":
+            self = .relayed
+        default:
+            return nil
+        }
+    }
+
     var sdpToken: String {
         switch self {
         case .host:
@@ -568,6 +694,19 @@ private extension ICECandidateType {
             "srflx"
         case .relayed:
             "relay"
+        }
+    }
+}
+
+private extension ICETransportProtocol {
+    init?(sdpToken: String) {
+        switch sdpToken.lowercased() {
+        case "udp":
+            self = .udp
+        case "tcp":
+            self = .tcp
+        default:
+            return nil
         }
     }
 }

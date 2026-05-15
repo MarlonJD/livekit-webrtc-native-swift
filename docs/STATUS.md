@@ -218,6 +218,11 @@ The old binary WebRTC dependency path has been removed from the package model.
   - candidate priority calculation
   - candidate pair priority calculation
   - candidate pair checklist state and nomination tracking
+  - SDP `candidate:` attribute parsing into typed ICE candidates
+  - trickled remote ICE candidates are exposed as parsed candidates on the peer
+    connection coordinator
+  - candidate checklists can accept dynamically trickled local and remote
+    candidates while maintaining priority order
   - basic SDP candidate attribute serialization
   - connectivity-check Binding request construction with ICE username,
     priority, role, and use-candidate attributes
@@ -257,8 +262,10 @@ The old binary WebRTC dependency path has been removed from the package model.
     and RTCP packets, demuxes inbound RTP/SRTCP datagrams, estimates inbound
     RTP rollover counters, and applies SRTP/SRTCP replay rejection at the
     transport boundary
+  - nominated ICE-pair guarded construction for secure RTP/RTCP datagram
+    transport
   - explicit boundary before full DTLS `use_srtp` handshake, live SRTP key
-    export, and selected ICE candidate-pair binding
+    export, live ICE agent nomination, and UDP socket binding
 - RTP basics:
   - RTP v2 header encode/decode
   - marker bit, payload type, sequence number, timestamp, SSRC, and payload
@@ -338,7 +345,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 177 tests passed
+  - 186 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -351,7 +358,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,216,582 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,225,898 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -389,8 +396,8 @@ The following checks passed after the latest implementation pass:
 - DTLS 1.2 handshake.
 - `use_srtp` negotiation.
 - Invoking the real DTLS exporter from a completed handshake.
-- Binding the secure RTP/RTCP datagram transport to the selected ICE candidate
-  pair and completed DTLS exporter output.
+- Binding the secure RTP/RTCP datagram transport to live ICE agent nomination,
+  UDP socket transport, and completed DTLS exporter output.
 - Wiring RTCP feedback/report packets into live media transport.
 - TWCC, REMB, or congestion control.
 - Jitter buffer.
@@ -431,7 +438,10 @@ The following checks passed after the latest implementation pass:
 3. Add ICE restart, media/data recovery after signal reconnect, TURN UDP/TCP/TLS
    fallback, and automated local LiveKit integration tests.
 4. Add text streams, byte streams, RPC, and two-client data integration tests.
-5. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
+5. Add adaptive video quality support with multi-layer simulcast/SVC publish
+   presets, bandwidth-aware layer selection, Dynacast-style layer pausing, and
+   manual subscriber quality controls for low/medium/high video reception.
+6. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
    publisher transceiver negotiation, RTP sender transport, and DTLS-SRTP
    integration as the hardening path before a usable end-to-end release.
 

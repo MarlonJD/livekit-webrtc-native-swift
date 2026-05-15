@@ -141,9 +141,11 @@ package struct RTCIceCandidateInit: Equatable, Sendable, Decodable {
 
 package struct RemoteICECandidate: Equatable, Sendable {
     package var candidateInit: RTCIceCandidateInit
+    package var candidate: ICECandidate?
 
     package init(candidateInit: RTCIceCandidateInit) {
         self.candidateInit = candidateInit
+        self.candidate = try? ICECandidate(sdpAttributeValue: candidateInit.candidate)
     }
 }
 
@@ -258,6 +260,10 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         return mutableRemoteICECandidates
     }
 
+    package var parsedRemoteICECandidates: [ICECandidate] {
+        remoteICECandidates.compactMap(\.candidate)
+    }
+
     package var isRemoteICEGatheringComplete: Bool {
         remoteCandidateLock.lock()
         defer { remoteCandidateLock.unlock() }
@@ -307,6 +313,17 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         if isFinal {
             mutableRemoteICEGatheringComplete = true
         }
+    }
+
+    package func makeCandidateChecklist(
+        localCandidates: [ICECandidate],
+        isControlling: Bool
+    ) -> ICECandidateChecklist {
+        ICECandidateChecklist(
+            localCandidates: localCandidates,
+            remoteCandidates: parsedRemoteICECandidates,
+            isControlling: isControlling
+        )
     }
 
     package func makeSubscriberAnswer(for offerSDP: String) throws -> String {

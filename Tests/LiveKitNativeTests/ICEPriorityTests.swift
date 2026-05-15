@@ -47,6 +47,42 @@ final class ICEPriorityTests: XCTestCase {
         )
     }
 
+    func testParsesSDPCandidateAttribute() throws {
+        let candidate = try ICECandidate(
+            sdpAttributeValue: "candidate:842163049 1 udp 1677729535 203.0.113.20 54400 typ srflx raddr 10.0.0.2 rport 53123"
+        )
+
+        XCTAssertEqual(candidate.foundation, "842163049")
+        XCTAssertEqual(candidate.componentID, .rtp)
+        XCTAssertEqual(candidate.transport, .udp)
+        XCTAssertEqual(candidate.priority, 1_677_729_535)
+        XCTAssertEqual(candidate.address, "203.0.113.20")
+        XCTAssertEqual(candidate.port, 54_400)
+        XCTAssertEqual(candidate.type, .serverReflexive)
+    }
+
+    func testParsesCandidateAttributeWithALinePrefixAndRelayType() throws {
+        let candidate = try ICECandidate(
+            sdpAttributeValue: "a=candidate:1 1 TCP 2122194687 192.0.2.44 9 typ relay tcptype active"
+        )
+
+        XCTAssertEqual(candidate.transport, .tcp)
+        XCTAssertEqual(candidate.type, .relayed)
+        XCTAssertEqual(candidate.sdpAttributeValue, "candidate:1 1 TCP 2122194687 192.0.2.44 9 typ relay")
+    }
+
+    func testRejectsMalformedSDPCandidateAttribute() {
+        XCTAssertThrowsError(try ICECandidate(sdpAttributeValue: "not-a-candidate")) { error in
+            XCTAssertEqual(error as? ICECandidateSDPError, .missingCandidatePrefix)
+        }
+
+        XCTAssertThrowsError(
+            try ICECandidate(sdpAttributeValue: "candidate:1 3 UDP 1 192.0.2.10 5000 typ host")
+        ) { error in
+            XCTAssertEqual(error as? ICECandidateSDPError, .unsupportedComponent("3"))
+        }
+    }
+
     func testBuildsHostCandidatesFromInterfaceAddresses() {
         let candidates = ICEHostCandidateGatherer.candidates(
             from: [
@@ -126,6 +162,62 @@ final class ICEPriorityTests: XCTestCase {
 
         checklist.markSucceeded(localFoundation: "local", remoteFoundation: "remote", nominated: true)
         XCTAssertEqual(checklist.nominatedPair?.remote.foundation, "remote")
+    }
+
+    func testChecklistAddsTrickledCandidatesAndMaintainsPriorityOrder() {
+        let local = ICECandidate(
+            foundation: "local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.10",
+            port: 5000,
+            type: .host
+        )
+        let lowPriorityRemote = ICECandidate(
+            foundation: "remote-low",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .relayed, localPreference: 100).value,
+            address: "203.0.113.20",
+            port: 6000,
+            type: .relayed
+        )
+        let highPriorityRemote = ICECandidate(
+            foundation: "remote-high",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .serverReflexive, localPreference: 65_535).value,
+            address: "203.0.113.30",
+            port: 7000,
+            type: .serverReflexive
+        )
+        var checklist = ICECandidateChecklist(
+            localCandidates: [local],
+            remoteCandidates: [],
+            isControlling: true
+        )
+
+        checklist.addRemoteCandidate(lowPriorityRemote, isControlling: true)
+        checklist.addRemoteCandidate(highPriorityRemote, isControlling: true)
+        checklist.addRemoteCandidate(highPriorityRemote, isControlling: true)
+
+        XCTAssertEqual(checklist.remoteCandidates.count, 2)
+        XCTAssertEqual(checklist.pairs.count, 2)
+        XCTAssertEqual(checklist.pairs.first?.remote.foundation, "remote-high")
+    }
+
+    func testRemoteICECandidateKeepsParsedCandidateWhenAvailable() throws {
+        let initCandidate = RTCIceCandidateInit(
+            candidate: "candidate:1 1 UDP 2130706431 192.0.2.10 53123 typ host",
+            sdpMid: "0",
+            sdpMLineIndex: 0
+        )
+
+        let remote = RemoteICECandidate(candidateInit: initCandidate)
+
+        XCTAssertEqual(remote.candidate?.address, "192.0.2.10")
+        XCTAssertEqual(remote.candidate?.type, .host)
     }
 
     func testSTUNBindingClientReturnsMappedAddress() throws {

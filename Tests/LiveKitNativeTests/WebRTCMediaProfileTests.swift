@@ -41,4 +41,30 @@ final class WebRTCMediaProfileTests: XCTestCase {
         XCTAssertEqual(configuration.dtlsFingerprint.hashFunction, "sha-256")
         XCTAssertEqual(configuration.dtlsFingerprint.value.split(separator: ":").count, 32)
     }
+
+    func testPeerConnectionBuildsChecklistFromParsedRemoteICECandidates() throws {
+        let coordinator = PeerConnectionCoordinator(configuration: .init(role: .subscriber))
+        try coordinator.addRemoteICECandidate(
+            candidateInitJSON: #"{"candidate":"candidate:remote 1 UDP 1694498815 203.0.113.9 6000 typ srflx","sdpMid":"0","sdpMLineIndex":0}"#,
+            isFinal: false
+        )
+        let local = ICECandidate(
+            foundation: "local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.10",
+            port: 5000,
+            type: .host
+        )
+
+        let checklist = coordinator.makeCandidateChecklist(
+            localCandidates: [local],
+            isControlling: false
+        )
+
+        XCTAssertEqual(coordinator.parsedRemoteICECandidates.count, 1)
+        XCTAssertEqual(checklist.pairs.count, 1)
+        XCTAssertEqual(checklist.pairs.first?.remote.address, "203.0.113.9")
+    }
 }

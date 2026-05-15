@@ -3,6 +3,10 @@ import Foundation
 package enum SecureMediaTransportError: Error, Equatable, Sendable {
     case packetTooShort
     case srtcpIndexExhausted
+    case candidatePairNotSucceeded
+    case candidatePairNotNominated
+    case unsupportedCandidatePairTransport
+    case unsupportedCandidatePairComponent
 }
 
 package enum SecureMediaTransportPacket: Equatable, Sendable {
@@ -31,6 +35,38 @@ package actor DTLSSRTPMediaTransport {
         self.outboundRTPSequenceExtenders = [:]
         self.inboundRTPSequenceExtenders = [:]
         self.outboundSRTCPIndex = 0
+    }
+
+    package init(
+        selectedCandidatePair: ICECandidatePair,
+        keyMaterial: DTLSSRTPKeyMaterial,
+        role: DTLSSRTPRole,
+        datagramTransport: any MediaDatagramTransport
+    ) throws {
+        guard selectedCandidatePair.state == .succeeded else {
+            throw SecureMediaTransportError.candidatePairNotSucceeded
+        }
+        guard selectedCandidatePair.nominated else {
+            throw SecureMediaTransportError.candidatePairNotNominated
+        }
+        guard selectedCandidatePair.local.componentID == .rtp,
+              selectedCandidatePair.remote.componentID == .rtp
+        else {
+            throw SecureMediaTransportError.unsupportedCandidatePairComponent
+        }
+        guard selectedCandidatePair.local.transport == .udp,
+              selectedCandidatePair.remote.transport == .udp
+        else {
+            throw SecureMediaTransportError.unsupportedCandidatePairTransport
+        }
+
+        self.init(
+            packetProtectionContext: try DTLSSRTPPacketProtectionContext(
+                keyMaterial: keyMaterial,
+                role: role
+            ),
+            datagramTransport: datagramTransport
+        )
     }
 
     package func sendRTP(_ packet: RTPPacket) async throws {

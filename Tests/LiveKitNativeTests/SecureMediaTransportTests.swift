@@ -124,12 +124,100 @@ final class SecureMediaTransportTests: XCTestCase {
         }
     }
 
+    func testBuildsTransportOnlyForSucceededNominatedICEPair() async throws {
+        let clientDatagrams = MockMediaDatagramTransport()
+        let serverDatagrams = MockMediaDatagramTransport()
+        let client = try DTLSSRTPMediaTransport(
+            selectedCandidatePair: candidatePair(state: .succeeded, nominated: true),
+            keyMaterial: keyMaterial(),
+            role: .client,
+            datagramTransport: clientDatagrams
+        )
+        let server = try DTLSSRTPMediaTransport(
+            selectedCandidatePair: candidatePair(state: .succeeded, nominated: true),
+            keyMaterial: keyMaterial(),
+            role: .server,
+            datagramTransport: serverDatagrams
+        )
+        let packet = rtp(sequenceNumber: 91, payload: Data([0xCA, 0xFE]))
+
+        try await client.sendRTP(packet)
+        let sentDatagrams = await clientDatagrams.sentDatagramsSnapshot()
+        let protected = try XCTUnwrap(sentDatagrams.first)
+        await serverDatagrams.enqueue(protected)
+
+        let received = try await server.receive()
+
+        XCTAssertEqual(received, .rtp(packet))
+    }
+
+    func testRejectsSecureTransportWithoutNominatedICEPair() {
+        XCTAssertThrowsError(
+            try DTLSSRTPMediaTransport(
+                selectedCandidatePair: candidatePair(state: .succeeded, nominated: false),
+                keyMaterial: keyMaterial(),
+                role: .client,
+                datagramTransport: MockMediaDatagramTransport()
+            )
+        ) { error in
+            XCTAssertEqual(error as? SecureMediaTransportError, .candidatePairNotNominated)
+        }
+    }
+
+    func testRejectsSecureTransportWithoutSucceededICEPair() {
+        XCTAssertThrowsError(
+            try DTLSSRTPMediaTransport(
+                selectedCandidatePair: candidatePair(state: .inProgress, nominated: true),
+                keyMaterial: keyMaterial(),
+                role: .client,
+                datagramTransport: MockMediaDatagramTransport()
+            )
+        ) { error in
+            XCTAssertEqual(error as? SecureMediaTransportError, .candidatePairNotSucceeded)
+        }
+    }
+
     private func packetProtectionContext(role: DTLSSRTPRole) throws -> DTLSSRTPPacketProtectionContext {
         try DTLSSRTPPacketProtectionContext(
-            keyMaterial: DTLSSRTPKeyMaterial(
-                exportedKeyingMaterial: Data((0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init))
-            ),
+            keyMaterial: keyMaterial(),
             role: role
+        )
+    }
+
+    private func keyMaterial() throws -> DTLSSRTPKeyMaterial {
+        try DTLSSRTPKeyMaterial(
+            exportedKeyingMaterial: Data((0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init))
+        )
+    }
+
+    private func candidatePair(
+        state: ICECandidatePairState,
+        nominated: Bool,
+        localTransport: ICETransportProtocol = .udp,
+        remoteTransport: ICETransportProtocol = .udp
+    ) -> ICECandidatePair {
+        ICECandidatePair(
+            local: ICECandidate(
+                foundation: "local",
+                componentID: .rtp,
+                transport: localTransport,
+                priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+                address: "192.0.2.10",
+                port: 50_000,
+                type: .host
+            ),
+            remote: ICECandidate(
+                foundation: "remote",
+                componentID: .rtp,
+                transport: remoteTransport,
+                priority: ICECandidatePriority(type: .serverReflexive, localPreference: 100).value,
+                address: "203.0.113.10",
+                port: 60_000,
+                type: .serverReflexive
+            ),
+            isControlling: true,
+            state: state,
+            nominated: nominated
         )
     }
 

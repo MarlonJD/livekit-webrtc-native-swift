@@ -36,7 +36,8 @@ generation, STUN packet encode/decode, STUN
 sending and authenticated response validation, ICE priority helpers, host
 candidate construction, UDP STUN transport, connectivity-check
 request/response handling with bounded transport retries, candidate checklist
-nomination, DTLS fingerprint material, DTLS-SRTP protection profile and
+nomination, SDP ICE candidate parsing, dynamic trickle candidate checklist
+updates, DTLS fingerprint material, DTLS-SRTP protection profile and
 exporter key/salt splitting, RFC 3711 AES-CM SRTP/SRTCP session key
 derivation, client/server DTLS-SRTP packet-protection context wiring, RTP
 packet encode/decode, RTP sequence rollover tracking, SRTP replay-window
@@ -46,7 +47,8 @@ validation, full SRTP packet protect/unprotect APIs with replay rejection,
 SRTCP AES-CM payload protection, SRTCP index/authentication-tag framing,
 HMAC-SHA1 auth-tag validation, full SRTCP packet protect/unprotect APIs with
 replay rejection, actor-backed secure RTP/RTCP datagram send/receive wiring
-with RTCP mux demux and RTP rollover tracking, RTCP
+with RTCP mux demux, RTP rollover tracking, and nominated ICE-pair guarded
+construction, RTCP
 sender/receiver report and PLI/NACK feedback wire-format groundwork, H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
 assembly, native camera track scaffolding, VideoToolbox H.264 encoder
@@ -73,9 +75,9 @@ request/response signaling, data subscription update signaling, and
 `RoomEvent.dataReceived` mapping for decoded packets.
 
 The active implementation focus is now `1.0.0` hardening: binding the secure
-media datagram transport to a selected ICE candidate pair and completed DTLS
-exporter output, reconnect, TURN, quality controls, real DTLS-SCTP network
-transport, integration apps, and size gates.
+media datagram transport to a live ICE agent, UDP socket transport, and
+completed DTLS exporter output, reconnect, TURN, quality controls, real
+DTLS-SCTP network transport, integration apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -136,9 +138,9 @@ The default gate checks package shape, forbidden runtime dependencies,
 unit/integration opt-in tests, benchmark smoke, and the compressed release
 binary size proxy. The strict gate additionally requires
 `LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
-That strict gate intentionally fails today because the DTLS handshake/exporter
-binding, full ICE/TURN, publisher media transport, live SCTP, and end-to-end
-LiveKit tests are still open.
+That strict gate intentionally fails today because the live ICE agent, DTLS
+handshake/exporter binding, full ICE/TURN, publisher media transport, live
+SCTP, and end-to-end LiveKit tests are still open.
 
 ## Requirements
 
