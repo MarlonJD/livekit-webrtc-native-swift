@@ -10,6 +10,8 @@ final class DTLSSRTPTests: XCTestCase {
         XCTAssertEqual(profile.name, "SRTP_AES128_CM_HMAC_SHA1_80")
         XCTAssertEqual(profile.masterKeyLength, 16)
         XCTAssertEqual(profile.masterSaltLength, 14)
+        XCTAssertEqual(profile.authenticationKeyLength, 20)
+        XCTAssertEqual(profile.srtpAuthenticationTagLength, 10)
         XCTAssertEqual(profile.srtcpAuthenticationTagLength, 10)
         XCTAssertEqual(profile.exporterByteCount, 60)
         XCTAssertEqual(SRTPProtectionProfile.exporterLabel, "EXTRACTOR-dtls_srtp")
@@ -60,8 +62,139 @@ final class DTLSSRTPTests: XCTestCase {
         )
 
         XCTAssertEqual(profile, .aes128CMHMACSHA132)
-        XCTAssertEqual(profile.srtcpAuthenticationTagLength, 4)
+        XCTAssertEqual(profile.srtpAuthenticationTagLength, 4)
+        XCTAssertEqual(profile.srtcpAuthenticationTagLength, 10)
         XCTAssertEqual(profile.exporterByteCount, 60)
         XCTAssertEqual(keyMaterial.protectionProfile, profile)
     }
+
+    func testDerivesSessionKeysFromRFC3711Vector() throws {
+        let master = SRTPMasterKeyMaterial(
+            masterKey: try Data(hex: "E1F97A0D3E018BE0D64FA32C06DE4139"),
+            masterSalt: try Data(hex: "0EC675AD498AFEEBB6960B3AABE6")
+        )
+
+        let keys = try SRTPSessionKeys(masterKeyMaterial: master)
+
+        XCTAssertEqual(keys.srtpEncryptionKey, try Data(hex: "C61E7A93744F39EE10734AFE3FF7A087"))
+        XCTAssertEqual(keys.srtpSaltKey, try Data(hex: "30CBBC08863D8C85D49DB34A9AE1"))
+        XCTAssertEqual(keys.srtpAuthenticationKey, try Data(hex: "CEBE321F6FF7716B6FD4AB49AF256A156D38BAA4"))
+        XCTAssertNotEqual(keys.srtcpEncryptionKey, keys.srtpEncryptionKey)
+        XCTAssertNotEqual(keys.srtcpAuthenticationKey, keys.srtpAuthenticationKey)
+        XCTAssertNotEqual(keys.srtcpSaltKey, keys.srtpSaltKey)
+    }
+
+    func testRejectsInvalidMasterKeyMaterialForSessionDerivation() {
+        let invalidKey = SRTPMasterKeyMaterial(
+            masterKey: Data(repeating: 0, count: 15),
+            masterSalt: Data(repeating: 0, count: 14)
+        )
+        XCTAssertThrowsError(try SRTPSessionKeys(masterKeyMaterial: invalidKey)) { error in
+            XCTAssertEqual(error as? DTLSSRTPError, .invalidMasterKeyLength(expected: 16, actual: 15))
+        }
+
+        let invalidSalt = SRTPMasterKeyMaterial(
+            masterKey: Data(repeating: 0, count: 16),
+            masterSalt: Data(repeating: 0, count: 13)
+        )
+        XCTAssertThrowsError(try SRTPSessionKeys(masterKeyMaterial: invalidSalt)) { error in
+            XCTAssertEqual(error as? DTLSSRTPError, .invalidMasterSaltLength(expected: 14, actual: 13))
+        }
+    }
+
+    func testPacketProtectionContextMapsClientAndServerDirections() throws {
+        let exported = Data((0..<60).map(UInt8.init))
+        let keyMaterial = try DTLSSRTPKeyMaterial(exportedKeyingMaterial: exported)
+        var client = try DTLSSRTPPacketProtectionContext(keyMaterial: keyMaterial, role: .client)
+        var server = try DTLSSRTPPacketProtectionContext(keyMaterial: keyMaterial, role: .server)
+        let rtp = RTPPacket(
+            marker: true,
+            payloadType: 102,
+            sequenceNumber: 17,
+            timestamp: 9_000,
+            ssrc: 0x1122_3344,
+            payload: Data((0..<64).map(UInt8.init))
+        )
+
+        let protectedRTP = try client.protectRTP(rtp, rolloverCounter: 0)
+        let decodedRTP = try server.unprotectRTP(encoded: protectedRTP.encoded(), rolloverCounter: 0)
+
+        XCTAssertNotEqual(protectedRTP.rtpPacket.payload, rtp.payload)
+        XCTAssertEqual(protectedRTP.authenticationTag.count, 10)
+        XCTAssertEqual(decodedRTP, rtp)
+        XCTAssertThrowsError(try server.unprotectRTP(protectedRTP)) { error in
+            XCTAssertEqual(error as? SRTPError, .replayedPacket)
+        }
+
+        let rtcp = try pliPacket(index: 3)
+        let protectedRTCP = try server.protectRTCP(rtcp)
+        let decodedRTCP = try client.unprotectRTCP(encoded: try protectedRTCP.encoded())
+
+        XCTAssertTrue(protectedRTCP.index.isEncrypted)
+        XCTAssertEqual(protectedRTCP.authenticationTag.count, 10)
+        XCTAssertEqual(decodedRTCP, rtcp)
+    }
+
+    func testPacketProtectionContextUsesShortSRTPTagProfile() throws {
+        let exported = Data((0..<60).map(UInt8.init))
+        let keyMaterial = try DTLSSRTPKeyMaterial(
+            exportedKeyingMaterial: exported,
+            protectionProfile: .aes128CMHMACSHA132
+        )
+        var server = try DTLSSRTPPacketProtectionContext(keyMaterial: keyMaterial, role: .server)
+        let client = try DTLSSRTPPacketProtectionContext(keyMaterial: keyMaterial, role: .client)
+        let rtp = RTPPacket(
+            marker: false,
+            payloadType: 102,
+            sequenceNumber: 21,
+            timestamp: 12_000,
+            ssrc: 0x5566_7788,
+            payload: Data([0x01, 0x02, 0x03])
+        )
+
+        let protectedRTP = try client.protectRTP(rtp, rolloverCounter: 0)
+        let protectedRTCP = try client.protectRTCP(try pliPacket(index: 4))
+
+        XCTAssertEqual(protectedRTP.authenticationTag.count, 4)
+        XCTAssertEqual(try server.unprotectRTP(encoded: protectedRTP.encoded(), rolloverCounter: 0), rtp)
+        XCTAssertEqual(protectedRTCP.authenticationTag.count, 10)
+    }
+
+    private func pliPacket(index: UInt32) throws -> SRTCPPacket {
+        SRTCPPacket(
+            rtcpPacket: .pictureLossIndication(
+                RTCPPictureLossIndication(senderSSRC: 0x0102_0304, mediaSSRC: 0x0506_0708)
+            ),
+            index: try SRTCPIndex(value: index)
+        )
+    }
+}
+
+private extension Data {
+    init(hex: String) throws {
+        let cleaned = hex.filter { !$0.isWhitespace }
+        guard cleaned.count.isMultiple(of: 2) else {
+            throw HexError.invalidLength
+        }
+
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(cleaned.count / 2)
+
+        var index = cleaned.startIndex
+        while index < cleaned.endIndex {
+            let nextIndex = cleaned.index(index, offsetBy: 2)
+            guard let byte = UInt8(cleaned[index..<nextIndex], radix: 16) else {
+                throw HexError.invalidByte
+            }
+            bytes.append(byte)
+            index = nextIndex
+        }
+
+        self = Data(bytes)
+    }
+}
+
+private enum HexError: Error {
+    case invalidLength
+    case invalidByte
 }

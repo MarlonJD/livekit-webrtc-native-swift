@@ -25,6 +25,7 @@ package:
 - SRTCP packet framing, AES-CM payload encrypt/decrypt, auth-tag validation,
   packet protect/unprotect, and replay-protector tracking
 - DTLS-SRTP exporter key/salt splitting
+- DTLS-SRTP session key derivation and client/server packet protection context
 - H.264 RTP packetization/depacketization
 - VP8 RTP payload depacketization
 - Opus-over-RTP packetization/depacketization scaffolding
@@ -32,7 +33,7 @@ package:
 
 These are microbenchmarks, not end-to-end media benchmarks. They do not claim
 that the SDK is production-ready, and they do not measure full ICE, DTLS-SRTP,
-full SRTP/SRTCP KDF with live DTLS exporter output, live packet protection
+live DTLS exporter output from a completed handshake, live packet protection
 wiring into media transport, jitter buffering, VideoToolbox decode/render, Opus
 codec quality, or LiveKit server compatibility. Those remain production
 blockers.
@@ -85,7 +86,7 @@ swift run -c release LiveKitNativeBenchmarks --samples 300 --warmup 30 --ops-per
 
 Environment:
 
-- Generated: `2026-05-15T12:37:04Z`
+- Generated: `2026-05-15T13:02:06Z`
 - OS: `Version 26.3.1 (a) (Build 25D771280a)`
 - Architecture: `arm64`
 - Build mode: SwiftPM release
@@ -94,23 +95,24 @@ Lower median and p95 values are better. `ops/sec` is derived from the median.
 
 | Benchmark | Category | Implementation | Samples | Ops/sample | Median us/op | P95 us/op | Ops/sec |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `signal.protobuf_roundtrip` | signaling | LiveKitNative | 300 | 100 | 6.541 | 8.059 | 152875.979 |
-| `sdp.subscriber_answer` | signaling | LiveKitNative | 300 | 20 | 106.275 | 120.667 | 9409.551 |
-| `stun.binding_roundtrip` | ice | LiveKitNative | 300 | 200 | 1.847 | 2.154 | 541271.989 |
-| `rtp.packet_encode_decode` | rtp | LiveKitNative | 300 | 500 | 0.595 | 0.689 | 1681146.946 |
-| `srtp.replay_protector` | security | LiveKitNative | 300 | 500 | 0.046 | 0.056 | 21582423.274 |
-| `srtp.authenticated_roundtrip` | security | LiveKitNative | 300 | 200 | 8.876 | 12.453 | 112660.189 |
-| `srtp.aes_cm_payload_roundtrip` | security | LiveKitNative | 300 | 100 | 68.147 | 98.413 | 14674.233 |
-| `srtp.packet_protect_unprotect` | security | LiveKitNative | 300 | 100 | 74.986 | 87.946 | 13335.778 |
-| `rtcp.feedback_roundtrip` | rtcp | LiveKitNative | 300 | 500 | 1.795 | 2.136 | 557206.124 |
-| `srtcp.packet_replay_roundtrip` | security | LiveKitNative | 300 | 500 | 0.797 | 0.927 | 1253918.495 |
-| `srtcp.authenticated_roundtrip` | security | LiveKitNative | 300 | 200 | 7.228 | 8.731 | 138352.485 |
-| `srtcp.packet_protect_unprotect` | security | LiveKitNative | 300 | 200 | 9.589 | 10.751 | 104288.880 |
-| `dtls_srtp.exporter_split` | security | LiveKitNative | 300 | 500 | 0.321 | 0.372 | 3117692.907 |
-| `h264.packetize_depacketize` | video | LiveKitNative | 300 | 50 | 2.466 | 3.081 | 405541.317 |
-| `vp8.payload_depacketize` | video | LiveKitNative | 300 | 500 | 0.150 | 0.187 | 6666666.667 |
-| `opus.rtp_packetize_depacketize` | audio | LiveKitNative | 300 | 500 | 0.026 | 0.034 | 38095238.095 |
-| `sctp.dcep_open_ack_roundtrip` | data | LiveKitNative | 300 | 500 | 0.822 | 1.014 | 1216175.129 |
+| `signal.protobuf_roundtrip` | signaling | LiveKitNative | 300 | 100 | 6.511 | 10.076 | 153590.249 |
+| `sdp.subscriber_answer` | signaling | LiveKitNative | 300 | 20 | 108.185 | 133.450 | 9243.391 |
+| `stun.binding_roundtrip` | ice | LiveKitNative | 300 | 200 | 1.857 | 2.544 | 538539.212 |
+| `rtp.packet_encode_decode` | rtp | LiveKitNative | 300 | 500 | 0.602 | 0.814 | 1662051.703 |
+| `srtp.replay_protector` | security | LiveKitNative | 300 | 500 | 0.046 | 0.053 | 21544295.071 |
+| `srtp.authenticated_roundtrip` | security | LiveKitNative | 300 | 200 | 8.859 | 9.764 | 112874.780 |
+| `srtp.aes_cm_payload_roundtrip` | security | LiveKitNative | 300 | 100 | 66.349 | 71.499 | 15071.874 |
+| `srtp.packet_protect_unprotect` | security | LiveKitNative | 300 | 100 | 75.345 | 96.344 | 13272.355 |
+| `rtcp.feedback_roundtrip` | rtcp | LiveKitNative | 300 | 500 | 1.819 | 2.214 | 549903.767 |
+| `srtcp.packet_replay_roundtrip` | security | LiveKitNative | 300 | 500 | 0.776 | 1.077 | 1288795.981 |
+| `srtcp.authenticated_roundtrip` | security | LiveKitNative | 300 | 200 | 7.255 | 8.505 | 137843.955 |
+| `srtcp.packet_protect_unprotect` | security | LiveKitNative | 300 | 200 | 9.912 | 10.818 | 100886.948 |
+| `dtls_srtp.exporter_split` | security | LiveKitNative | 300 | 500 | 0.338 | 0.459 | 2957127.565 |
+| `dtls_srtp.session_protect_unprotect` | security | LiveKitNative | 300 | 50 | 88.748 | 109.833 | 11267.923 |
+| `h264.packetize_depacketize` | video | LiveKitNative | 300 | 50 | 2.683 | 5.209 | 372786.580 |
+| `vp8.payload_depacketize` | video | LiveKitNative | 300 | 500 | 0.160 | 0.333 | 6269592.476 |
+| `opus.rtp_packetize_depacketize` | audio | LiveKitNative | 300 | 500 | 0.028 | 0.036 | 35821750.967 |
+| `sctp.dcep_open_ack_roundtrip` | data | LiveKitNative | 300 | 500 | 0.871 | 1.416 | 1147994.912 |
 
 ## Official SDK/WebRTC Comparison
 

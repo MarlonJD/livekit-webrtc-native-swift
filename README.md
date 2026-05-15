@@ -37,13 +37,15 @@ sending and authenticated response validation, ICE priority helpers, host
 candidate construction, UDP STUN transport, connectivity-check
 request/response handling with bounded transport retries, candidate checklist
 nomination, DTLS fingerprint material, DTLS-SRTP protection profile and
-exporter key/salt splitting, RTP packet encode/decode, RTP sequence rollover
-tracking, SRTP replay-window protection groundwork, SRTP AES-CM payload
-encryption/decryption using RFC 3711 IV construction, SRTP authentication-tag
-framing with ROC-aware HMAC-SHA1 validation, full SRTP packet
-protect/unprotect APIs with replay rejection, SRTCP AES-CM payload protection,
-SRTCP index/authentication-tag framing, HMAC-SHA1 auth-tag validation, full
-SRTCP packet protect/unprotect APIs with replay rejection, RTCP
+exporter key/salt splitting, RFC 3711 AES-CM SRTP/SRTCP session key
+derivation, client/server DTLS-SRTP packet-protection context wiring, RTP
+packet encode/decode, RTP sequence rollover tracking, SRTP replay-window
+protection groundwork, SRTP AES-CM payload encryption/decryption using RFC
+3711 IV construction, SRTP authentication-tag framing with ROC-aware HMAC-SHA1
+validation, full SRTP packet protect/unprotect APIs with replay rejection,
+SRTCP AES-CM payload protection, SRTCP index/authentication-tag framing,
+HMAC-SHA1 auth-tag validation, full SRTCP packet protect/unprotect APIs with
+replay rejection, RTCP
 sender/receiver report and PLI/NACK feedback wire-format groundwork, H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
 assembly, native camera track scaffolding, VideoToolbox H.264 encoder
@@ -99,18 +101,19 @@ swift run -c release LiveKitNativeBenchmarks
 
 The current local run measures low-level signaling, SDP, STUN, RTP, SRTP/SRTCP
 replay/authentication tracking, SRTP/SRTCP AES-CM payload protection, full
-SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting, RTCP
-feedback, H.264, VP8, Opus RTP scaffolding, and SCTP data-channel message
-paths. On this machine, sample medians include protobuf signal roundtrip at
-`6.541 us/op`, subscriber SDP answer generation at `106.275 us/op`, RTP
-encode/decode at `0.595 us/op`, SRTP replay protection at `0.046 us/op`, SRTP
-authenticated roundtrip at `8.876 us/op`, SRTP AES-CM payload roundtrip at
-`68.147 us/op`, full SRTP packet protect/unprotect at `74.986 us/op`, RTCP
-feedback roundtrip at `1.795 us/op`, SRTCP packet/replay roundtrip at
-`0.797 us/op`, SRTCP authenticated roundtrip at `7.228 us/op`, full SRTCP
-packet protect/unprotect at `9.589 us/op`, DTLS-SRTP exporter split at
-`0.321 us/op`, H.264 packetize/depacketize at `2.466 us/op`, and SCTP DCEP
-open/ack roundtrip at `0.822 us/op`.
+SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting and
+session-protection context, RTCP feedback, H.264, VP8, Opus RTP scaffolding,
+and SCTP data-channel message paths. On this machine, sample medians include
+protobuf signal roundtrip at `6.511 us/op`, subscriber SDP answer generation at
+`108.185 us/op`, RTP encode/decode at `0.602 us/op`, SRTP replay protection at
+`0.046 us/op`, SRTP authenticated roundtrip at `8.859 us/op`, SRTP AES-CM
+payload roundtrip at `66.349 us/op`, full SRTP packet protect/unprotect at
+`75.345 us/op`, RTCP feedback roundtrip at `1.819 us/op`, SRTCP packet/replay
+roundtrip at `0.776 us/op`, SRTCP authenticated roundtrip at `7.255 us/op`,
+full SRTCP packet protect/unprotect at `9.912 us/op`, DTLS-SRTP exporter split
+at `0.338 us/op`, DTLS-SRTP session protect/unprotect at `88.748 us/op`, H.264
+packetize/depacketize at `2.683 us/op`, and SCTP DCEP open/ack roundtrip at
+`0.871 us/op`.
 
 Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
 CSV so this package does not reintroduce the forbidden binary WebRTC dependency.

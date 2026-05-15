@@ -234,6 +234,10 @@ The old binary WebRTC dependency path has been removed from the package model.
     `SRTP_AES128_CM_HMAC_SHA1_80` and `SRTP_AES128_CM_HMAC_SHA1_32`
   - DTLS-SRTP exporter output splitting into client/server SRTP master
     keys and salts
+  - RFC 3711 AES-CM session key derivation for SRTP/SRTCP encryption,
+    authentication, and salting keys
+  - client/server DTLS-SRTP packet-protection context that maps local/remote
+    write material to outbound/inbound SRTP and SRTCP protectors
   - RTP sequence-number extension across rollover for SRTP packet indexing
   - SRTP replay-window primitive with per-SSRC duplicate and old-packet
     rejection
@@ -329,7 +333,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 168 tests passed
+  - 172 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -342,7 +346,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,192,650 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,207,756 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed

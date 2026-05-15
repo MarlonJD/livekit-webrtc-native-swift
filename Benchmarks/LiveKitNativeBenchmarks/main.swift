@@ -371,6 +371,17 @@ func makeBenchmarks(blackhole: BenchmarkBlackhole) throws -> [BenchmarkCase] {
     var srtcpReplayIndex: UInt32 = 0
     var srtcpAuthenticationIndex: UInt32 = 0
     let dtlsSRTPExporterMaterial = Data((0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init))
+    let dtlsSRTPKeyMaterial = try DTLSSRTPKeyMaterial(exportedKeyingMaterial: dtlsSRTPExporterMaterial)
+    var dtlsSRTPClientProtection = try DTLSSRTPPacketProtectionContext(
+        keyMaterial: dtlsSRTPKeyMaterial,
+        role: .client
+    )
+    var dtlsSRTPServerProtection = try DTLSSRTPPacketProtectionContext(
+        keyMaterial: dtlsSRTPKeyMaterial,
+        role: .server
+    )
+    var dtlsSRTPSessionSequenceNumber: UInt16 = 0
+    var dtlsSRTCPSessionIndex: UInt32 = 0
     let rtcpNACK = RTCPPacket.transportLayerNACK(
         RTCPTransportLayerNACK(
             senderSSRC: 0x0102_0304,
@@ -524,6 +535,24 @@ func makeBenchmarks(blackhole: BenchmarkBlackhole) throws -> [BenchmarkCase] {
             let local = keyMaterial.localWriteMaterial(for: .client)
             let remote = keyMaterial.remoteWriteMaterial(for: .client)
             blackhole.consume(local.masterKey.count + local.masterSalt.count + remote.masterKey.count + remote.masterSalt.count)
+        },
+        BenchmarkCase(name: "dtls_srtp.session_protect_unprotect", category: "security", operationsPerSample: 50) {
+            dtlsSRTPSessionSequenceNumber &+= 1
+            var packet = rtpPacket
+            packet.sequenceNumber = dtlsSRTPSessionSequenceNumber
+            let protectedRTP = try dtlsSRTPClientProtection.protectRTP(packet, rolloverCounter: 0)
+            let unprotectedRTP = try dtlsSRTPServerProtection.unprotectRTP(protectedRTP)
+
+            dtlsSRTCPSessionIndex &+= 1
+            let rtcpPacket = SRTCPPacket(
+                rtcpPacket: rtcpPLI,
+                index: try SRTCPIndex(value: dtlsSRTCPSessionIndex)
+            )
+            let protectedRTCP = try dtlsSRTPServerProtection.protectRTCP(rtcpPacket)
+            let unprotectedRTCP = try dtlsSRTPClientProtection.unprotectRTCP(protectedRTCP)
+
+            blackhole.consume(unprotectedRTP.payload.count + protectedRTP.authenticationTag.count)
+            blackhole.consume(try unprotectedRTCP.encoded().count + protectedRTCP.authenticationTag.count)
         },
         BenchmarkCase(name: "h264.packetize_depacketize", category: "video", operationsPerSample: 50) {
             let packets = try h264Packetizer.packetize(

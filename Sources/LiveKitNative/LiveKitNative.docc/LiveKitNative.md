@@ -34,10 +34,11 @@ hardening with explicit production
 readiness gates, request/response correlation for client-originated signaling,
 metadata/name/attribute update requests, configurable logging, disconnect
 lifecycle cleanup, DTLS-SRTP protection-profile key/salt splitting, RTP
-sequence rollover tracking, SRTP replay-window and ROC-aware authentication
-groundwork, SRTP AES-CM payload encryption/decryption groundwork, full
-SRTP/SRTCP packet protect/unprotect APIs with replay rejection, plus RTCP
-report/feedback packet groundwork.
+sequence rollover tracking, RFC 3711 SRTP/SRTCP session key derivation,
+client/server DTLS-SRTP packet-protection context wiring, SRTP replay-window
+and ROC-aware authentication groundwork, SRTP AES-CM payload
+encryption/decryption groundwork, full SRTP/SRTCP packet protect/unprotect APIs
+with replay rejection, plus RTCP report/feedback packet groundwork.
 Basic signal
 resume/full-reconnect and alternative signal URL retry are implemented at
 unit-test level. Speaker, connection quality,
@@ -57,9 +58,9 @@ Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the
 implemented signaling, SDP, STUN, RTP, SRTP/SRTCP replay and authentication
 tracking, SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter
-splitting, RTCP feedback, H.264, VP8, Opus RTP scaffolding, and SCTP
-data-channel message paths, and accepts an external official SDK/WebRTC
-baseline CSV for ratio comparisons.
+splitting and session-protection context, RTCP feedback, H.264, VP8, Opus RTP
+scaffolding, and SCTP data-channel message paths, and accepts an external
+official SDK/WebRTC baseline CSV for ratio comparisons.
 
 Release automation can run `scripts/check_release_readiness.sh` for the current
 developer-preview gate, or `REQUIRE_PRODUCTION_READY=1
