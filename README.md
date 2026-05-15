@@ -12,7 +12,7 @@ profile.
 
 Detailed project status is tracked in [docs/STATUS.md](docs/STATUS.md).
 
-The `0.5.0` developer-preview scope is complete. The package contains the
+The `0.6.0` developer-preview scope is complete. The package contains the
 SwiftPM layout, single public `LiveKitNative` product, public API surface,
 actor-backed room state, signaling URL builder, CI workflow, privacy manifest,
 DocC landing page, and tests for the pieces that already have behavior.
@@ -44,9 +44,16 @@ and layer metadata parsing, VP8 frame assembly from single-packet and fragmented
 RTP frames, keyframe width/height extraction, sequence-gap validation, and a
 decode-only frame inspector for future renderer integration.
 
-The active implementation focus is now `0.6.0`: SCTP data channel and LiveKit
-data packet groundwork. Reconnect and quality controls follow in later
-milestones.
+Data channel groundwork now includes WebRTC DCEP open/ack encode/decode,
+reliable/lossy LiveKit data-channel labels, SCTP stream routing for local data
+channels, binary PPID envelopes, LiveKit `DataPacket` user-packet mapping,
+`publish(data:options:)` local publish planning, data-track publish/unpublish
+request scaffolds, data subscription update scaffolds, and
+`RoomEvent.dataReceived` mapping for decoded packets.
+
+The active implementation focus is now `1.0.0` hardening: reconnect, TURN,
+quality controls, real DTLS-SCTP network transport, integration apps, and size
+gates.
 
 ## Requirements
 

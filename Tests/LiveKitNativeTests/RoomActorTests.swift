@@ -1,5 +1,7 @@
+import Foundation
 import XCTest
 @testable import LiveKitNative
+@testable import LiveKitNativeWebRTC
 
 final class RoomActorTests: XCTestCase {
     func testParticipantUpdatesAreIdempotentBySid() async {
@@ -117,5 +119,28 @@ final class RoomActorTests: XCTestCase {
             return XCTFail("Expected participantDisconnected event.")
         }
         XCTAssertEqual(disconnectedParticipant.sid, "PA_alice")
+    }
+
+    func testDataEventMapsPacketSenderToRemoteParticipant() async {
+        let actor = RoomActor(localParticipant: LocalParticipant(identity: "me"))
+        _ = await actor.applyParticipantUpdates([
+            ParticipantSnapshot(sid: "PA_alice", identity: "alice"),
+        ])
+
+        let event = await actor.dataEvent(for: ReceivedLiveKitDataPacket(
+            payload: Data("hello".utf8),
+            topic: "chat",
+            reliability: .reliable,
+            participantSid: "PA_alice",
+            participantIdentity: nil
+        ))
+
+        guard case let .dataReceived(payload, participant, topic) = event else {
+            return XCTFail("Expected dataReceived event.")
+        }
+
+        XCTAssertEqual(payload, Data("hello".utf8))
+        XCTAssertEqual(participant?.identity, "alice")
+        XCTAssertEqual(topic, "chat")
     }
 }

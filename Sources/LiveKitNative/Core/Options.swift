@@ -89,9 +89,11 @@ public struct TrackPublishOptions: Equatable, Sendable {
 public struct DataPublishOptions: Equatable, Sendable {
     public var reliable: Bool
     public var topic: String?
+    public var destinationIdentities: [String]
 
-    public init(reliable: Bool = true, topic: String? = nil) {
+    public init(reliable: Bool = true, topic: String? = nil, destinationIdentities: [String] = []) {
         self.reliable = reliable
         self.topic = topic
+        self.destinationIdentities = destinationIdentities
     }
 }

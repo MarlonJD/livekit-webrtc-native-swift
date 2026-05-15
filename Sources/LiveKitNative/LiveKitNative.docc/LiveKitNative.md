@@ -23,8 +23,10 @@ RTP packetization/depacketization, audio playout scaffolding, LiveKit
 `AddTrackRequest` construction for microphone publishes, and local microphone
 publication state. Milestone 0.5 adds VP8 RTP payload descriptor parsing, VP8
 frame assembly, keyframe metadata extraction, and a decode-only frame inspector.
-Active work has moved to 0.6 SCTP data channel and LiveKit data packet
-groundwork.
+Milestone 0.6 adds WebRTC data-channel DCEP open/ack messages, reliable/lossy
+SCTP channel planning, LiveKit `DataPacket` user-packet mapping,
+`publish(data:options:)` local publish planning, and data-track signaling
+scaffolds. Active work has moved to 1.0 hardening.
 
 ## Topics
 

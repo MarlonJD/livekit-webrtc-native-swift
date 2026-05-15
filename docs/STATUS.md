@@ -4,9 +4,9 @@ Last updated: 2026-05-15
 
 ## Current State
 
-`LiveKitNative` has completed the `0.5.0` developer-preview scope and is now
-moving into the `0.6.0` SCTP data channel and LiveKit data packet phase. It is
-not yet a working end-to-end production media client.
+`LiveKitNative` has completed the `0.6.0` developer-preview scope and is now
+moving into `1.0.0` hardening. It is not yet a working end-to-end production
+media client.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -202,13 +202,27 @@ The old binary WebRTC dependency path has been removed from the package model.
     error paths
   - decode-only frame inspector that records keyframe metadata for the future
     pixel decoder/render path
+- SCTP data channel and LiveKit data packet groundwork:
+  - WebRTC DCEP data-channel open and acknowledgement message encode/decode
+  - reliable and lossy LiveKit data-channel labels (`_reliable`, `_lossy`)
+  - reliable and lossy SCTP stream planning for local data channels
+  - WebRTC binary/control PPID envelope types
+  - data-channel state transitions from connecting to open on DCEP ack
+  - LiveKit `DataPacket` user-packet mapping for reliable/lossy delivery
+  - topic and destination-identity mapping through `DataPublishOptions`
+  - `LocalParticipant.publish(data:options:)` local publish planning
+  - incoming user-packet decode helper for future WebRTC receive plumbing
+  - `RoomEvent.dataReceived` mapping from decoded data packets to remote
+    participants
+  - `PublishDataTrackRequest`, `UnpublishDataTrackRequest`, and
+    `UpdateDataSubscription` scaffolds for newer data-track protocol messages
 
 ## Verified
 
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 84 tests passed
+  - 95 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -265,8 +279,9 @@ The following checks passed after the latest implementation pass:
 ### Data Channels
 
 - DTLS-backed SCTP association.
-- Data channel open/ack/control messages.
-- LiveKit data packet mapping.
+- SCTP chunking, association state, congestion control, retransmission, and
+  reassembly.
+- Wiring data-channel packets into the real DTLS transport.
 - Text streams, byte streams, and RPC APIs.
 
 ### Integration
@@ -280,10 +295,10 @@ The following checks passed after the latest implementation pass:
 
 ## Next Recommended Work
 
-1. Start `0.6.0` with SCTP data channel packet and control-message fixtures.
-2. Add WebRTC data channel open/ack state and LiveKit data packet mapping.
-3. Add reliable/lossy packet send/receive tests before text streams, byte
-   streams, and RPC.
+1. Start `1.0.0` hardening with real DTLS-backed SCTP transport wiring.
+2. Connect queued local data publish plans to the publisher peer connection
+   once data channels are open.
+3. Add text streams, byte streams, RPC, and two-client data integration tests.
 4. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
    publisher `AddTrackRequest` signaling, transceiver negotiation, and
    DTLS-SRTP integration as the hardening path before a usable end-to-end
@@ -291,8 +306,9 @@ The following checks passed after the latest implementation pass:
 
 ## Practical Release Status
 
-`0.5.0` scope is complete as a VP8 decode-only subscribe groundwork milestone.
-It should be treated as a developer preview, not as a usable media SDK.
+`0.6.0` scope is complete as an SCTP data-channel and LiveKit data-packet
+groundwork milestone. It should be treated as a developer preview, not as a
+usable media SDK.
 
-The repository is ready for `0.6.0` implementation work: SCTP data channel and
-LiveKit data packet groundwork.
+The repository is ready for `1.0.0` hardening work: real transport wiring,
+reconnect, TURN, quality controls, integration samples, and size gates.

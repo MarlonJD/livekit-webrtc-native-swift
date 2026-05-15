@@ -52,8 +52,22 @@ actor RoomActor {
         return (state.snapshot, events)
     }
 
+    func dataEvent(for packet: ReceivedLiveKitDataPacket) -> RoomEvent {
+        .dataReceived(
+            packet.payload,
+            participant: remoteParticipant(sid: packet.participantSid, identity: packet.participantIdentity),
+            topic: packet.topic
+        )
+    }
+
     func snapshot() -> RoomSnapshot {
         state.snapshot
+    }
+
+    private func remoteParticipant(sid: String?, identity: String?) -> RemoteParticipant? {
+        state.remoteParticipants.values.first { participant in
+            (!participant.sid.isEmpty && participant.sid == sid) || participant.identity == identity
+        }
     }
 
     private func applyRemoteParticipantUpdates(_ participantUpdates: [ParticipantSnapshot], events: inout [RoomEvent]) {

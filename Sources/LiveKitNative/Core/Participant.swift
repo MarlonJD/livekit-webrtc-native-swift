@@ -55,11 +55,19 @@ public class Participant: Identifiable, Hashable, @unchecked Sendable {
 
 public final class LocalParticipant: Participant, @unchecked Sendable {
     private let publicationLock = NSLock()
+    private let dataPublicationLock = NSLock()
     private var localTrackPublications: [String: LocalTrackPublication] = [:]
+    private var localDataPublishPlans: [LocalDataPublishPlan] = []
 
     public var trackPublications: [LocalTrackPublication] {
         publicationLock.withLock {
             localTrackPublications.values.sorted { $0.sid < $1.sid }
+        }
+    }
+
+    var dataPublishPlans: [LocalDataPublishPlan] {
+        dataPublicationLock.withLock {
+            localDataPublishPlans
         }
     }
 
@@ -142,7 +150,10 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
     }
 
     public func publish(data: Data, options: DataPublishOptions = .init()) async throws {
-        throw LiveKitNativeError.notImplemented("Data publishing")
+        let plan = try LocalDataPublishPlan(data: data, options: options, participantSid: sid, participantIdentity: identity)
+        dataPublicationLock.withLock {
+            localDataPublishPlans.append(plan)
+        }
     }
 
     public func setMetadata(_ metadata: String) async throws {
