@@ -83,7 +83,8 @@ request/response signaling, data subscription update signaling, and
 The active implementation focus is now `1.0.0` hardening: implementing the
 real DTLS handshake/exporter, wiring the handshaker-backed media session binder
 into subscriber/publisher peer connection startup, reconnect, TURN, quality
-controls, real DTLS-SCTP network transport, integration apps, and size gates.
+controls, real RTP sender media transport, DTLS-SCTP network transport,
+integration apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -98,10 +99,24 @@ resume reconnects. Basic signal resume/full-reconnect and
 `publish(videoTrack:)` / `publish(audioTrack:)` calls send LiveKit
 `AddTrackRequest` messages and wait for matching `TrackPublishedResponse`
 acknowledgements before recording local publications.
+`LocalParticipant.setTrackMuted(publication:muted:)` now sends LiveKit
+`MuteTrackRequest` messages for local publications. Room-connected local
+track unpublish and camera/microphone disable flows also send a muted
+`MuteTrackRequest` before removing the local publication. Server-initiated
+mute messages update local/remote track publication state and emit
+`RoomEvent.trackMuteChanged`. Room-level media subscription and subscribed
+track settings requests are available through `Room.updateSubscription` and
+`Room.updateTrackSettings`; publisher track subscription permissions are
+available through `LocalParticipant.setTrackSubscriptionPermissions`. Local
+publisher audio/video track update signaling is exposed through
+`LocalParticipant.updateAudioTrack` and `LocalParticipant.updateVideoTrack`.
+After `TrackPublishedResponse`, publisher publish flows now generate a send-only
+SDP offer and send it as `SignalRequest.offer` for the publisher negotiation
+path.
 Publisher answer routing, data-track control event mapping, and data-track
-publish/unpublish request flows are unit-tested, while publisher offer
-generation, ICE-bound media transport, media recovery, and end-to-end reconnect
-hardening are still open.
+publish/unpublish request flows are unit-tested,
+while ICE-bound media transport, RTP sender startup, media recovery,
+and end-to-end reconnect hardening are still open.
 
 ## Benchmarks
 
@@ -117,18 +132,18 @@ SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting and
 session-protection context, RTCP feedback, H.264, VP8, Opus RTP scaffolding,
 and SCTP data-channel message paths. On this machine, the latest
 release-readiness smoke medians include protobuf signal roundtrip at
-`7.707 us/op`, subscriber SDP answer generation at `103.258 us/op`, STUN
-binding roundtrip at `1.858 us/op`, RTP encode/decode at `0.591 us/op`, SRTP
-replay protection at `0.047 us/op`, SRTP authenticated roundtrip at
-`8.547 us/op`, SRTP AES-CM payload roundtrip at `64.270 us/op`, full SRTP
-packet protect/unprotect at `76.025 us/op`, RTCP feedback roundtrip at
-`1.749 us/op`, SRTCP packet/replay roundtrip at `0.784 us/op`, SRTCP
-authenticated roundtrip at `6.995 us/op`, full SRTCP packet protect/unprotect
-at `9.851 us/op`, DTLS-SRTP exporter split at `0.343 us/op`, DTLS-SRTP session
-protect/unprotect at `83.829 us/op`, H.264 packetize/depacketize at
-`2.492 us/op`, VP8 payload depacketize at `0.158 us/op`, Opus RTP
+`8.919 us/op`, subscriber SDP answer generation at `99.606 us/op`, STUN
+binding roundtrip at `1.874 us/op`, RTP encode/decode at `0.590 us/op`, SRTP
+replay protection at `0.048 us/op`, SRTP authenticated roundtrip at
+`8.326 us/op`, SRTP AES-CM payload roundtrip at `61.736 us/op`, full SRTP
+packet protect/unprotect at `69.687 us/op`, RTCP feedback roundtrip at
+`1.735 us/op`, SRTCP packet/replay roundtrip at `0.791 us/op`, SRTCP
+authenticated roundtrip at `6.894 us/op`, full SRTCP packet protect/unprotect
+at `9.303 us/op`, DTLS-SRTP exporter split at `0.332 us/op`, DTLS-SRTP session
+protect/unprotect at `81.544 us/op`, H.264 packetize/depacketize at
+`2.474 us/op`, VP8 payload depacketize at `0.149 us/op`, Opus RTP
 packetize/depacketize at `0.026 us/op`, and SCTP DCEP open/ack roundtrip at
-`0.808 us/op`.
+`0.821 us/op`.
 
 Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
 CSV so this package does not reintroduce the forbidden binary WebRTC dependency.

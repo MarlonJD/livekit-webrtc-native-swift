@@ -15,9 +15,10 @@ DTLS handshake/exporter implementation, TURN/ICE hardening, live media startup
 integration, DTLS-backed SCTP, media recovery during reconnect, and end-to-end
 LiveKit compatibility testing.
 Publisher `AddTrackRequest` signaling is now wired for local audio/video
-publishes, publisher answers and publisher-targeted trickle candidates are
-routed into the publisher peer connection adapter, but publisher offer
-generation and media sender transport are still open.
+publishes, publisher SDP offers are generated and sent after
+`TrackPublishedResponse`, and publisher answers and publisher-targeted trickle
+candidates are routed into the publisher peer connection adapter, but media
+sender transport is still open.
 Data-track publish/unpublish/update-subscription signaling is also wired at
 unit-test level; live SCTP transport remains open.
 
@@ -112,6 +113,8 @@ The old binary WebRTC dependency path has been removed from the package model.
   attempts.
 - `LeaveRequest` messages transition to `disconnected` for disconnect actions
   and to `reconnecting` for resume/reconnect actions.
+- Server-initiated `MuteTrackRequest` messages update local or remote track
+  publication mute state and emit `RoomEvent.trackMuteChanged`.
 - `SignalResponse.requestResponse` messages are correlated by request ID for
   client-originated signaling requests.
 - `LocalParticipant.setMetadata`, `setName`, and `setAttributes` send
@@ -122,6 +125,27 @@ The old binary WebRTC dependency path has been removed from the package model.
   LiveKit `AddTrackRequest` messages over the active signal connection, await
   the matching `TrackPublishedResponse` by local CID, and record local
   publications from the server-returned `TrackInfo`.
+- After media publish acknowledgement, publisher SDP offers are generated from
+  local audio/video publish plans and sent as LiveKit `SignalRequest.offer`
+  messages for the publisher negotiation path.
+- `LocalParticipant.setTrackMuted(publication:muted:)` sends LiveKit
+  `MuteTrackRequest` messages for local publications and updates local mute
+  state after the signal send succeeds.
+- `LocalParticipant.unpublish(publication:)`, `setCamera(enabled: false)`, and
+  `setMicrophone(enabled: false)` send a muted `MuteTrackRequest` before
+  removing local publications when the participant is attached to a connected
+  room. The normal media renegotiation work needed for full publisher unpublish
+  remains open.
+- `Room.updateSubscription(trackSIDs:subscribe:)` sends LiveKit
+  `UpdateSubscription` messages for media tracks, and
+  `Room.updateTrackSettings(...)` sends `UpdateTrackSettings` messages for
+  subscribed track pause, quality, resolution, FPS, and priority preferences.
+- `LocalParticipant.setTrackSubscriptionPermissions(...)` sends LiveKit
+  `SubscriptionPermission` messages for publisher-controlled subscriber access
+  to all local tracks or selected track SIDs.
+- `LocalParticipant.updateAudioTrack(...)` and `updateVideoTrack(...)` send
+  LiveKit `UpdateLocalAudioTrack` / `UpdateLocalVideoTrack` messages for local
+  publisher track feature and dimension updates.
 - `SignalResponse.trackPublished` messages are correlated by local CID for
   client-originated publish requests.
 - `SignalResponse.answer` messages are routed into the publisher peer
@@ -377,7 +401,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 212 tests passed
+  - 225 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -390,7 +414,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,267,533 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,299,949 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -407,8 +431,8 @@ The following checks passed after the latest implementation pass:
 
 - Stateful handling for data-track subscriber handle updates and media section
   requirement updates beyond typed event emission.
-- Publisher offer generation, transceiver negotiation, RTP sender transport,
-  and LiveKit integration coverage for AddTrack publishes.
+- Transceiver negotiation, RTP sender transport, and LiveKit integration
+  coverage for AddTrack publishes beyond unit-level publisher offer signaling.
 - Production-hardened reconnect across ICE restart, media recovery, data
   channel recovery, and server migration.
 - Request-response coverage for remaining client-originated signaling commands

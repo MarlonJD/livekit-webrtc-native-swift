@@ -278,6 +278,7 @@ public enum RoomEvent: Equatable, Sendable {
     case participantDisconnected(RemoteParticipant)
     case trackPublished(RemoteTrackPublication, participant: RemoteParticipant)
     case trackUnpublished(RemoteTrackPublication, participant: RemoteParticipant)
+    case trackMuteChanged(TrackPublication, participant: Participant, isMuted: Bool)
     case speakersChanged([SpeakerInfo])
     case connectionQualityChanged([ConnectionQualityInfo])
     case streamStateChanged([TrackStreamStateInfo])

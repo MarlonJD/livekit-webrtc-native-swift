@@ -77,4 +77,20 @@ final class LocalParticipantPublishTests: XCTestCase {
 
         XCTAssertEqual(participant.trackPublications.count, 0)
     }
+
+    func testSetTrackMutedUpdatesLocalPublication() async throws {
+        let participant = LocalParticipant(identity: "me")
+        let track = try LocalVideoTrack.createCameraTrack()
+        let publication = try await participant.publish(videoTrack: track)
+
+        try await participant.setTrackMuted(publication: publication, muted: true)
+        try await participant.setTrackMuted(publication: publication, muted: true)
+
+        XCTAssertTrue(publication.isMuted)
+        XCTAssertEqual(participant.trackPublications.first?.isMuted, true)
+
+        try await participant.setTrackMuted(publication: publication, muted: false)
+
+        XCTAssertFalse(publication.isMuted)
+    }
 }

@@ -53,6 +53,66 @@ public class Participant: Identifiable, Hashable, @unchecked Sendable {
     }
 }
 
+public struct TrackSubscriptionPermission: Equatable, Sendable {
+    public let participantSID: String
+    public let participantIdentity: String
+    public let allTracks: Bool
+    public let trackSIDs: [String]
+
+    public init(
+        participantSID: String = "",
+        participantIdentity: String = "",
+        allTracks: Bool = false,
+        trackSIDs: [String] = []
+    ) {
+        self.participantSID = participantSID
+        self.participantIdentity = participantIdentity
+        self.allTracks = allTracks
+        self.trackSIDs = trackSIDs
+    }
+
+    var protocolPermission: Livekit_TrackPermission {
+        var permission = Livekit_TrackPermission()
+        permission.participantSid = participantSID
+        permission.participantIdentity = participantIdentity
+        permission.allTracks = allTracks
+        permission.trackSids = trackSIDs
+        return permission
+    }
+}
+
+public enum LocalAudioTrackFeature: Equatable, Sendable {
+    case stereo
+    case noDTX
+    case autoGainControl
+    case echoCancellation
+    case noiseSuppression
+    case enhancedNoiseCancellation
+    case preconnectBuffer
+    case unknown(Int)
+
+    var protocolFeature: Livekit_AudioTrackFeature {
+        switch self {
+        case .stereo:
+            return .tfStereo
+        case .noDTX:
+            return .tfNoDtx
+        case .autoGainControl:
+            return .tfAutoGainControl
+        case .echoCancellation:
+            return .tfEchoCancellation
+        case .noiseSuppression:
+            return .tfNoiseSuppression
+        case .enhancedNoiseCancellation:
+            return .tfEnhancedNoiseCancellation
+        case .preconnectBuffer:
+            return .tfPreconnectBuffer
+        case let .unknown(rawValue):
+            return .UNRECOGNIZED(rawValue)
+        }
+    }
+}
+
 public final class LocalParticipant: Participant, @unchecked Sendable {
     private let publicationLock = NSLock()
     private let dataPublicationLock = NSLock()
@@ -94,8 +154,12 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
             let track = try LocalVideoTrack.createCameraTrack(options: options)
             _ = try await publish(videoTrack: track, options: TrackPublishOptions(source: .camera))
         } else {
-            publicationLock.withLock {
-                localTrackPublications = localTrackPublications.filter { $0.value.source != .camera }
+            let cameraPublications = publicationLock.withLock {
+                localTrackPublications.values.filter { $0.source == .camera }
+            }
+
+            for publication in cameraPublications {
+                try await unpublish(publication: publication)
             }
         }
     }
@@ -113,8 +177,12 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
             let track = try LocalAudioTrack.createTrack(options: options)
             _ = try await publish(audioTrack: track, options: TrackPublishOptions(source: .microphone))
         } else {
-            publicationLock.withLock {
-                localTrackPublications = localTrackPublications.filter { $0.value.source != .microphone }
+            let microphonePublications = publicationLock.withLock {
+                localTrackPublications.values.filter { $0.source == .microphone }
+            }
+
+            for publication in microphonePublications {
+                try await unpublish(publication: publication)
             }
         }
     }
@@ -131,6 +199,7 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
             name: publishedTrack.name,
             kind: publishedTrack.kind,
             source: publishedTrack.source,
+            isMuted: publishedTrack.isMuted,
             track: videoTrack
         )
 
@@ -153,6 +222,7 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
             name: publishedTrack.name,
             kind: publishedTrack.kind,
             source: publishedTrack.source,
+            isMuted: publishedTrack.isMuted,
             track: audioTrack
         )
 
@@ -164,8 +234,36 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
     }
 
     public func unpublish(publication: LocalTrackPublication) async throws {
-        publicationLock.withLock {
-            _ = localTrackPublications.removeValue(forKey: publication.sid)
+        guard publicationLock.withLock({ localTrackPublications[publication.sid] }) != nil else {
+            return
+        }
+
+        let plan = LocalTrackUnpublishPlan(sid: publication.sid)
+        if let commandHandler = currentCommandHandler() {
+            try await commandHandler.unpublishTrack(plan)
+        }
+
+        removeLocalTrackPublication(sid: publication.sid)
+    }
+
+    public func setTrackMuted(publication: LocalTrackPublication, muted: Bool) async throws {
+        guard publicationLock.withLock({ localTrackPublications[publication.sid] }) != nil else {
+            throw LiveKitNativeError.requestFailed(
+                action: "track mute",
+                reason: "trackNotPublished",
+                message: "Local track publication is not active."
+            )
+        }
+
+        guard publication.isMuted != muted else {
+            return
+        }
+
+        let plan = LocalTrackMutePlan(sid: publication.sid, muted: muted)
+        if let commandHandler = currentCommandHandler() {
+            try await commandHandler.updateTrackMute(plan)
+        } else {
+            _ = applyTrackMute(sid: publication.sid, muted: muted)
         }
     }
 
@@ -245,6 +343,84 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
         )
     }
 
+    public func setTrackSubscriptionPermissions(
+        allParticipantsAllowed: Bool,
+        permissions: [TrackSubscriptionPermission] = []
+    ) async throws {
+        guard let commandHandler = currentCommandHandler() else {
+            throw LiveKitNativeError.notConnected
+        }
+
+        try await commandHandler.updateSubscriptionPermissions(
+            LocalTrackSubscriptionPermissionPlan(
+                allParticipantsAllowed: allParticipantsAllowed,
+                permissions: permissions
+            )
+        )
+    }
+
+    public func updateAudioTrack(
+        publication: LocalTrackPublication,
+        features: [LocalAudioTrackFeature]
+    ) async throws {
+        guard let publication = localPublication(sid: publication.sid) else {
+            throw LiveKitNativeError.requestFailed(
+                action: "update audio track",
+                reason: "trackNotPublished",
+                message: "Local track publication is not active."
+            )
+        }
+        guard publication.kind == .audio else {
+            throw LiveKitNativeError.requestFailed(
+                action: "update audio track",
+                reason: "trackKindMismatch",
+                message: "Local track publication is not audio."
+            )
+        }
+        guard let commandHandler = currentCommandHandler() else {
+            throw LiveKitNativeError.notConnected
+        }
+
+        try await commandHandler.updateAudioTrack(
+            LocalAudioTrackUpdatePlan(
+                sid: publication.sid,
+                features: features
+            )
+        )
+    }
+
+    public func updateVideoTrack(
+        publication: LocalTrackPublication,
+        width: UInt32,
+        height: UInt32
+    ) async throws {
+        guard let publication = localPublication(sid: publication.sid) else {
+            throw LiveKitNativeError.requestFailed(
+                action: "update video track",
+                reason: "trackNotPublished",
+                message: "Local track publication is not active."
+            )
+        }
+        guard publication.kind == .video else {
+            throw LiveKitNativeError.requestFailed(
+                action: "update video track",
+                reason: "trackKindMismatch",
+                message: "Local track publication is not video."
+            )
+        }
+        guard let commandHandler = currentCommandHandler() else {
+            throw LiveKitNativeError.notConnected
+        }
+
+        try await commandHandler.updateVideoTrack(
+            LocalVideoTrackUpdatePlan(
+                sid: publication.sid,
+                width: width,
+                height: height
+            )
+        )
+    }
+
     public func setMetadata(_ metadata: String) async throws {
         guard let commandHandler = currentCommandHandler() else {
             throw LiveKitNativeError.notConnected
@@ -302,6 +478,29 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
         }
     }
 
+    func applyTrackMute(sid: String, muted: Bool) -> LocalTrackPublication? {
+        publicationLock.withLock {
+            guard let publication = localTrackPublications[sid], publication.setMuted(muted) else {
+                return nil
+            }
+
+            return publication
+        }
+    }
+
+    private func localPublication(sid: String) -> LocalTrackPublication? {
+        publicationLock.withLock {
+            localTrackPublications[sid]
+        }
+    }
+
+    @discardableResult
+    private func removeLocalTrackPublication(sid: String) -> LocalTrackPublication? {
+        publicationLock.withLock {
+            localTrackPublications.removeValue(forKey: sid)
+        }
+    }
+
     private func currentCommandHandler() -> LocalParticipantCommandHandler? {
         commandLock.withLock {
             commandHandler
@@ -341,17 +540,80 @@ struct ParticipantMetadataUpdate: Equatable, Sendable {
     }
 }
 
+struct LocalTrackMutePlan: Equatable, Sendable {
+    var sid: String
+    var muted: Bool
+
+    var muteRequest: Livekit_MuteTrackRequest {
+        var request = Livekit_MuteTrackRequest()
+        request.sid = sid
+        request.muted = muted
+        return request
+    }
+}
+
+struct LocalTrackUnpublishPlan: Equatable, Sendable {
+    var sid: String
+
+    var muteRequest: Livekit_MuteTrackRequest {
+        var request = Livekit_MuteTrackRequest()
+        request.sid = sid
+        request.muted = true
+        return request
+    }
+}
+
+struct LocalTrackSubscriptionPermissionPlan: Equatable, Sendable {
+    var allParticipantsAllowed: Bool
+    var permissions: [TrackSubscriptionPermission]
+
+    var subscriptionPermission: Livekit_SubscriptionPermission {
+        var permission = Livekit_SubscriptionPermission()
+        permission.allParticipants = allParticipantsAllowed
+        permission.trackPermissions = permissions.map(\.protocolPermission)
+        return permission
+    }
+}
+
+struct LocalAudioTrackUpdatePlan: Equatable, Sendable {
+    var sid: String
+    var features: [LocalAudioTrackFeature]
+
+    var updateRequest: Livekit_UpdateLocalAudioTrack {
+        var request = Livekit_UpdateLocalAudioTrack()
+        request.trackSid = sid
+        request.features = features.map(\.protocolFeature)
+        return request
+    }
+}
+
+struct LocalVideoTrackUpdatePlan: Equatable, Sendable {
+    var sid: String
+    var width: UInt32
+    var height: UInt32
+
+    var updateRequest: Livekit_UpdateLocalVideoTrack {
+        var request = Livekit_UpdateLocalVideoTrack()
+        request.trackSid = sid
+        request.width = width
+        request.height = height
+        return request
+    }
+}
+
 struct LocalPublishedTrack: Equatable, Sendable {
     var sid: String
     var name: String
     var kind: TrackKind
     var source: TrackSource
+    var isMuted: Bool
 
-    init(sid: String, name: String, kind: TrackKind, source: TrackSource) {
+    init(sid: String, name: String, kind: TrackKind, source: TrackSource, isMuted: Bool = false) {
         self.sid = sid
         self.name = name
         self.kind = kind
         self.source = source
+        self.isMuted = isMuted
     }
 
     init(trackInfo: Livekit_TrackInfo, fallbackCID: String, fallbackName: String, fallbackKind: TrackKind, fallbackSource: TrackSource) {
@@ -362,17 +624,23 @@ struct LocalPublishedTrack: Equatable, Sendable {
         if self.source == .unknown {
             self.source = fallbackSource
         }
+        self.isMuted = trackInfo.muted
     }
 }
 
 struct LocalParticipantCommandHandler: Sendable {
     var publishVideo: @Sendable (LocalVideoPublishPlan) async throws -> LocalPublishedTrack
     var publishAudio: @Sendable (LocalAudioPublishPlan) async throws -> LocalPublishedTrack
+    var unpublishTrack: @Sendable (LocalTrackUnpublishPlan) async throws -> Void
     var updateParticipant: @Sendable (ParticipantMetadataUpdate) async throws -> Void
     var publishData: @Sendable (LocalDataPublishPlan) async throws -> Void
     var publishDataTrack: @Sendable (LocalDataTrackPublishPlan) async throws -> DataTrackInfo
     var unpublishDataTrack: @Sendable (LocalDataTrackPublishPlan) async throws -> DataTrackInfo
     var updateDataSubscription: @Sendable (DataSubscriptionUpdatePlan) async throws -> Void
+    var updateTrackMute: @Sendable (LocalTrackMutePlan) async throws -> Void
+    var updateSubscriptionPermissions: @Sendable (LocalTrackSubscriptionPermissionPlan) async throws -> Void
+    var updateAudioTrack: @Sendable (LocalAudioTrackUpdatePlan) async throws -> Void
+    var updateVideoTrack: @Sendable (LocalVideoTrackUpdatePlan) async throws -> Void
 }
 
 public final class RemoteParticipant: Participant, @unchecked Sendable {
@@ -385,12 +653,16 @@ public final class RemoteParticipant: Participant, @unchecked Sendable {
         }
     }
 
-    func applyTrackPublications(_ snapshots: [TrackPublicationSnapshot]) -> [RemoteTrackPublication] {
+    func applyTrackPublications(_ snapshots: [TrackPublicationSnapshot]) -> TrackPublicationUpdateResult {
         publicationLock.withLock {
             var addedPublications: [RemoteTrackPublication] = []
+            var muteChangedPublications: [RemoteTrackPublication] = []
 
             for snapshot in snapshots where !snapshot.sid.isEmpty {
-                guard remoteTrackPublications[snapshot.sid] == nil else {
+                if let existing = remoteTrackPublications[snapshot.sid] {
+                    if existing.setMuted(snapshot.isMuted) {
+                        muteChangedPublications.append(existing)
+                    }
                     continue
                 }
 
@@ -398,13 +670,27 @@ public final class RemoteParticipant: Participant, @unchecked Sendable {
                     sid: snapshot.sid,
                     name: snapshot.name,
                     kind: snapshot.kind,
-                    source: snapshot.source
+                    source: snapshot.source,
+                    isMuted: snapshot.isMuted
                 )
                 remoteTrackPublications[snapshot.sid] = publication
                 addedPublications.append(publication)
             }
 
-            return addedPublications
+            return TrackPublicationUpdateResult(
+                addedPublications: addedPublications,
+                muteChangedPublications: muteChangedPublications
+            )
+        }
+    }
+
+    func applyTrackMute(sid: String, muted: Bool) -> RemoteTrackPublication? {
+        publicationLock.withLock {
+            guard let publication = remoteTrackPublications[sid], publication.setMuted(muted) else {
+                return nil
+            }
+
+            return publication
         }
     }
 
@@ -478,12 +764,14 @@ struct TrackPublicationSnapshot: Equatable, Sendable {
     var name: String
     var kind: TrackKind
     var source: TrackSource
+    var isMuted: Bool
 
-    init(sid: String, name: String, kind: TrackKind, source: TrackSource = .unknown) {
+    init(sid: String, name: String, kind: TrackKind, source: TrackSource = .unknown, isMuted: Bool = false) {
         self.sid = sid
         self.name = name
         self.kind = kind
         self.source = source
+        self.isMuted = isMuted
     }
 
     init?(trackInfo: Livekit_TrackInfo) {
@@ -495,9 +783,15 @@ struct TrackPublicationSnapshot: Equatable, Sendable {
             sid: trackInfo.sid,
             name: trackInfo.name,
             kind: kind,
-            source: TrackSource(protocolTrackSource: trackInfo.source)
+            source: TrackSource(protocolTrackSource: trackInfo.source),
+            isMuted: trackInfo.muted
         )
     }
+}
+
+struct TrackPublicationUpdateResult: Equatable, Sendable {
+    var addedPublications: [RemoteTrackPublication]
+    var muteChangedPublications: [RemoteTrackPublication]
 }
 
 private struct ParticipantMutableState {

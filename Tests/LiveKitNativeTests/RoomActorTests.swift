@@ -65,6 +65,36 @@ final class RoomActorTests: XCTestCase {
         XCTAssertEqual(publishedParticipant.sid, "PA_alice")
     }
 
+    func testTrackMuteChangesMutateExistingPublicationAndEmitEvent() async {
+        let actor = RoomActor(localParticipant: LocalParticipant(identity: "me"))
+        _ = await actor.applyParticipantUpdates([
+            ParticipantSnapshot(
+                sid: "PA_alice",
+                identity: "alice",
+                trackPublications: [
+                    TrackPublicationSnapshot(sid: "TR_camera", name: "camera", kind: .video, source: .camera),
+                ]
+            ),
+        ])
+
+        let result = await actor.applyTrackMute(sid: "TR_camera", muted: true)
+        let participant = result.0.remoteParticipants.first
+        let publication = participant?.trackPublications.first
+
+        XCTAssertEqual(publication?.isMuted, true)
+        XCTAssertEqual(result.1.count, 1)
+
+        guard case let .trackMuteChanged(mutedPublication, mutedParticipant, isMuted) = result.1[0] else {
+            return XCTFail("Expected trackMuteChanged event.")
+        }
+        XCTAssertEqual(mutedPublication.sid, "TR_camera")
+        XCTAssertEqual(mutedParticipant.sid, "PA_alice")
+        XCTAssertTrue(isMuted)
+
+        let duplicateResult = await actor.applyTrackMute(sid: "TR_camera", muted: true)
+        XCTAssertEqual(duplicateResult.1.count, 0)
+    }
+
     func testTrackPublicationRemovalEmitsTrackUnpublished() async {
         let actor = RoomActor(localParticipant: LocalParticipant(identity: "me"))
         _ = await actor.applyParticipantUpdates([

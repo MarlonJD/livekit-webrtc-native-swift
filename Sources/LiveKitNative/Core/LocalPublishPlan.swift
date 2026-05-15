@@ -46,6 +46,17 @@ struct LocalVideoPublishPlan: Equatable, Sendable {
         H264PublishRTPPacketizer(payloadType: payloadType, ssrc: ssrc)
     }
 
+    var publisherOfferTrack: PublisherSDPOfferTrack {
+        PublisherSDPOfferTrack(
+            trackID: cid,
+            kind: .video,
+            codec: codec,
+            payloadType: payloadType,
+            clockRate: 90_000,
+            ssrc: ssrc
+        )
+    }
+
     var addTrackRequest: Livekit_AddTrackRequest {
         var request = Livekit_AddTrackRequest()
         request.cid = cid
@@ -119,6 +130,18 @@ struct LocalAudioPublishPlan: Equatable, Sendable {
 
     var packetizer: OpusRTPPacketizer {
         OpusRTPPacketizer(payloadType: payloadType, ssrc: ssrc)
+    }
+
+    var publisherOfferTrack: PublisherSDPOfferTrack {
+        PublisherSDPOfferTrack(
+            trackID: cid,
+            kind: .audio,
+            codec: codec,
+            payloadType: payloadType,
+            clockRate: 48_000,
+            channels: channelCount,
+            ssrc: ssrc
+        )
     }
 
     var addTrackRequest: Livekit_AddTrackRequest {

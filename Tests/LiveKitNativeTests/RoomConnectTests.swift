@@ -608,6 +608,33 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(participant.sid, "PA_alice")
     }
 
+    func testSignalLoopAppliesTrackMute() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeMuteTrackResponse(sid: "TR_camera", muted: true),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let eventRecorder = RoomEventRecorder()
+        room.delegate = eventRecorder
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let events = await eventRecorder.waitForEventCount(5)
+        let alice = try XCTUnwrap(room.remoteParticipants.first { $0.identity == "alice" })
+        let publication = try XCTUnwrap(alice.trackPublications.first)
+
+        XCTAssertTrue(publication.isMuted)
+
+        guard case let .trackMuteChanged(mutedPublication, participant, isMuted) = events[4] else {
+            return XCTFail("Expected trackMuteChanged event.")
+        }
+        XCTAssertEqual(mutedPublication.sid, "TR_camera")
+        XCTAssertEqual(participant.sid, "PA_alice")
+        XCTAssertTrue(isMuted)
+    }
+
     func testLocalParticipantMetadataUpdateSendsRequestAndAppliesAck() async throws {
         let frames = try [
             makeJoinResponse(),
@@ -727,6 +754,20 @@ final class RoomConnectTests: XCTestCase {
             )
         )
 
+        let offerFrames = await waitForSentFrameCount(2, transport: transport)
+        guard case let .binary(offerData) = offerFrames[1] else {
+            return XCTFail("Expected binary publisher offer request.")
+        }
+        let offerRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: offerData)
+        guard case let .offer(offer)? = offerRequest.message else {
+            return XCTFail("Expected SignalRequest.offer.")
+        }
+        XCTAssertEqual(offer.type, "offer")
+        XCTAssertEqual(offer.id, 1)
+        XCTAssertTrue(offer.sdp.contains("m=video 9 UDP/TLS/RTP/SAVPF 102"))
+        XCTAssertTrue(offer.sdp.contains("a=sendonly"))
+        XCTAssertTrue(offer.sdp.contains("a=msid:livekit TR_local_camera"))
+
         let publication = try await publishTask.value
         XCTAssertEqual(publication.sid, "TR_local_camera")
         XCTAssertEqual(publication.name, "main-camera")
@@ -785,6 +826,240 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(publication.name, "main-mic")
         XCTAssertEqual(publication.kind, .audio)
         XCTAssertEqual(room.localParticipant.trackPublications.map(\.sid), ["TR_local_microphone"])
+    }
+
+    func testSetTrackMutedSendsMuteRequestAndUpdatesLocalPublication() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let eventRecorder = RoomEventRecorder()
+        room.delegate = eventRecorder
+        let track = LocalVideoTrack(name: "camera", source: .camera)
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let publishTask = Task {
+            try await room.localParticipant.publish(
+                videoTrack: track,
+                options: TrackPublishOptions(name: "main-camera", source: .camera)
+            )
+        }
+
+        let addTrackFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(addTrackData) = try XCTUnwrap(addTrackFrames.first) else {
+            return XCTFail("Expected binary AddTrack request.")
+        }
+        let addTrackRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: addTrackData)
+        guard case let .addTrack(addTrack)? = addTrackRequest.message else {
+            return XCTFail("Expected SignalRequest.addTrack.")
+        }
+
+        try await transport.enqueueIncomingFrame(
+            .binary(
+                SignalFrameCodec().encode(
+                    makeTrackPublishedResponse(
+                        cid: addTrack.cid,
+                        sid: "TR_local_camera",
+                        name: "main-camera",
+                        type: .video,
+                        source: .camera
+                    )
+                )
+            )
+        )
+        let publication = try await publishTask.value
+
+        try await room.localParticipant.setTrackMuted(publication: publication, muted: true)
+
+        let sentFrames = await waitForSentFrameCount(3, transport: transport)
+        guard case let .binary(muteData) = sentFrames[2] else {
+            return XCTFail("Expected binary MuteTrack request.")
+        }
+
+        let muteSignalRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: muteData)
+        guard case let .mute(mute)? = muteSignalRequest.message else {
+            return XCTFail("Expected SignalRequest.mute.")
+        }
+        XCTAssertEqual(mute.sid, "TR_local_camera")
+        XCTAssertTrue(mute.muted)
+        XCTAssertTrue(publication.isMuted)
+
+        let events = eventRecorder.recordedEvents
+        guard case let .trackMuteChanged(mutedPublication, participant, isMuted) = events.last else {
+            return XCTFail("Expected trackMuteChanged event.")
+        }
+        XCTAssertEqual(mutedPublication.sid, "TR_local_camera")
+        XCTAssertEqual(participant.sid, "PA_local")
+        XCTAssertTrue(isMuted)
+    }
+
+    func testUnpublishTrackSendsMuteRequestAndRemovesLocalPublication() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let track = LocalVideoTrack(name: "camera", source: .camera)
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let publishTask = Task {
+            try await room.localParticipant.publish(
+                videoTrack: track,
+                options: TrackPublishOptions(name: "main-camera", source: .camera)
+            )
+        }
+
+        let addTrackFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(addTrackData) = try XCTUnwrap(addTrackFrames.first) else {
+            return XCTFail("Expected binary AddTrack request.")
+        }
+        let addTrackRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: addTrackData)
+        guard case let .addTrack(addTrack)? = addTrackRequest.message else {
+            return XCTFail("Expected SignalRequest.addTrack.")
+        }
+
+        try await transport.enqueueIncomingFrame(
+            .binary(
+                SignalFrameCodec().encode(
+                    makeTrackPublishedResponse(
+                        cid: addTrack.cid,
+                        sid: "TR_local_camera",
+                        name: "main-camera",
+                        type: .video,
+                        source: .camera
+                    )
+                )
+            )
+        )
+        let publication = try await publishTask.value
+
+        try await room.localParticipant.unpublish(publication: publication)
+
+        let sentFrames = await waitForSentFrameCount(3, transport: transport)
+        guard case let .binary(muteData) = sentFrames[2] else {
+            return XCTFail("Expected binary MuteTrack request.")
+        }
+
+        let muteSignalRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: muteData)
+        guard case let .mute(mute)? = muteSignalRequest.message else {
+            return XCTFail("Expected SignalRequest.mute.")
+        }
+        XCTAssertEqual(mute.sid, "TR_local_camera")
+        XCTAssertTrue(mute.muted)
+        XCTAssertEqual(room.localParticipant.trackPublications, [])
+    }
+
+    func testSetCameraDisabledSendsMuteRequestForPublishedCamera() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let publishTask = Task {
+            try await room.localParticipant.setCamera(enabled: true)
+        }
+
+        let addTrackFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(addTrackData) = try XCTUnwrap(addTrackFrames.first) else {
+            return XCTFail("Expected binary AddTrack request.")
+        }
+        let addTrackRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: addTrackData)
+        guard case let .addTrack(addTrack)? = addTrackRequest.message else {
+            return XCTFail("Expected SignalRequest.addTrack.")
+        }
+
+        try await transport.enqueueIncomingFrame(
+            .binary(
+                SignalFrameCodec().encode(
+                    makeTrackPublishedResponse(
+                        cid: addTrack.cid,
+                        sid: "TR_local_camera",
+                        name: "main-camera",
+                        type: .video,
+                        source: .camera
+                    )
+                )
+            )
+        )
+        try await publishTask.value
+
+        try await room.localParticipant.setCamera(enabled: false)
+
+        let sentFrames = await waitForSentFrameCount(3, transport: transport)
+        guard case let .binary(muteData) = sentFrames[2] else {
+            return XCTFail("Expected binary MuteTrack request.")
+        }
+
+        let muteSignalRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: muteData)
+        guard case let .mute(mute)? = muteSignalRequest.message else {
+            return XCTFail("Expected SignalRequest.mute.")
+        }
+        XCTAssertEqual(mute.sid, "TR_local_camera")
+        XCTAssertTrue(mute.muted)
+        XCTAssertEqual(room.localParticipant.trackPublications, [])
+    }
+
+    func testSetMicrophoneDisabledSendsMuteRequestForPublishedMicrophone() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let publishTask = Task {
+            try await room.localParticipant.setMicrophone(enabled: true)
+        }
+
+        let addTrackFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(addTrackData) = try XCTUnwrap(addTrackFrames.first) else {
+            return XCTFail("Expected binary AddTrack request.")
+        }
+        let addTrackRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: addTrackData)
+        guard case let .addTrack(addTrack)? = addTrackRequest.message else {
+            return XCTFail("Expected SignalRequest.addTrack.")
+        }
+
+        try await transport.enqueueIncomingFrame(
+            .binary(
+                SignalFrameCodec().encode(
+                    makeTrackPublishedResponse(
+                        cid: addTrack.cid,
+                        sid: "TR_local_microphone",
+                        name: "main-mic",
+                        type: .audio,
+                        source: .microphone
+                    )
+                )
+            )
+        )
+        try await publishTask.value
+
+        try await room.localParticipant.setMicrophone(enabled: false)
+
+        let sentFrames = await waitForSentFrameCount(3, transport: transport)
+        guard case let .binary(muteData) = sentFrames[2] else {
+            return XCTFail("Expected binary MuteTrack request.")
+        }
+
+        let muteSignalRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: muteData)
+        guard case let .mute(mute)? = muteSignalRequest.message else {
+            return XCTFail("Expected SignalRequest.mute.")
+        }
+        XCTAssertEqual(mute.sid, "TR_local_microphone")
+        XCTAssertTrue(mute.muted)
+        XCTAssertEqual(room.localParticipant.trackPublications, [])
     }
 
     func testPublishDataTrackSendsRequestAndAppliesResponse() async throws {
@@ -932,6 +1207,234 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(update.updates[0].trackSid, "DT_remote")
         XCTAssertTrue(update.updates[0].subscribe)
         XCTAssertEqual(update.updates[0].options.targetFps, 24)
+    }
+
+    func testUpdateSubscriptionSendsSignalRequest() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        try await room.updateSubscription(trackSIDs: ["TR_camera", "TR_screen"], subscribe: false)
+
+        let sentFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(data) = try XCTUnwrap(sentFrames.first) else {
+            return XCTFail("Expected binary UpdateSubscription request.")
+        }
+
+        let request = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: data)
+        guard case let .subscription(update)? = request.message else {
+            return XCTFail("Expected SignalRequest.subscription.")
+        }
+        XCTAssertEqual(update.trackSids, ["TR_camera", "TR_screen"])
+        XCTAssertFalse(update.subscribe)
+    }
+
+    func testUpdateTrackSettingsSendsSignalRequest() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        try await room.updateTrackSettings(
+            trackSIDs: ["TR_camera"],
+            disabled: true,
+            quality: .medium,
+            width: 640,
+            height: 360,
+            fps: 15,
+            priority: 2
+        )
+
+        let sentFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(data) = try XCTUnwrap(sentFrames.first) else {
+            return XCTFail("Expected binary UpdateTrackSettings request.")
+        }
+
+        let request = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: data)
+        guard case let .trackSetting(settings)? = request.message else {
+            return XCTFail("Expected SignalRequest.trackSetting.")
+        }
+        XCTAssertEqual(settings.trackSids, ["TR_camera"])
+        XCTAssertTrue(settings.disabled)
+        XCTAssertEqual(settings.quality, .medium)
+        XCTAssertEqual(settings.width, 640)
+        XCTAssertEqual(settings.height, 360)
+        XCTAssertEqual(settings.fps, 15)
+        XCTAssertEqual(settings.priority, 2)
+    }
+
+    func testSetTrackSubscriptionPermissionsSendsSignalRequest() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        try await room.localParticipant.setTrackSubscriptionPermissions(
+            allParticipantsAllowed: false,
+            permissions: [
+                TrackSubscriptionPermission(
+                    participantSID: "PA_alice",
+                    allTracks: false,
+                    trackSIDs: ["TR_camera"]
+                ),
+                TrackSubscriptionPermission(
+                    participantIdentity: "bob",
+                    allTracks: true
+                ),
+            ]
+        )
+
+        let sentFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(data) = try XCTUnwrap(sentFrames.first) else {
+            return XCTFail("Expected binary SubscriptionPermission request.")
+        }
+
+        let request = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: data)
+        guard case let .subscriptionPermission(permission)? = request.message else {
+            return XCTFail("Expected SignalRequest.subscriptionPermission.")
+        }
+        XCTAssertFalse(permission.allParticipants)
+        XCTAssertEqual(permission.trackPermissions.count, 2)
+        XCTAssertEqual(permission.trackPermissions[0].participantSid, "PA_alice")
+        XCTAssertEqual(permission.trackPermissions[0].participantIdentity, "")
+        XCTAssertFalse(permission.trackPermissions[0].allTracks)
+        XCTAssertEqual(permission.trackPermissions[0].trackSids, ["TR_camera"])
+        XCTAssertEqual(permission.trackPermissions[1].participantSid, "")
+        XCTAssertEqual(permission.trackPermissions[1].participantIdentity, "bob")
+        XCTAssertTrue(permission.trackPermissions[1].allTracks)
+        XCTAssertEqual(permission.trackPermissions[1].trackSids, [])
+    }
+
+    func testUpdateAudioTrackSendsSignalRequest() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let track = LocalAudioTrack(name: "microphone", source: .microphone)
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let publishTask = Task {
+            try await room.localParticipant.publish(
+                audioTrack: track,
+                options: TrackPublishOptions(name: "main-mic", source: .microphone)
+            )
+        }
+
+        let addTrackFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(addTrackData) = try XCTUnwrap(addTrackFrames.first) else {
+            return XCTFail("Expected binary AddTrack request.")
+        }
+        let addTrackRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: addTrackData)
+        guard case let .addTrack(addTrack)? = addTrackRequest.message else {
+            return XCTFail("Expected SignalRequest.addTrack.")
+        }
+
+        try await transport.enqueueIncomingFrame(
+            .binary(
+                SignalFrameCodec().encode(
+                    makeTrackPublishedResponse(
+                        cid: addTrack.cid,
+                        sid: "TR_local_microphone",
+                        name: "main-mic",
+                        type: .audio,
+                        source: .microphone
+                    )
+                )
+            )
+        )
+        let publication = try await publishTask.value
+
+        try await room.localParticipant.updateAudioTrack(
+            publication: publication,
+            features: [.echoCancellation, .noiseSuppression, .noDTX]
+        )
+
+        let sentFrames = await waitForSentFrameCount(3, transport: transport)
+        guard case let .binary(updateData) = sentFrames[2] else {
+            return XCTFail("Expected binary UpdateLocalAudioTrack request.")
+        }
+
+        let updateRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: updateData)
+        guard case let .updateAudioTrack(update)? = updateRequest.message else {
+            return XCTFail("Expected SignalRequest.updateAudioTrack.")
+        }
+        XCTAssertEqual(update.trackSid, "TR_local_microphone")
+        XCTAssertEqual(update.features, [.tfEchoCancellation, .tfNoiseSuppression, .tfNoDtx])
+    }
+
+    func testUpdateVideoTrackSendsSignalRequest() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let track = LocalVideoTrack(name: "camera", source: .camera)
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let publishTask = Task {
+            try await room.localParticipant.publish(
+                videoTrack: track,
+                options: TrackPublishOptions(name: "main-camera", source: .camera)
+            )
+        }
+
+        let addTrackFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(addTrackData) = try XCTUnwrap(addTrackFrames.first) else {
+            return XCTFail("Expected binary AddTrack request.")
+        }
+        let addTrackRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: addTrackData)
+        guard case let .addTrack(addTrack)? = addTrackRequest.message else {
+            return XCTFail("Expected SignalRequest.addTrack.")
+        }
+
+        try await transport.enqueueIncomingFrame(
+            .binary(
+                SignalFrameCodec().encode(
+                    makeTrackPublishedResponse(
+                        cid: addTrack.cid,
+                        sid: "TR_local_camera",
+                        name: "main-camera",
+                        type: .video,
+                        source: .camera
+                    )
+                )
+            )
+        )
+        let publication = try await publishTask.value
+
+        try await room.localParticipant.updateVideoTrack(
+            publication: publication,
+            width: 960,
+            height: 540
+        )
+
+        let sentFrames = await waitForSentFrameCount(3, transport: transport)
+        guard case let .binary(updateData) = sentFrames[2] else {
+            return XCTFail("Expected binary UpdateLocalVideoTrack request.")
+        }
+
+        let updateRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: updateData)
+        guard case let .updateVideoTrack(update)? = updateRequest.message else {
+            return XCTFail("Expected SignalRequest.updateVideoTrack.")
+        }
+        XCTAssertEqual(update.trackSid, "TR_local_camera")
+        XCTAssertEqual(update.width, 960)
+        XCTAssertEqual(update.height, 540)
     }
 
     func testDisconnectClearsRemoteParticipantsAndEmitsLifecycleEvents() async throws {
@@ -1141,6 +1644,16 @@ private func makeTrackUnpublishedResponse() -> Livekit_SignalResponse {
 
     var response = Livekit_SignalResponse()
     response.trackUnpublished = trackUnpublished
+    return response
+}
+
+private func makeMuteTrackResponse(sid: String, muted: Bool) -> Livekit_SignalResponse {
+    var mute = Livekit_MuteTrackRequest()
+    mute.sid = sid
+    mute.muted = muted
+
+    var response = Livekit_SignalResponse()
+    response.mute = mute
     return response
 }
 

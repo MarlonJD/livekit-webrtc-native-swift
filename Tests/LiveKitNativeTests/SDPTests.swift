@@ -152,4 +152,50 @@ final class SDPTests: XCTestCase {
         XCTAssertTrue(answer.contains("a=fingerprint:sha-256 AA:BB:CC"))
         XCTAssertTrue(answer.contains("a=ice-options:trickle"))
     }
+
+    func testPublisherOfferIncludesSendOnlyTracksAndNegotiationLines() throws {
+        let credentials = ICECredentials(
+            usernameFragment: "localuf",
+            password: "local-password"
+        )
+        let fingerprint = DTLSSignature(hashFunction: "sha-256", value: "11:22:33")
+        let tracks = [
+            PublisherSDPOfferTrack(
+                trackID: "TR_audio",
+                kind: .audio,
+                codec: .opus,
+                payloadType: 111,
+                clockRate: 48_000,
+                channels: 1,
+                ssrc: 11
+            ),
+            PublisherSDPOfferTrack(
+                trackID: "TR_video",
+                kind: .video,
+                codec: .h264,
+                payloadType: 102,
+                clockRate: 90_000,
+                ssrc: 22
+            ),
+        ]
+
+        let offer = try PublisherSDPOfferFactory(
+            iceCredentials: credentials,
+            dtlsFingerprint: fingerprint
+        ).makeOffer(for: tracks)
+        let parsedOffer = try SDPSessionDescription(parsing: offer)
+
+        XCTAssertEqual(parsedOffer.iceCredentials, credentials)
+        XCTAssertEqual(parsedOffer.dtlsFingerprint, fingerprint)
+        XCTAssertEqual(parsedOffer.dtlsSetupRole, .actpass)
+        XCTAssertEqual(parsedOffer.bundleMIDs, ["0", "1"])
+        XCTAssertEqual(parsedOffer.mediaSections[0].mediaLine, "audio 9 UDP/TLS/RTP/SAVPF 111")
+        XCTAssertEqual(parsedOffer.mediaSections[1].mediaLine, "video 9 UDP/TLS/RTP/SAVPF 102")
+        XCTAssertTrue(parsedOffer.mediaSections[0].attributes.contains("sendonly"))
+        XCTAssertTrue(parsedOffer.mediaSections[1].attributes.contains("sendonly"))
+        XCTAssertTrue(offer.contains("a=rtpmap:111 opus/48000/1"))
+        XCTAssertTrue(offer.contains("a=rtpmap:102 H264/90000"))
+        XCTAssertTrue(offer.contains("a=ssrc:11 cname:livekit"))
+        XCTAssertTrue(offer.contains("a=msid:livekit TR_video"))
+    }
 }

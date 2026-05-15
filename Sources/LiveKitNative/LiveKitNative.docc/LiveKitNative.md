@@ -60,9 +60,17 @@ updates are exposed as typed room events. Room-connected data-track
 publish/unpublish requests now wait for matching server responses. Room-connected
 `publish(videoTrack:)` and `publish(audioTrack:)` now send LiveKit
 `AddTrackRequest` messages and wait for matching `TrackPublishedResponse`
-acknowledgements, while publisher offer generation, real DTLS
-handshake/exporter implementation, subscriber/publisher media startup
-integration, and reconnect media recovery remain part of production hardening.
+acknowledgements. Local track unpublish and camera/microphone disable also send
+muted `MuteTrackRequest` messages before local publication removal, while
+`Room.updateSubscription` and `Room.updateTrackSettings` expose media
+subscription and subscribed track settings signaling.
+`LocalParticipant.setTrackSubscriptionPermissions` exposes publisher-controlled
+subscription permission signaling, and `LocalParticipant.updateAudioTrack` /
+`LocalParticipant.updateVideoTrack` expose local publisher track update
+signaling. Publisher publish acknowledgements now trigger send-only SDP offer
+signaling for the publisher negotiation path. Real DTLS handshake/exporter
+implementation, subscriber/publisher media startup integration, RTP sender
+transport, and reconnect media recovery remain part of production hardening.
 
 Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the

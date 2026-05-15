@@ -15,9 +15,12 @@ public final class Room: @unchecked Sendable {
     private let snapshots: RoomSnapshotStore
     private let signalLoopLock = NSLock()
     private let connectionContextLock = NSLock()
+    private let publisherOfferLock = NSLock()
     private let eventContinuation: AsyncStream<RoomEvent>.Continuation
     private var signalLoopTask: Task<Void, Never>?
     private var connectionContext: RoomConnectionContext?
+    private var publisherOfferTracks: [PublisherSDPOfferTrack] = []
+    private var nextPublisherOfferID: UInt32 = 1
 
     public var localParticipant: LocalParticipant {
         snapshots.localParticipant
@@ -88,6 +91,7 @@ public final class Room: @unchecked Sendable {
             stopSignalLoop()
             await signalConnection.close()
             clearConnectionContext()
+            clearPublisherOfferState()
             await transition(to: .disconnected)
             LiveKitNativeLogging.log(.error, "Room connect failed: \(error.localizedDescription)")
             throw error
@@ -103,6 +107,7 @@ public final class Room: @unchecked Sendable {
         await signalConnection.close()
         await requestTracker.clear()
         clearConnectionContext()
+        clearPublisherOfferState()
         let result = await actor.disconnect()
         snapshots.replace(with: result.0)
 
@@ -112,6 +117,47 @@ public final class Room: @unchecked Sendable {
 
         emit(.connectionStateChanged(.disconnected))
         LiveKitNativeLogging.log(.info, "Room disconnected.")
+    }
+
+    public func updateSubscription(trackSIDs: [String], subscribe: Bool) async throws {
+        guard !trackSIDs.isEmpty else {
+            return
+        }
+
+        var update = Livekit_UpdateSubscription()
+        update.trackSids = trackSIDs
+        update.subscribe = subscribe
+
+        var request = Livekit_SignalRequest()
+        request.subscription = update
+        try await signalConnection.send(request)
+    }
+
+    public func updateTrackSettings(
+        trackSIDs: [String],
+        disabled: Bool = false,
+        quality: VideoQuality = .low,
+        width: UInt32 = 0,
+        height: UInt32 = 0,
+        fps: UInt32 = 0,
+        priority: UInt32 = 0
+    ) async throws {
+        guard !trackSIDs.isEmpty else {
+            return
+        }
+
+        var settings = Livekit_UpdateTrackSettings()
+        settings.trackSids = trackSIDs
+        settings.disabled = disabled
+        settings.quality = quality.protocolQuality
+        settings.width = width
+        settings.height = height
+        settings.fps = fps
+        settings.priority = priority
+
+        var request = Livekit_SignalRequest()
+        request.trackSetting = settings
+        try await signalConnection.send(request)
     }
 
     func applyRemoteParticipantSnapshots(_ participantSnapshots: [ParticipantSnapshot]) async {
@@ -137,6 +183,7 @@ public final class Room: @unchecked Sendable {
         let result = await actor.applyJoin(RoomJoinSnapshot(joinResponse: joinResponse))
         snapshots.replace(with: result.0)
         configureLocalParticipant(result.0.localParticipant)
+        clearPublisherOfferState()
         emit(.connectionStateChanged(.connected))
 
         for event in result.1 {
@@ -220,6 +267,9 @@ public final class Room: @unchecked Sendable {
         case let .trickle(trickle):
             try handleTrickle(trickle)
             return true
+        case let .mute(mute):
+            await applyTrackMute(mute)
+            return true
         case let .speakersChanged(speakers):
             emit(.speakersChanged(speakers.speakers.map { SpeakerInfo(speakerInfo: $0) }))
             return true
@@ -285,6 +335,15 @@ public final class Room: @unchecked Sendable {
 
     private func applyTrackUnpublished(trackSID: String) async {
         let result = await actor.removeTrackPublication(sid: trackSID)
+        snapshots.replace(with: result.0)
+
+        for event in result.1 {
+            emit(event)
+        }
+    }
+
+    private func applyTrackMute(_ mute: Livekit_MuteTrackRequest) async {
+        let result = await actor.applyTrackMute(sid: mute.sid, muted: mute.muted)
         snapshots.replace(with: result.0)
 
         for event in result.1 {
@@ -380,6 +439,7 @@ public final class Room: @unchecked Sendable {
                         fallbackName: plan.name,
                         fallbackKind: .video,
                         fallbackSource: plan.source,
+                        offerTrack: plan.publisherOfferTrack,
                         action: "publish video track"
                     )
                 },
@@ -393,8 +453,15 @@ public final class Room: @unchecked Sendable {
                         fallbackName: plan.name,
                         fallbackKind: .audio,
                         fallbackSource: plan.source,
+                        offerTrack: plan.publisherOfferTrack,
                         action: "publish audio track"
                     )
+                },
+                unpublishTrack: { [weak self] plan in
+                    guard let self else {
+                        throw LiveKitNativeError.notConnected
+                    }
+                    try await self.sendUnpublishTrack(plan)
                 },
                 updateParticipant: { [weak self] update in
                     guard let self else {
@@ -425,6 +492,30 @@ public final class Room: @unchecked Sendable {
                         throw LiveKitNativeError.notConnected
                     }
                     try await self.sendUpdateDataSubscription(plan)
+                },
+                updateTrackMute: { [weak self] plan in
+                    guard let self else {
+                        throw LiveKitNativeError.notConnected
+                    }
+                    try await self.sendTrackMute(plan)
+                },
+                updateSubscriptionPermissions: { [weak self] plan in
+                    guard let self else {
+                        throw LiveKitNativeError.notConnected
+                    }
+                    try await self.sendSubscriptionPermissions(plan)
+                },
+                updateAudioTrack: { [weak self] plan in
+                    guard let self else {
+                        throw LiveKitNativeError.notConnected
+                    }
+                    try await self.sendUpdateAudioTrack(plan)
+                },
+                updateVideoTrack: { [weak self] plan in
+                    guard let self else {
+                        throw LiveKitNativeError.notConnected
+                    }
+                    try await self.sendUpdateVideoTrack(plan)
                 }
             )
         )
@@ -436,6 +527,7 @@ public final class Room: @unchecked Sendable {
         fallbackName: String,
         fallbackKind: TrackKind,
         fallbackSource: TrackSource,
+        offerTrack: PublisherSDPOfferTrack? = nil,
         action: String
     ) async throws -> LocalPublishedTrack {
         var request = Livekit_SignalRequest()
@@ -443,13 +535,26 @@ public final class Room: @unchecked Sendable {
 
         try await signalConnection.send(request)
         let response = try await requestTracker.waitForTrackPublished(cid: cid, action: action)
-        return LocalPublishedTrack(
+        let publishedTrack = LocalPublishedTrack(
             trackInfo: response.track,
             fallbackCID: cid,
             fallbackName: fallbackName,
             fallbackKind: fallbackKind,
             fallbackSource: fallbackSource
         )
+
+        if let offerTrack {
+            let offerTrack = offerTrack.withTrackID(publishedTrack.sid)
+            let tracks = addPublisherOfferTrack(offerTrack)
+            do {
+                try await sendPublisherOffer(for: tracks)
+            } catch {
+                removePublisherOfferTrack(sid: offerTrack.trackID)
+                throw error
+            }
+        }
+
+        return publishedTrack
     }
 
     private func sendParticipantMetadataUpdate(_ update: ParticipantMetadataUpdate) async throws {
@@ -502,6 +607,28 @@ public final class Room: @unchecked Sendable {
         return DataTrackInfo(info: response.info)
     }
 
+    private func sendUnpublishTrack(_ plan: LocalTrackUnpublishPlan) async throws {
+        var request = Livekit_SignalRequest()
+        request.mute = plan.muteRequest
+        try await signalConnection.send(request)
+        removePublisherOfferTrack(sid: plan.sid)
+    }
+
+    private func sendPublisherOffer(for tracks: [PublisherSDPOfferTrack]) async throws {
+        guard !tracks.isEmpty else {
+            return
+        }
+
+        var offer = Livekit_SessionDescription()
+        offer.type = "offer"
+        offer.id = nextPublisherOfferIdentifier()
+        offer.sdp = try publisherPeerConnection.makePublisherOffer(for: tracks)
+
+        var request = Livekit_SignalRequest()
+        request.offer = offer
+        try await signalConnection.send(request)
+    }
+
     private func sendUpdateDataSubscription(_ plan: DataSubscriptionUpdatePlan) async throws {
         var update = Livekit_UpdateDataSubscription()
         update.updates = [plan.update]
@@ -509,6 +636,38 @@ public final class Room: @unchecked Sendable {
         var request = Livekit_SignalRequest()
         request.updateDataSubscription = update
         try await signalConnection.send(request)
+    }
+
+    private func sendSubscriptionPermissions(_ plan: LocalTrackSubscriptionPermissionPlan) async throws {
+        var request = Livekit_SignalRequest()
+        request.subscriptionPermission = plan.subscriptionPermission
+        try await signalConnection.send(request)
+    }
+
+    private func sendUpdateAudioTrack(_ plan: LocalAudioTrackUpdatePlan) async throws {
+        var request = Livekit_SignalRequest()
+        request.updateAudioTrack = plan.updateRequest
+        try await signalConnection.send(request)
+    }
+
+    private func sendUpdateVideoTrack(_ plan: LocalVideoTrackUpdatePlan) async throws {
+        var request = Livekit_SignalRequest()
+        request.updateVideoTrack = plan.updateRequest
+        try await signalConnection.send(request)
+    }
+
+    private func sendTrackMute(_ plan: LocalTrackMutePlan) async throws {
+        var request = Livekit_SignalRequest()
+        request.mute = plan.muteRequest
+
+        try await signalConnection.send(request)
+
+        let result = await actor.applyTrackMute(sid: plan.sid, muted: plan.muted)
+        snapshots.replace(with: result.0)
+
+        for event in result.1 {
+            emit(event)
+        }
     }
 
     private func sendLeaveIfConnected() async {
@@ -671,6 +830,39 @@ public final class Room: @unchecked Sendable {
         }
     }
 
+    private func addPublisherOfferTrack(_ track: PublisherSDPOfferTrack) -> [PublisherSDPOfferTrack] {
+        publisherOfferLock.withLock {
+            if let index = publisherOfferTracks.firstIndex(where: { $0.trackID == track.trackID }) {
+                publisherOfferTracks[index] = track
+            } else {
+                publisherOfferTracks.append(track)
+            }
+
+            return publisherOfferTracks
+        }
+    }
+
+    private func removePublisherOfferTrack(sid: String) {
+        publisherOfferLock.withLock {
+            publisherOfferTracks.removeAll { $0.trackID == sid }
+        }
+    }
+
+    private func clearPublisherOfferState() {
+        publisherOfferLock.withLock {
+            publisherOfferTracks.removeAll()
+            nextPublisherOfferID = 1
+        }
+    }
+
+    private func nextPublisherOfferIdentifier() -> UInt32 {
+        publisherOfferLock.withLock {
+            let id = nextPublisherOfferID
+            nextPublisherOfferID = nextPublisherOfferID == UInt32.max ? 1 : nextPublisherOfferID + 1
+            return id
+        }
+    }
+
     private func emit(_ event: RoomEvent) {
         eventContinuation.yield(event)
         delegate?.room(self, didEmit: event)
@@ -806,6 +998,21 @@ private extension VideoQuality {
             self = .off
         case let .UNRECOGNIZED(rawValue):
             self = .unknown(rawValue)
+        }
+    }
+
+    var protocolQuality: Livekit_VideoQuality {
+        switch self {
+        case .low:
+            return .low
+        case .medium:
+            return .medium
+        case .high:
+            return .high
+        case .off:
+            return .off
+        case let .unknown(rawValue):
+            return .UNRECOGNIZED(rawValue)
         }
     }
 }

@@ -60,6 +60,28 @@ actor RoomActor {
         return (state.snapshot, events)
     }
 
+    func applyTrackMute(sid: String, muted: Bool) -> (RoomSnapshot, [RoomEvent]) {
+        if let publication = state.localParticipant.applyTrackMute(sid: sid, muted: muted) {
+            return (
+                state.snapshot,
+                [.trackMuteChanged(publication, participant: state.localParticipant, isMuted: muted)]
+            )
+        }
+
+        for participant in state.remoteParticipants.values.sorted(by: { $0.id < $1.id }) {
+            guard let publication = participant.applyTrackMute(sid: sid, muted: muted) else {
+                continue
+            }
+
+            return (
+                state.snapshot,
+                [.trackMuteChanged(publication, participant: participant, isMuted: muted)]
+            )
+        }
+
+        return (state.snapshot, [])
+    }
+
     func disconnect() -> (RoomSnapshot, [RoomEvent]) {
         state.connectionState = .disconnected
 
@@ -113,8 +135,9 @@ actor RoomActor {
 
             if let existing = state.remoteParticipants[update.stableKey] {
                 existing.apply(update)
-                let addedPublications = existing.applyTrackPublications(update.trackPublications)
-                events.append(contentsOf: addedPublications.map { .trackPublished($0, participant: existing) })
+                let publicationUpdates = existing.applyTrackPublications(update.trackPublications)
+                events.append(contentsOf: publicationUpdates.addedPublications.map { .trackPublished($0, participant: existing) })
+                events.append(contentsOf: publicationUpdates.muteChangedPublications.map { .trackMuteChanged($0, participant: existing, isMuted: $0.isMuted) })
             } else {
                 let participant = RemoteParticipant(
                     sid: update.sid,
@@ -126,8 +149,8 @@ actor RoomActor {
                 state.remoteParticipants[update.stableKey] = participant
                 events.append(.participantConnected(participant))
 
-                let addedPublications = participant.applyTrackPublications(update.trackPublications)
-                events.append(contentsOf: addedPublications.map { .trackPublished($0, participant: participant) })
+                let publicationUpdates = participant.applyTrackPublications(update.trackPublications)
+                events.append(contentsOf: publicationUpdates.addedPublications.map { .trackPublished($0, participant: participant) })
             }
         }
     }

@@ -226,6 +226,7 @@ package enum PeerConnectionState: String, Equatable, Sendable {
 
 package enum PeerConnectionNegotiationError: Error, Equatable, Sendable {
     case subscriberAnswerRequestedForPublisher
+    case publisherOfferRequestedForSubscriber
     case publisherAnswerAppliedToSubscriber
     case missingRemoteICECredentials
     case missingRemoteDTLSFingerprint
@@ -392,6 +393,18 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
             iceCredentials: configuration.iceCredentials,
             dtlsFingerprint: configuration.dtlsFingerprint
         ).makeAnswer(to: offerSDP)
+    }
+
+    package func makePublisherOffer(for tracks: [PublisherSDPOfferTrack]) throws -> String {
+        guard configuration.role == .publisher else {
+            throw PeerConnectionNegotiationError.publisherOfferRequestedForSubscriber
+        }
+
+        return try PublisherSDPOfferFactory(
+            mediaProfile: configuration.mediaProfile,
+            iceCredentials: configuration.iceCredentials,
+            dtlsFingerprint: configuration.dtlsFingerprint
+        ).makeOffer(for: tracks)
     }
 
     package func applyPublisherAnswer(type: String, sdp: String, id: UInt32) throws {
