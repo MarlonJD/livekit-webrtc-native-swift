@@ -1414,6 +1414,8 @@ final class RoomConnectTests: XCTestCase {
         )
         _ = await waitForSentFrameCount(4, transport: transport)
         let publication = try await publishTask.value
+        XCTAssertNotNil(room.publisherVideoRTPSender(sid: "TR_local_camera"))
+        XCTAssertEqual(room.publisherRTPSenderSID(forCID: track.id), "TR_local_camera")
 
         let unpublishTask = Task {
             try await room.localParticipant.unpublish(publication: publication)
@@ -1434,6 +1436,8 @@ final class RoomConnectTests: XCTestCase {
 
         try await unpublishTask.value
         XCTAssertNil(room.lastPublisherMediaStartupResult)
+        XCTAssertNil(room.publisherVideoRTPSender(sid: "TR_local_camera"))
+        XCTAssertNil(room.publisherRTPSenderSID(forCID: track.id))
 
         do {
             try await startup.transport.sendRTP(
@@ -2470,6 +2474,8 @@ final class RoomConnectTests: XCTestCase {
         )
         _ = await waitForSentFrameCount(2, transport: transport)
         let videoPublication = try await videoPublishTask.value
+        XCTAssertNotNil(room.publisherVideoRTPSender(sid: "TR_local_camera"))
+        XCTAssertEqual(room.publisherRTPSenderSID(forCID: videoTrack.id), "TR_local_camera")
 
         let audioPublishTask = Task {
             try await room.localParticipant.publish(
@@ -2514,6 +2520,8 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertTrue(audioOffer.sdp.contains("a=msid:livekit TR_local_microphone"))
 
         _ = try await audioPublishTask.value
+        XCTAssertNotNil(room.publisherAudioRTPSender(sid: "TR_local_microphone"))
+        XCTAssertEqual(room.publisherRTPSenderSID(forCID: audioTrack.id), "TR_local_microphone")
 
         let unpublishTask = Task {
             try await room.localParticipant.unpublish(publication: videoPublication)
@@ -2546,6 +2554,10 @@ final class RoomConnectTests: XCTestCase {
 
         try await unpublishTask.value
         XCTAssertEqual(room.localParticipant.trackPublications.map(\.sid), ["TR_local_microphone"])
+        XCTAssertNil(room.publisherVideoRTPSender(sid: "TR_local_camera"))
+        XCTAssertNil(room.publisherRTPSenderSID(forCID: videoTrack.id))
+        XCTAssertNotNil(room.publisherAudioRTPSender(sid: "TR_local_microphone"))
+        XCTAssertEqual(room.publisherRTPSenderSID(forCID: audioTrack.id), "TR_local_microphone")
 
         try await transport.enqueueIncomingFrame(
             .binary(SignalFrameCodec().encode(makeLeaveResponse(action: .resume)))

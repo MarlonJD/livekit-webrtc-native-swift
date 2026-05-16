@@ -116,6 +116,7 @@ public final class Room: @unchecked Sendable {
     private let signalLoopLock = NSLock()
     private let connectionContextLock = NSLock()
     private let publisherOfferLock = NSLock()
+    private let publisherRTPSenderLock = NSLock()
     private let subscriberMediaStartupLock = NSLock()
     private let publisherMediaStartupLock = NSLock()
     private let reconnectSyncStateLock = NSLock()
@@ -125,6 +126,9 @@ public final class Room: @unchecked Sendable {
     private var connectionContext: RoomConnectionContext?
     private var publisherOfferTracks: [PublisherSDPOfferTrack] = []
     private var nextPublisherOfferID: UInt32 = 1
+    private var publisherAudioRTPSendersBySID: [String: PublisherAudioRTPSender] = [:]
+    private var publisherVideoRTPSendersBySID: [String: PublisherVideoRTPSender] = [:]
+    private var publisherRTPSenderSIDByCID: [String: String] = [:]
     private var subscriberMediaStartupStarted = false
     private var subscriberMediaStartupTask: Task<Void, Never>?
     private var subscriberMediaStartupResult: PeerConnectionMediaStartupResult?
@@ -171,6 +175,24 @@ public final class Room: @unchecked Sendable {
     var lastPublisherMediaStartupError: (any Error)? {
         publisherMediaStartupLock.withLock {
             publisherMediaStartupError
+        }
+    }
+
+    func publisherAudioRTPSender(sid: String) -> PublisherAudioRTPSender? {
+        publisherRTPSenderLock.withLock {
+            publisherAudioRTPSendersBySID[sid]
+        }
+    }
+
+    func publisherVideoRTPSender(sid: String) -> PublisherVideoRTPSender? {
+        publisherRTPSenderLock.withLock {
+            publisherVideoRTPSendersBySID[sid]
+        }
+    }
+
+    func publisherRTPSenderSID(forCID cid: String) -> String? {
+        publisherRTPSenderLock.withLock {
+            publisherRTPSenderSIDByCID[cid]
         }
     }
 
@@ -537,6 +559,7 @@ public final class Room: @unchecked Sendable {
 
     private func applyTrackUnpublished(trackSID: String) async {
         if localParticipant.removeLocalTrackPublication(sid: trackSID) != nil {
+            removePublisherRTPSender(sid: trackSID)
             let removal = removePublisherOfferTrack(sid: trackSID)
             if removal.removed != nil {
                 clearReconnectPublisherOffer()
@@ -684,7 +707,7 @@ public final class Room: @unchecked Sendable {
                     guard let self else {
                         throw LiveKitNativeError.notConnected
                     }
-                    return try await self.sendAddTrack(
+                    let publishedTrack = try await self.sendAddTrack(
                         plan.addTrackRequest,
                         cid: plan.cid,
                         fallbackName: plan.name,
@@ -693,12 +716,18 @@ public final class Room: @unchecked Sendable {
                         offerTrack: plan.publisherOfferTrack,
                         action: "publish video track"
                     )
+                    self.storePublisherVideoRTPSender(
+                        self.makePublisherRTPBridge().videoSender(for: plan),
+                        sid: publishedTrack.sid,
+                        cid: plan.cid
+                    )
+                    return publishedTrack
                 },
                 publishAudio: { [weak self] plan in
                     guard let self else {
                         throw LiveKitNativeError.notConnected
                     }
-                    return try await self.sendAddTrack(
+                    let publishedTrack = try await self.sendAddTrack(
                         plan.addTrackRequest,
                         cid: plan.cid,
                         fallbackName: plan.name,
@@ -707,6 +736,12 @@ public final class Room: @unchecked Sendable {
                         offerTrack: plan.publisherOfferTrack,
                         action: "publish audio track"
                     )
+                    self.storePublisherAudioRTPSender(
+                        self.makePublisherRTPBridge().audioSender(for: plan),
+                        sid: publishedTrack.sid,
+                        cid: plan.cid
+                    )
+                    return publishedTrack
                 },
                 unpublishTrack: { [weak self] plan in
                     guard let self else {
@@ -888,12 +923,14 @@ public final class Room: @unchecked Sendable {
                 clearReconnectPublisherOffer()
                 await closeMediaStartupTransport(clearPublisherMediaStartupState())
             }
+            removePublisherRTPSender(sid: plan.sid)
             return
         }
 
         guard !removal.tracks.isEmpty else {
             clearReconnectPublisherOffer()
             await closeMediaStartupTransport(clearPublisherMediaStartupState())
+            removePublisherRTPSender(sid: plan.sid)
             return
         }
 
@@ -905,6 +942,7 @@ public final class Room: @unchecked Sendable {
             }
             throw error
         }
+        removePublisherRTPSender(sid: plan.sid)
     }
 
     private func sendPublisherOffer(for tracks: [PublisherSDPOfferTrack]) async throws {
@@ -1321,6 +1359,62 @@ public final class Room: @unchecked Sendable {
         publisherOfferLock.withLock {
             publisherOfferTracks.removeAll()
             nextPublisherOfferID = 1
+        }
+        clearPublisherRTPSenders()
+    }
+
+    private func makePublisherRTPBridge() -> PublisherMediaRTPBridge {
+        PublisherMediaRTPBridge { [weak self] packet in
+            guard let self else {
+                throw LiveKitNativeError.notConnected
+            }
+
+            try await self.sendPublisherRTP(packet)
+        }
+    }
+
+    private func storePublisherAudioRTPSender(_ sender: PublisherAudioRTPSender, sid: String, cid: String) {
+        publisherRTPSenderLock.withLock {
+            removeStalePublisherRTPSenderLocked(cid: cid, sid: sid)
+            publisherAudioRTPSendersBySID[sid] = sender
+            publisherVideoRTPSendersBySID[sid] = nil
+            publisherRTPSenderSIDByCID[cid] = sid
+        }
+    }
+
+    private func storePublisherVideoRTPSender(_ sender: PublisherVideoRTPSender, sid: String, cid: String) {
+        publisherRTPSenderLock.withLock {
+            removeStalePublisherRTPSenderLocked(cid: cid, sid: sid)
+            publisherVideoRTPSendersBySID[sid] = sender
+            publisherAudioRTPSendersBySID[sid] = nil
+            publisherRTPSenderSIDByCID[cid] = sid
+        }
+    }
+
+    private func removeStalePublisherRTPSenderLocked(cid: String, sid: String) {
+        guard let existingSID = publisherRTPSenderSIDByCID[cid], existingSID != sid else {
+            return
+        }
+
+        publisherAudioRTPSendersBySID[existingSID] = nil
+        publisherVideoRTPSendersBySID[existingSID] = nil
+    }
+
+    @discardableResult
+    private func removePublisherRTPSender(sid: String) -> Bool {
+        publisherRTPSenderLock.withLock {
+            let removedAudio = publisherAudioRTPSendersBySID.removeValue(forKey: sid)
+            let removedVideo = publisherVideoRTPSendersBySID.removeValue(forKey: sid)
+            publisherRTPSenderSIDByCID = publisherRTPSenderSIDByCID.filter { $0.value != sid }
+            return removedAudio != nil || removedVideo != nil
+        }
+    }
+
+    private func clearPublisherRTPSenders() {
+        publisherRTPSenderLock.withLock {
+            publisherAudioRTPSendersBySID.removeAll()
+            publisherVideoRTPSendersBySID.removeAll()
+            publisherRTPSenderSIDByCID.removeAll()
         }
     }
 

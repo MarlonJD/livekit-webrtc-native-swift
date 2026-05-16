@@ -181,8 +181,9 @@ request/response validation with TURN channel range checks, and one-shot stale
 nonce retry for authenticated TURN Allocate/Refresh/CreatePermission/ChannelBind
 flows, TURN ChannelData frame encode/decode and stream parsing with 4-byte
 padding, TURN ChannelData relay send/receive over an abstract media datagram
-transport, deterministic TURN allocation/permission refresh planning and due
-action scheduling, peer negotiation state reset across
+transport, deterministic TURN allocation/permission refresh planning,
+maintenance execution, due action scheduling, and relay ICE candidate planning,
+peer negotiation state reset across
 fresh join/reconnect/disconnect boundaries, RTCP
 sender/receiver report and PLI/NACK feedback wire-format groundwork, H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
@@ -259,7 +260,9 @@ Room can also send publisher RTP packets through the started injected secure
 media transport in tests, establishing the handoff point for the future
 capture/encode loop. A stateful publisher RTP bridge now keeps Opus and
 H.264 packetizer state across packets/frames before handing RTP packets to that
-sink.
+sink, and Room now stores publisher audio/video RTP sender state by published
+SID and local CID so unpublish removes only the matching sender while preserving
+remaining local sender state for resume reconnect.
 Server-initiated mute messages update local/remote track publication state and emit
 `RoomEvent.trackMuteChanged`. Room-level media subscription and subscribed
 track settings requests are available through `Room.updateSubscription` and

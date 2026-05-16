@@ -48,10 +48,13 @@ the covered long-term credential authentication plus one-shot stale nonce retry
 behavior at unit-test level. TURN ChannelData framing now covers encode/decode,
 stream parsing, 4-byte padding, and invalid frame rejection, and deterministic
 TURN allocation/permission maintenance planning now calculates refresh
-deadlines without a wall-clock dependency and schedules due refresh actions in
-deadline order. A ChannelData relay transport can encode outbound payloads and
-decode inbound packets over an abstract media datagram transport with partial
-stream remainder handling. Fresh join, reconnect, and disconnect paths now
+deadlines without a wall-clock dependency, schedules due refresh actions in
+deadline order, executes due allocation/permission refreshes through injectable
+network closures, and advances deadlines only on successful refresh. TURN relay
+candidate planning can build relayed ICE candidates from relayed addresses and
+channel bindings. A ChannelData relay transport can encode outbound payloads
+and decode inbound packets over an abstract media datagram transport with
+partial stream remainder handling. Fresh join, reconnect, and disconnect paths now
 reset stale
 remote SDP, ICE candidate, and final-trickle state and regenerate local ICE
 credentials without replacing the rest of the local peer connection
@@ -63,7 +66,11 @@ later publishes after resume do not drop existing local media sections.
 Room-level publisher RTP sending can now hand packets to a started injected
 secure media transport in tests, and stateful Opus/H.264 publisher RTP bridges
 keep packetizer sequence and timestamp state across packets/frames before that
-handoff; the default capture/encode loop is still open.
+handoff. Room stores publisher audio/video RTP sender state by published SID
+and local CID after successful publish, removes only the unpublished sender
+after successful unpublish, preserves remaining local sender state for resume
+reconnect, and clears sender state on full publisher offer reset; the default
+capture/encode loop is still open.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -337,6 +344,12 @@ The old binary WebRTC dependency path has been removed from the package model.
   - deterministic TURN maintenance scheduler that returns allocation and
     permission due actions in deadline order, flags expired state, reports the
     next future deadline, and updates deadlines after refresh success
+  - deterministic TURN maintenance executor that calls injectable allocation
+    and permission refresh closures, records success lifetimes back into the
+    scheduler, reports expired actions, and leaves deadlines unchanged on
+    refresh failure
+  - TURN relay ICE candidate planning from relayed addresses and ChannelBind
+    metadata, including relayed candidate priority/foundation selection
   - TURN ChannelData relay transport over `MediaDatagramTransport` that
     encodes outbound payloads, decodes inbound channel-bound packets, keeps
     partial stream remainder, rejects unbound channels, and preserves peer
@@ -414,6 +427,10 @@ The old binary WebRTC dependency path has been removed from the package model.
   - stateful publisher Opus and H.264 RTP bridge helpers keep packetizer
     sequence/timestamp state across packets and frames before handing RTP
     packets to the secure publisher transport sink
+  - `Room` stores publisher audio/video RTP senders after successful publish,
+    maps local CIDs to published SIDs, removes only the matching sender after
+    unpublish, preserves remaining senders for resume reconnect, and clears
+    the registry during full publisher offer resets
   - publisher offer and subscriber answer signaling can send encoded local ICE
     candidates and final trickle markers when media startup has supplied local
     candidates
@@ -554,7 +571,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 332 tests passed
+  - 340 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -567,7 +584,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,447,098 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,463,749 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -606,9 +623,10 @@ The following checks passed after the latest implementation pass:
 - Consent freshness.
 - Full TURN relay client behavior beyond the current Allocate, Refresh,
   CreatePermission, ChannelBind, ChannelData framing, abstract relay transport,
-  and deterministic maintenance scheduler primitives: binding the scheduler to
-  network client calls, relay allocation/socket integration, UDP/TCP/TLS
-  fallback, and ICE relay candidate integration.
+  deterministic maintenance scheduler/executor, and relayed candidate planning
+  primitives: binding the executor into real TURN client lifecycles, relay
+  allocation/socket integration, UDP/TCP/TLS fallback, and ICE relay candidate
+  integration.
 
 ### DTLS, SRTP, RTP, and RTCP
 
@@ -617,8 +635,9 @@ The following checks passed after the latest implementation pass:
 - Invoking the real DTLS exporter from a completed handshake.
 - Wiring the handshaker-backed secure RTP/RTCP media session binder as the
   default live Room runtime path using the bound candidate socket lifecycle.
-- Connecting the tested Room publisher RTP bridge and stateful packetizer
-  helpers to the default camera/audio capture and encode loops.
+- Connecting the tested Room publisher RTP bridge, sender registry, and
+  stateful packetizer helpers to the default camera/audio capture and encode
+  loops.
 - Wiring RTCP feedback/report packets into live media transport.
 - TWCC, REMB, or congestion control.
 - Jitter buffer.

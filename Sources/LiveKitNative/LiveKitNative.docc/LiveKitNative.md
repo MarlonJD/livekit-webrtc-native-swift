@@ -79,7 +79,10 @@ Room can send publisher RTP packets through a started injected secure media
 transport in tests, establishing the bridge for the future capture/encode
 loop, and stateful Opus/H.264 publisher RTP bridge helpers now keep packetizer
 sequence/timestamp state across packets and frames before handing RTP packets
-to that sink.
+to that sink. Room also stores publisher audio/video RTP sender state by
+published SID and local CID after successful publish, removes only the matching
+sender after unpublish, and preserves remaining sender state for resume
+reconnect.
 `Room.updateSubscription` and `Room.updateTrackSettings` expose media
 subscription and subscribed track settings signaling.
 `LocalParticipant.setTrackSubscriptionPermissions` exposes publisher-controlled
@@ -114,8 +117,12 @@ encode/decode and stream parsing now cover channel-range validation, declared
 payload lengths, and 4-byte padding, while deterministic TURN
 allocation/permission maintenance planning and scheduling calculate refresh
 deadlines, due actions, expiry flags, and next deadlines without a wall-clock
-dependency. A ChannelData relay transport can encode outbound payloads and
-decode inbound packets over an abstract media datagram transport while
+dependency. A TURN maintenance executor now drives injectable allocation and
+permission refresh closures and advances scheduler deadlines only on success,
+and relay candidate planning can build relayed ICE candidates from TURN
+relayed addresses and ChannelBind metadata. A ChannelData relay transport can
+encode outbound payloads and decode inbound packets over an abstract media
+datagram transport while
 preserving partial stream remainder and peer endpoint metadata. Fresh join,
 reconnect, and disconnect boundaries now reset stale remote SDP/ICE negotiation
 state without replacing the local peer connection configuration, and regenerate
