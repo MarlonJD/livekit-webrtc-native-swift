@@ -328,6 +328,46 @@ public final class Room: @unchecked Sendable {
     }
 
     @discardableResult
+    func sendSubscriberRTCPFeedback(
+        senderSSRC: UInt32,
+        mediaSSRC: UInt32,
+        signals: [SubscribeRTCPFeedbackSignal]
+    ) async throws -> [RTCPPacket] {
+        let packets = SubscribeRTCPFeedbackPlanner().feedbackPackets(
+            senderSSRC: senderSSRC,
+            mediaSSRC: mediaSSRC,
+            signals: signals
+        )
+
+        for packet in packets {
+            try await sendSubscriberRTCP(packet)
+        }
+
+        return packets
+    }
+
+    @discardableResult
+    func sendSubscriberRTCPFeedback(
+        senderSSRC: UInt32,
+        mediaSSRC: UInt32,
+        missingSequenceNumbers: [UInt16] = [],
+        requestsKeyFrame: Bool = false
+    ) async throws -> [RTCPPacket] {
+        let packets = SubscribeRTCPFeedbackPlanner().feedbackPackets(
+            senderSSRC: senderSSRC,
+            mediaSSRC: mediaSSRC,
+            missingSequenceNumbers: missingSequenceNumbers,
+            requestsKeyFrame: requestsKeyFrame
+        )
+
+        for packet in packets {
+            try await sendSubscriberRTCP(packet)
+        }
+
+        return packets
+    }
+
+    @discardableResult
     func sendPublisherAudio(_ packet: OpusPacket, sid: String) async throws -> RTPPacket {
         guard let sender = publisherAudioRTPSender(sid: sid) else {
             throw LiveKitNativeError.requestFailed(

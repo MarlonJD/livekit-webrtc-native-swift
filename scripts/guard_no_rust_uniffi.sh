@@ -37,7 +37,7 @@ else
   bridge_matches=""
   while IFS= read -r file; do
     case "$file" in
-      "./scripts/guard_no_rust_uniffi.sh" | "./README.md")
+      "scripts/guard_no_rust_uniffi.sh" | "./scripts/guard_no_rust_uniffi.sh" | "README.md" | "./README.md")
         continue
         ;;
     esac

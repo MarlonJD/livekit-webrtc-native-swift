@@ -87,7 +87,8 @@ subscriber RTCP packets can now be handed through the tested Room-level media
 hooks, registered publisher/subscriber RTCP handlers can receive decoded
 inbound RTCP from the injected secure media transport, and a deterministic
 feedback planner can map H.264/VP8 subscriber packet-loss and keyframe-request
-signals into bounded NACK/PLI RTCP packets.
+signals into bounded NACK/PLI RTCP packets that Room can send through the
+injected subscriber RTCP transport.
 `Room.updateSubscription` and `Room.updateTrackSettings` expose media
 subscription and subscribed track settings signaling.
 `LocalParticipant.setTrackSubscriptionPermissions` exposes publisher-controlled
@@ -107,8 +108,11 @@ and media datagrams share the same local port. `JoinResponse` and
 `ReconnectResponse` ICE server lists now update both subscriber and publisher
 peer connection configurations, and injected bound-socket startup can use
 supported `stun:` UDP URLs to add server-reflexive candidates while preserving
-socket reuse. `turn:` and `turns:` ICE server URLs are parsed with UDP/TCP/TLS
-intent and credentials retained for future relay allocation, and TURN Allocate
+socket reuse. Deterministic ICE consent freshness planning can now schedule
+selected-pair checks, timeout expiry, failure expiry, disabled policy behavior,
+and clamped jitter without a wall-clock dependency. `turn:` and `turns:` ICE
+server URLs are parsed with UDP/TCP/TLS intent and credentials retained for
+future relay allocation, and TURN Allocate
 request primitives cover requested transport, lifetime, realm, nonce,
 `ERROR-CODE`, and relayed-address decoding. TURN allocation client groundwork
 can send Allocate requests over the STUN datagram transport abstraction, parse
@@ -144,8 +148,8 @@ the latest negotiated subscriber answer / publisher offer SDP state at
 unit-test level, and keep publisher offer track state so a later local publish
 after resume still includes existing local media sections. Real DTLS
 handshake/exporter implementation, default Room media transport wiring, default
-RTP sender capture/encode startup, live RTCP feedback dispatch, and
-reconnect media recovery remain part of production hardening.
+RTP sender capture/encode startup, subscriber-pipeline RTCP feedback dispatch,
+and reconnect media recovery remain part of production hardening.
 
 Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the

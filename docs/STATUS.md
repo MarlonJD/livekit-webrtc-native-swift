@@ -60,7 +60,10 @@ and deterministic maintenance execution over abstract transports, and a setup
 plan can create and execute that configured session over scripted abstract
 transports. A ChannelData
 relay transport can encode outbound payloads and decode inbound packets over an
-abstract media datagram transport with partial stream remainder handling. Fresh
+abstract media datagram transport with partial stream remainder handling.
+Deterministic ICE consent freshness planning now models selected-pair consent
+check deadlines, timeout expiry, bounded failure expiry, disabled policy, and
+clamped jitter without a wall-clock dependency. Fresh
 join, reconnect, and disconnect paths now
 reset stale
 remote SDP, ICE candidate, and final-trickle state and regenerate local ICE
@@ -85,8 +88,9 @@ media transport, and inbound subscriber RTCP can be decoded through a registered
 handler loop. A deterministic RTCP feedback policy primitive can now build
 Generic NACK and PLI packets from subscriber-side packet-loss/keyframe needs,
 and a subscriber feedback planner maps H.264/VP8 RTP sequence gaps plus
-explicit keyframe requests into bounded RTCP feedback packets; the default
-capture/encode loop and live feedback integration remain open.
+explicit keyframe requests into bounded RTCP feedback packets that Room can
+dispatch through the injected subscriber RTCP transport; the default
+capture/encode loop and subscriber-pipeline feedback dispatch remain open.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -364,6 +368,9 @@ The old binary WebRTC dependency path has been removed from the package model.
     and permission refresh closures, records success lifetimes back into the
     scheduler, reports expired actions, and leaves deadlines unchanged on
     refresh failure
+  - deterministic ICE consent freshness policy/session planning for selected
+    candidate pairs, including check deadlines, timeout expiry, consecutive
+    failure expiry, disabled policy, and clamped jitter
   - TURN relay ICE candidate planning from relayed addresses and ChannelBind
     metadata, including relayed candidate priority/foundation selection
   - TURN relay session configuration selection from parsed ICE server
@@ -474,6 +481,8 @@ The old binary WebRTC dependency path has been removed from the package model.
     from missing RTP sequence numbers and keyframe requests
   - subscriber RTCP feedback planner that maps H.264/VP8 RTP sequence gaps and
     explicit keyframe requests into bounded NACK/PLI packet plans
+  - `Room` can dispatch subscriber feedback plans through the injected
+    subscriber RTCP transport and preserves NACK/PLI ordering
   - publisher offer and subscriber answer signaling can send encoded local ICE
     candidates and final trickle markers when media startup has supplied local
     candidates
@@ -614,7 +623,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 374 tests passed
+  - 386 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -627,7 +636,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,528,386 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,537,112 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -663,7 +672,7 @@ The following checks passed after the latest implementation pass:
   Room options for default candidate gathering and TURN relay allocation.
 - Full ICE restart signaling against LiveKit, connectivity-check pacing,
   timeout, triggered checks, and role-conflict handling.
-- Consent freshness.
+- Consent freshness execution over default ICEAgent selected pairs.
 - Full TURN relay client behavior beyond the current Allocate, Refresh,
   CreatePermission, ChannelBind, ChannelData framing, abstract relay transport,
   deterministic maintenance scheduler/executor, relayed candidate planning,
@@ -682,9 +691,9 @@ The following checks passed after the latest implementation pass:
   stateful packetizer helpers to the default camera/audio capture and encode
   loops.
 - Live RTCP feedback/report integration, retransmission/keyframe-request
-  dispatch from subscriber pipelines, and policy wiring beyond the current
-  publisher/subscriber RTCP send/receive hooks plus deterministic bounded
-  NACK/PLI packet builder and subscriber feedback planner.
+  dispatch from subscriber pipelines beyond the current publisher/subscriber
+  RTCP send/receive hooks plus deterministic bounded NACK/PLI packet builder,
+  subscriber feedback planner, and Room subscriber feedback send helper.
 - TWCC, REMB, or congestion control.
 - Jitter buffer.
 - Packet-loss recovery beyond basic RTP/RTCP packet primitives.
