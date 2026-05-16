@@ -48,8 +48,11 @@ the covered long-term credential authentication plus one-shot stale nonce retry
 behavior at unit-test level. TURN ChannelData framing now covers encode/decode,
 stream parsing, 4-byte padding, and invalid frame rejection, and deterministic
 TURN allocation/permission maintenance planning now calculates refresh
-deadlines without a wall-clock dependency. Fresh join, reconnect, and
-disconnect paths now reset stale
+deadlines without a wall-clock dependency and schedules due refresh actions in
+deadline order. A ChannelData relay transport can encode outbound payloads and
+decode inbound packets over an abstract media datagram transport with partial
+stream remainder handling. Fresh join, reconnect, and disconnect paths now
+reset stale
 remote SDP, ICE candidate, and final-trickle state and regenerate local ICE
 credentials without replacing the rest of the local peer connection
 configuration. Resume reconnect `SyncState` now includes
@@ -58,8 +61,9 @@ publications, and the latest negotiated subscriber answer / publisher offer SDP
 state at unit-test level, while publisher offer track state is preserved so
 later publishes after resume do not drop existing local media sections.
 Room-level publisher RTP sending can now hand packets to a started injected
-secure media transport in tests; the default capture/packetizer loop is still
-open.
+secure media transport in tests, and stateful Opus/H.264 publisher RTP bridges
+keep packetizer sequence and timestamp state across packets/frames before that
+handoff; the default capture/encode loop is still open.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -330,6 +334,13 @@ The old binary WebRTC dependency path has been removed from the package model.
     partial trailing bytes as remainder
   - deterministic TURN allocation and permission maintenance planning with
     safety margins and wall-clock-free refresh/expiry decisions
+  - deterministic TURN maintenance scheduler that returns allocation and
+    permission due actions in deadline order, flags expired state, reports the
+    next future deadline, and updates deadlines after refresh success
+  - TURN ChannelData relay transport over `MediaDatagramTransport` that
+    encodes outbound payloads, decodes inbound channel-bound packets, keeps
+    partial stream remainder, rejects unbound channels, and preserves peer
+    endpoint metadata
 - ICE basics:
   - local ICE username fragment and password generation
   - host candidate construction from local interface addresses
@@ -398,8 +409,11 @@ The old binary WebRTC dependency path has been removed from the package model.
     negotiated SDP and final ICE trickle, so runtime signaling can now reach the
     coordinator-run ICE + media binder path in tests
   - `Room` can send publisher RTP packets through a started injected secure
-    media transport, giving the future capture/packetizer loop a tested bridge
+    media transport, giving the future capture/encode loop a tested bridge
     into protected SRTP sending
+  - stateful publisher Opus and H.264 RTP bridge helpers keep packetizer
+    sequence/timestamp state across packets and frames before handing RTP
+    packets to the secure publisher transport sink
   - publisher offer and subscriber answer signaling can send encoded local ICE
     candidates and final trickle markers when media startup has supplied local
     candidates
@@ -540,7 +554,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 318 tests passed
+  - 332 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -553,7 +567,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,423,924 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,447,098 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -591,10 +605,10 @@ The following checks passed after the latest implementation pass:
   timeout, triggered checks, and role-conflict handling.
 - Consent freshness.
 - Full TURN relay client behavior beyond the current Allocate, Refresh,
-  CreatePermission, ChannelBind, ChannelData framing, and deterministic
-  maintenance-planning primitives: timer-driven refresh/permission maintenance,
-  relay send/receive socket integration, UDP/TCP/TLS fallback, and ICE relay
-  candidate integration.
+  CreatePermission, ChannelBind, ChannelData framing, abstract relay transport,
+  and deterministic maintenance scheduler primitives: binding the scheduler to
+  network client calls, relay allocation/socket integration, UDP/TCP/TLS
+  fallback, and ICE relay candidate integration.
 
 ### DTLS, SRTP, RTP, and RTCP
 
@@ -603,8 +617,8 @@ The following checks passed after the latest implementation pass:
 - Invoking the real DTLS exporter from a completed handshake.
 - Wiring the handshaker-backed secure RTP/RTCP media session binder as the
   default live Room runtime path using the bound candidate socket lifecycle.
-- Connecting the tested Room publisher RTP bridge to the default camera/audio
-  capture, encode, and packetizer loops.
+- Connecting the tested Room publisher RTP bridge and stateful packetizer
+  helpers to the default camera/audio capture and encode loops.
 - Wiring RTCP feedback/report packets into live media transport.
 - TWCC, REMB, or congestion control.
 - Jitter buffer.
@@ -700,9 +714,9 @@ The following checks passed after the latest implementation pass:
    congestion control, adaptive quality, TURN-only operation, reconnect media
    recovery, and real-device iOS soak/performance testing production blockers.
 10. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
-   publisher transceiver negotiation, the default RTP sender pipeline, and real
-   DTLS handshake/exporter integration as the hardening path before a usable
-   end-to-end release.
+   publisher transceiver negotiation, default capture/encode startup into the
+   tested RTP sender bridge, and real DTLS handshake/exporter integration as
+   the hardening path before a usable end-to-end release.
 
 ## Practical Release Status
 

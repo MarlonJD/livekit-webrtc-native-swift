@@ -180,8 +180,10 @@ request/response validation with IPv4 `XOR-PEER-ADDRESS`, ChannelBind
 request/response validation with TURN channel range checks, and one-shot stale
 nonce retry for authenticated TURN Allocate/Refresh/CreatePermission/ChannelBind
 flows, TURN ChannelData frame encode/decode and stream parsing with 4-byte
-padding, deterministic TURN allocation/permission refresh planning, peer
-negotiation state reset across fresh join/reconnect/disconnect boundaries, RTCP
+padding, TURN ChannelData relay send/receive over an abstract media datagram
+transport, deterministic TURN allocation/permission refresh planning and due
+action scheduling, peer negotiation state reset across
+fresh join/reconnect/disconnect boundaries, RTCP
 sender/receiver report and PLI/NACK feedback wire-format groundwork, H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
 assembly, native camera track scaffolding, VideoToolbox H.264 encoder
@@ -212,8 +214,8 @@ latest-value Room state and emitted as typed room events.
 The active implementation focus is now `1.0.0` hardening: implementing the
 real DTLS handshake/exporter, wiring coordinator-backed secure media transport
 startup into the default live Room runtime, reconnect, TURN, quality controls,
-default capture/packetizer-to-RTP sender startup, DTLS-SCTP network transport,
-integration apps, and size gates.
+default capture/encode startup into the tested RTP sender bridge, DTLS-SCTP
+network transport, integration apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -255,7 +257,9 @@ track is unpublished, the injected publisher media transport is closed and its
 startup state is cleared so stale SRTP transports cannot keep sending.
 Room can also send publisher RTP packets through the started injected secure
 media transport in tests, establishing the handoff point for the future
-capture/packetizer loop.
+capture/encode loop. A stateful publisher RTP bridge now keeps Opus and
+H.264 packetizer state across packets/frames before handing RTP packets to that
+sink.
 Server-initiated mute messages update local/remote track publication state and emit
 `RoomEvent.trackMuteChanged`. Room-level media subscription and subscribed
 track settings requests are available through `Room.updateSubscription` and
@@ -271,8 +275,8 @@ Publisher answer routing, data-track control event mapping, data-track
 publish/unpublish request flows, and server/SFU media/data-track unpublish cleanup
 for reconnect state, injected publisher transport teardown, and matching
 `RequestResponse` failure mapping are unit-tested, while default live media
-transport wiring, capture/encode-to-RTP sender startup, media recovery, and
-end-to-end reconnect hardening are still open.
+transport wiring, capture/encode loop startup, media recovery, and end-to-end
+reconnect hardening are still open.
 
 ## Benchmarks
 
@@ -288,18 +292,18 @@ SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting and
 session-protection context, RTCP feedback, H.264, VP8, Opus RTP scaffolding,
 and SCTP data-channel message paths. On this machine, the latest
 release-readiness smoke medians include protobuf signal roundtrip at
-`8.495 us/op`, subscriber SDP answer generation at `108.558 us/op`, STUN
-binding roundtrip at `1.860 us/op`, RTP encode/decode at `0.596 us/op`, SRTP
-replay protection at `0.047 us/op`, SRTP authenticated roundtrip at
-`8.503 us/op`, SRTP AES-CM payload roundtrip at `63.862 us/op`, full SRTP
-packet protect/unprotect at `71.638 us/op`, RTCP feedback roundtrip at
-`1.709 us/op`, SRTCP packet/replay roundtrip at `0.788 us/op`, SRTCP
-authenticated roundtrip at `7.027 us/op`, full SRTCP packet protect/unprotect
-at `9.602 us/op`, DTLS-SRTP exporter split at `0.353 us/op`, DTLS-SRTP session
-protect/unprotect at `98.289 us/op`, H.264 packetize/depacketize at
-`3.131 us/op`, VP8 payload depacketize at `0.192 us/op`, Opus RTP
-packetize/depacketize at `0.026 us/op`, and SCTP DCEP open/ack roundtrip at
-`0.909 us/op`.
+`7.829 us/op`, subscriber SDP answer generation at `101.915 us/op`, STUN
+binding roundtrip at `1.838 us/op`, RTP encode/decode at `0.590 us/op`, SRTP
+replay protection at `0.048 us/op`, SRTP authenticated roundtrip at
+`8.497 us/op`, SRTP AES-CM payload roundtrip at `62.905 us/op`, full SRTP
+packet protect/unprotect at `70.909 us/op`, RTCP feedback roundtrip at
+`1.708 us/op`, SRTCP packet/replay roundtrip at `0.780 us/op`, SRTCP
+authenticated roundtrip at `6.846 us/op`, full SRTCP packet protect/unprotect
+at `9.319 us/op`, DTLS-SRTP exporter split at `0.328 us/op`, DTLS-SRTP session
+protect/unprotect at `81.142 us/op`, H.264 packetize/depacketize at
+`2.531 us/op`, VP8 payload depacketize at `0.147 us/op`, Opus RTP
+packetize/depacketize at `0.027 us/op`, and SCTP DCEP open/ack roundtrip at
+`0.820 us/op`.
 
 Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
 CSV so this package does not reintroduce the forbidden binary WebRTC dependency.
@@ -322,7 +326,7 @@ binary size proxy. The strict gate additionally requires
 `LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
 That strict gate intentionally fails today because DTLS handshake/exporter
 implementation, full ICE/TURN hardening, Room runtime media startup, publisher
-media sender pipeline, live SCTP, and end-to-end LiveKit tests are still open.
+capture/encode startup, live SCTP, and end-to-end LiveKit tests are still open.
 
 ## Requirements
 
