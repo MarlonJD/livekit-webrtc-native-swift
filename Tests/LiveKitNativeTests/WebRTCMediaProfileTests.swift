@@ -35,6 +35,38 @@ final class WebRTCMediaProfileTests: XCTestCase {
         })
     }
 
+    func testDTLSFingerprintEqualityNormalizesHexCasing() {
+        let uppercase = DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+        let lowercase = DTLSSignature(hashFunction: "sha-256", value: "aa:bb:cc")
+
+        XCTAssertEqual(uppercase, lowercase)
+        XCTAssertTrue(uppercase.isEquivalent(to: lowercase))
+    }
+
+    func testDTLSFingerprintEqualityNormalizesHashFunctionCasing() {
+        let lowercase = DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+        let uppercase = DTLSSignature(hashFunction: "SHA-256", value: "AA:BB:CC")
+
+        XCTAssertEqual(lowercase, uppercase)
+        XCTAssertTrue(lowercase.isEquivalent(to: uppercase))
+    }
+
+    func testDTLSCertificateFingerprintHashesCertificateDERBytes() {
+        let certificateDERPrefix = Data([
+            0x30, 0x82, 0x01, 0x0A,
+            0x02, 0x82, 0x01, 0x01,
+            0x00, 0xA7, 0x5D, 0x11,
+            0x4B, 0x69,
+        ])
+        let fingerprint = DTLSSignature.sha256CertificateFingerprint(certificateDER: certificateDERPrefix)
+
+        XCTAssertEqual(fingerprint.hashFunction, "sha-256")
+        XCTAssertEqual(
+            fingerprint.value,
+            "B2:C4:80:CD:6D:B4:D6:0D:36:EB:39:8F:83:3F:78:B4:78:FE:A2:1E:8B:25:A6:2E:56:F3:D5:BE:87:BE:92:22"
+        )
+    }
+
     func testDefaultPeerConnectionConfigurationHasDTLSFingerprint() {
         let configuration = NativeWebRTCConfiguration(role: .subscriber)
 

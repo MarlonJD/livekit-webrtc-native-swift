@@ -47,8 +47,8 @@ the candidate port for STUN checks and media datagrams, ICE agent
 connectivity-check orchestration, typed DTLS-SRTP handshake results, `use_srtp`
 extension encode/decode and profile selection, SDP DTLS fingerprint/setup
 parsing, peer-connection handshake configuration, exporter-backed secure media
-session construction with remote fingerprint validation, handshaker-backed
-media session binding, plus RTCP
+session construction with remote fingerprint, role, and protection-profile
+validation, handshaker-backed media session binding, plus RTCP
 report/feedback packet groundwork.
 Basic signal
 resume/full-reconnect and alternative signal URL retry are implemented at
@@ -75,6 +75,9 @@ muted `MuteTrackRequest` messages and wait for matching `RequestResponse`
 acknowledgements before local publication removal; multi-track unpublish also
 sends a refreshed publisher offer for the remaining local media, and final
 local media unpublish closes and clears the injected publisher media transport.
+Room can send publisher RTP packets through a started injected secure media
+transport in tests, establishing the bridge for the future capture/packetizer
+loop.
 `Room.updateSubscription` and `Room.updateTrackSettings` expose media
 subscription and subscribed track settings signaling.
 `LocalParticipant.setTrackSubscriptionPermissions` exposes publisher-controlled
@@ -96,8 +99,19 @@ peer connection configurations, and injected bound-socket startup can use
 supported `stun:` UDP URLs to add server-reflexive candidates while preserving
 socket reuse. `turn:` and `turns:` ICE server URLs are parsed with UDP/TCP/TLS
 intent and credentials retained for future relay allocation, and TURN Allocate
-request primitives cover requested transport, lifetime, realm, nonce, and
-relayed-address decoding. Fresh join, reconnect, and disconnect boundaries now
+request primitives cover requested transport, lifetime, realm, nonce,
+`ERROR-CODE`, and relayed-address decoding. TURN allocation client groundwork
+can send Allocate requests over the STUN datagram transport abstraction, parse
+and validate success responses, and perform one long-term credential 401
+challenge retry in unit tests. TURN Refresh request/response validation covers
+lifetime refresh and deallocation, CreatePermission request/response validation
+covers IPv4 `XOR-PEER-ADDRESS`, ChannelBind request/response validation covers
+TURN channel numbers, and authenticated TURN Allocate/Refresh/CreatePermission/
+ChannelBind flows retry once on stale nonce responses. TURN ChannelData frame
+encode/decode and stream parsing now cover channel-range validation, declared
+payload lengths, and 4-byte padding, while deterministic TURN
+allocation/permission maintenance planning calculates refresh deadlines without
+a wall-clock dependency. Fresh join, reconnect, and disconnect boundaries now
 reset stale remote SDP/ICE negotiation state without replacing the local peer
 connection configuration, and regenerate local ICE credentials for the next
 negotiation.
@@ -106,8 +120,8 @@ preferences, disabled subscribed tracks, local media/data publications, and
 the latest negotiated subscriber answer / publisher offer SDP state at
 unit-test level, and keep publisher offer track state so a later local publish
 after resume still includes existing local media sections. Real DTLS handshake/exporter
-implementation, default Room media transport wiring, RTP sender transport, and
-reconnect media recovery remain part of production hardening.
+implementation, default Room media transport wiring, default RTP sender
+pipeline, and reconnect media recovery remain part of production hardening.
 
 Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the

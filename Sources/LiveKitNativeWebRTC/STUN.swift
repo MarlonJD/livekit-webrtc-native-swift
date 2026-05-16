@@ -12,6 +12,7 @@ package enum STUNError: Error, Equatable, Sendable {
     case missingAttribute(UInt16)
     case invalidAttributeLength(UInt16, Int)
     case unsupportedAddressFamily(UInt8)
+    case invalidChannelNumber(UInt16)
 }
 
 package struct STUNMessageType: RawRepresentable, Equatable, Sendable {
@@ -23,10 +24,19 @@ package struct STUNMessageType: RawRepresentable, Equatable, Sendable {
 
     package static let bindingRequest = STUNMessageType(rawValue: 0x0001)
     package static let allocateRequest = STUNMessageType(rawValue: 0x0003)
+    package static let refreshRequest = STUNMessageType(rawValue: 0x0004)
+    package static let createPermissionRequest = STUNMessageType(rawValue: 0x0008)
+    package static let channelBindRequest = STUNMessageType(rawValue: 0x0009)
     package static let bindingSuccessResponse = STUNMessageType(rawValue: 0x0101)
     package static let allocateSuccessResponse = STUNMessageType(rawValue: 0x0103)
+    package static let refreshSuccessResponse = STUNMessageType(rawValue: 0x0104)
+    package static let createPermissionSuccessResponse = STUNMessageType(rawValue: 0x0108)
+    package static let channelBindSuccessResponse = STUNMessageType(rawValue: 0x0109)
     package static let bindingErrorResponse = STUNMessageType(rawValue: 0x0111)
     package static let allocateErrorResponse = STUNMessageType(rawValue: 0x0113)
+    package static let refreshErrorResponse = STUNMessageType(rawValue: 0x0114)
+    package static let createPermissionErrorResponse = STUNMessageType(rawValue: 0x0118)
+    package static let channelBindErrorResponse = STUNMessageType(rawValue: 0x0119)
 }
 
 package struct STUNTransactionID: Equatable, Sendable {
@@ -54,7 +64,9 @@ package enum STUNAttributeType: UInt16, Equatable, Sendable {
     case username = 0x0006
     case messageIntegrity = 0x0008
     case errorCode = 0x0009
+    case channelNumber = 0x000C
     case lifetime = 0x000D
+    case xorPeerAddress = 0x0012
     case realm = 0x0014
     case nonce = 0x0015
     case xorRelayedAddress = 0x0016
@@ -123,6 +135,13 @@ package struct STUNAttribute: Equatable, Sendable {
         return STUNAttribute(type: .lifetime, value: data)
     }
 
+    package static func channelNumber(_ value: UInt16) -> STUNAttribute {
+        var data = Data()
+        data.appendNetworkUInt16(value)
+        data.appendNetworkUInt16(0)
+        return STUNAttribute(type: .channelNumber, value: data)
+    }
+
     package static func requestedTransport(_ transport: TURNRequestedTransportProtocol) -> STUNAttribute {
         STUNAttribute(type: .requestedTransport, value: Data([transport.rawValue, 0, 0, 0]))
     }
@@ -177,6 +196,19 @@ package struct STUNAttribute: Equatable, Sendable {
         )
     }
 
+    package static func xorPeerAddressIPv4(
+        address: String,
+        port: UInt16,
+        transactionID: STUNTransactionID
+    ) throws -> STUNAttribute {
+        try xorAddressIPv4Attribute(
+            type: .xorPeerAddress,
+            address: address,
+            port: port,
+            transactionID: transactionID
+        )
+    }
+
     package static func iceControlled(tieBreaker: UInt64) -> STUNAttribute {
         var data = Data()
         data.appendNetworkUInt64(tieBreaker)
@@ -202,6 +234,17 @@ package struct STUNAttribute: Equatable, Sendable {
     package var uint32Value: UInt32? {
         guard value.count == 4 else { return nil }
         return try? value.networkUInt32(at: 0)
+    }
+
+    package var channelNumberValue: UInt16? {
+        guard type == STUNAttributeType.channelNumber.rawValue,
+              value.count == 4,
+              (try? value.networkUInt16(at: 2)) == 0
+        else {
+            return nil
+        }
+
+        return try? value.networkUInt16(at: 0)
     }
 
     package var uint64Value: UInt64? {
@@ -264,6 +307,12 @@ package struct STUNAttribute: Equatable, Sendable {
     package var xorRelayedAddressValue: STUNMappedAddress? {
         get throws {
             try xorAddressValue(expectedType: .xorRelayedAddress)
+        }
+    }
+
+    package var xorPeerAddressValue: STUNMappedAddress? {
+        get throws {
+            try xorAddressValue(expectedType: .xorPeerAddress)
         }
     }
 
@@ -372,6 +421,91 @@ package enum TURNAllocateRequestFactory {
             type: .allocateRequest,
             transactionID: transactionID,
             attributes: attributes
+        )
+    }
+}
+
+package enum TURNRefreshRequestFactory {
+    package static func makeRefreshRequest(
+        username: String,
+        realm: String,
+        nonce: String,
+        lifetimeSeconds: UInt32,
+        transactionID: STUNTransactionID = .random()
+    ) -> STUNMessage {
+        STUNMessage(
+            type: .refreshRequest,
+            transactionID: transactionID,
+            attributes: [
+                .lifetime(seconds: lifetimeSeconds),
+                .username(username),
+                .realm(realm),
+                .nonce(nonce),
+            ]
+        )
+    }
+}
+
+package enum TURNCreatePermissionRequestFactory {
+    package static func makeCreatePermissionRequest(
+        peerAddresses: [STUNMappedAddress],
+        username: String,
+        realm: String,
+        nonce: String,
+        transactionID: STUNTransactionID = .random()
+    ) throws -> STUNMessage {
+        guard !peerAddresses.isEmpty else {
+            throw STUNError.missingAttribute(STUNAttributeType.xorPeerAddress.rawValue)
+        }
+
+        var attributes = try peerAddresses.map {
+            try STUNAttribute.xorPeerAddressIPv4(
+                address: $0.address,
+                port: $0.port,
+                transactionID: transactionID
+            )
+        }
+        attributes.append(contentsOf: [
+            .username(username),
+            .realm(realm),
+            .nonce(nonce),
+        ])
+
+        return STUNMessage(
+            type: .createPermissionRequest,
+            transactionID: transactionID,
+            attributes: attributes
+        )
+    }
+}
+
+package enum TURNChannelBindRequestFactory {
+    package static func makeChannelBindRequest(
+        channelNumber: UInt16,
+        peerAddress: STUNMappedAddress,
+        username: String,
+        realm: String,
+        nonce: String,
+        transactionID: STUNTransactionID = .random()
+    ) throws -> STUNMessage {
+        guard (0x4000 ... 0x7FFF).contains(channelNumber) else {
+            throw STUNError.invalidChannelNumber(channelNumber)
+        }
+
+        return STUNMessage(
+            type: .channelBindRequest,
+            transactionID: transactionID,
+            attributes: [
+                .channelNumber(channelNumber),
+                try .xorPeerAddressIPv4(
+                    address: peerAddress.address,
+                    port: peerAddress.port,
+                    transactionID: transactionID
+                ),
+                .username(username),
+                .realm(realm),
+                .nonce(nonce),
+            ]
         )
     }
 }

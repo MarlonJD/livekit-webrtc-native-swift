@@ -144,11 +144,14 @@ STUN-backed candidate-pair checking, use-candidate nomination,
 validate-only nomination handoff, DTLS fingerprint material, DTLS-SRTP
 protection profile and exporter key/salt splitting, `use_srtp` extension
 encode/decode and profile selection, SDP DTLS fingerprint/setup extraction,
-peer-connection handshake configuration, typed DTLS-SRTP handshake results,
-remote fingerprint validation for media sessions, RFC 3711 AES-CM SRTP/SRTCP session key derivation, client/server DTLS-SRTP packet-protection context wiring, RTP
-packet encode/decode, RTP sequence rollover tracking, SRTP replay-window
-protection groundwork, SRTP AES-CM payload encryption/decryption using RFC
-3711 IV construction, SRTP authentication-tag framing with ROC-aware HMAC-SHA1
+case-normalized DTLS fingerprint comparison, media-level SDP DTLS
+fingerprint/setup fallback, peer-connection handshake configuration, typed DTLS-SRTP handshake results,
+remote fingerprint, role, and protection-profile validation for media
+sessions, RFC 3711 AES-CM SRTP/SRTCP session key derivation, client/server
+DTLS-SRTP packet-protection context wiring, RTP packet encode/decode, RTP
+sequence rollover tracking, SRTP replay-window protection groundwork, SRTP
+AES-CM payload encryption/decryption using RFC 3711 IV construction, SRTP
+authentication-tag framing with ROC-aware HMAC-SHA1
 validation, full SRTP packet protect/unprotect APIs with replay rejection,
 SRTCP AES-CM payload protection, SRTCP index/authentication-tag framing,
 HMAC-SHA1 auth-tag validation, full SRTCP packet protect/unprotect APIs with
@@ -169,8 +172,16 @@ server-reflexive candidate discovery from supported `stun:` ICE server URLs
 for injected bound-socket startup, TURN endpoint parsing from `turn:`/`turns:`
 ICE server URLs with UDP/TCP/TLS intent and credentials retained for future
 relay allocation, TURN Allocate request primitives for requested transport,
-lifetime, realm, nonce, and relayed-address decoding, peer negotiation state
-reset across fresh join/reconnect/disconnect boundaries, RTCP
+lifetime, realm, nonce, `ERROR-CODE`, and relayed-address decoding, TURN
+allocation client request/response validation with one long-term credential
+401 challenge retry over the STUN datagram transport abstraction, TURN Refresh
+request/response validation and deallocation lifetime support, CreatePermission
+request/response validation with IPv4 `XOR-PEER-ADDRESS`, ChannelBind
+request/response validation with TURN channel range checks, and one-shot stale
+nonce retry for authenticated TURN Allocate/Refresh/CreatePermission/ChannelBind
+flows, TURN ChannelData frame encode/decode and stream parsing with 4-byte
+padding, deterministic TURN allocation/permission refresh planning, peer
+negotiation state reset across fresh join/reconnect/disconnect boundaries, RTCP
 sender/receiver report and PLI/NACK feedback wire-format groundwork, H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
 assembly, native camera track scaffolding, VideoToolbox H.264 encoder
@@ -201,8 +212,8 @@ latest-value Room state and emitted as typed room events.
 The active implementation focus is now `1.0.0` hardening: implementing the
 real DTLS handshake/exporter, wiring coordinator-backed secure media transport
 startup into the default live Room runtime, reconnect, TURN, quality controls,
-real RTP sender media transport, DTLS-SCTP network transport, integration apps,
-and size gates.
+default capture/packetizer-to-RTP sender startup, DTLS-SCTP network transport,
+integration apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -224,8 +235,7 @@ applying new signaling configuration, resume reconnects send LiveKit
 tracks, local media/data publications, and the latest negotiated subscriber
 answer / publisher offer SDP state in unit tests, preserve publisher offer
 track state so later publishes after resume do not drop existing local media,
-and
-room-connected
+and room-connected
 `publish(videoTrack:)` / `publish(audioTrack:)` calls send LiveKit
 `AddTrackRequest` messages and wait for matching `TrackPublishedResponse`
 acknowledgements before recording local publications, while matching
@@ -243,6 +253,9 @@ publication and cached publisher offer reconnect state so resume reconnects and
 later publisher offers do not replay removed tracks. When the last local media
 track is unpublished, the injected publisher media transport is closed and its
 startup state is cleared so stale SRTP transports cannot keep sending.
+Room can also send publisher RTP packets through the started injected secure
+media transport in tests, establishing the handoff point for the future
+capture/packetizer loop.
 Server-initiated mute messages update local/remote track publication state and emit
 `RoomEvent.trackMuteChanged`. Room-level media subscription and subscribed
 track settings requests are available through `Room.updateSubscription` and
@@ -258,8 +271,8 @@ Publisher answer routing, data-track control event mapping, data-track
 publish/unpublish request flows, and server/SFU media/data-track unpublish cleanup
 for reconnect state, injected publisher transport teardown, and matching
 `RequestResponse` failure mapping are unit-tested, while default live media
-transport wiring, RTP sender startup, media recovery, and end-to-end reconnect
-hardening are still open.
+transport wiring, capture/encode-to-RTP sender startup, media recovery, and
+end-to-end reconnect hardening are still open.
 
 ## Benchmarks
 
@@ -275,18 +288,18 @@ SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting and
 session-protection context, RTCP feedback, H.264, VP8, Opus RTP scaffolding,
 and SCTP data-channel message paths. On this machine, the latest
 release-readiness smoke medians include protobuf signal roundtrip at
-`8.895 us/op`, subscriber SDP answer generation at `96.354 us/op`, STUN
-binding roundtrip at `1.758 us/op`, RTP encode/decode at `0.599 us/op`, SRTP
+`8.495 us/op`, subscriber SDP answer generation at `108.558 us/op`, STUN
+binding roundtrip at `1.860 us/op`, RTP encode/decode at `0.596 us/op`, SRTP
 replay protection at `0.047 us/op`, SRTP authenticated roundtrip at
-`8.115 us/op`, SRTP AES-CM payload roundtrip at `61.305 us/op`, full SRTP
-packet protect/unprotect at `70.147 us/op`, RTCP feedback roundtrip at
-`1.654 us/op`, SRTCP packet/replay roundtrip at `0.761 us/op`, SRTCP
-authenticated roundtrip at `6.594 us/op`, full SRTCP packet protect/unprotect
-at `9.030 us/op`, DTLS-SRTP exporter split at `0.325 us/op`, DTLS-SRTP session
-protect/unprotect at `79.544 us/op`, H.264 packetize/depacketize at
-`2.411 us/op`, VP8 payload depacketize at `0.143 us/op`, Opus RTP
+`8.503 us/op`, SRTP AES-CM payload roundtrip at `63.862 us/op`, full SRTP
+packet protect/unprotect at `71.638 us/op`, RTCP feedback roundtrip at
+`1.709 us/op`, SRTCP packet/replay roundtrip at `0.788 us/op`, SRTCP
+authenticated roundtrip at `7.027 us/op`, full SRTCP packet protect/unprotect
+at `9.602 us/op`, DTLS-SRTP exporter split at `0.353 us/op`, DTLS-SRTP session
+protect/unprotect at `98.289 us/op`, H.264 packetize/depacketize at
+`3.131 us/op`, VP8 payload depacketize at `0.192 us/op`, Opus RTP
 packetize/depacketize at `0.026 us/op`, and SCTP DCEP open/ack roundtrip at
-`0.788 us/op`.
+`0.909 us/op`.
 
 Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
 CSV so this package does not reintroduce the forbidden binary WebRTC dependency.
@@ -309,7 +322,7 @@ binary size proxy. The strict gate additionally requires
 `LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
 That strict gate intentionally fails today because DTLS handshake/exporter
 implementation, full ICE/TURN hardening, Room runtime media startup, publisher
-media transport, live SCTP, and end-to-end LiveKit tests are still open.
+media sender pipeline, live SCTP, and end-to-end LiveKit tests are still open.
 
 ## Requirements
 

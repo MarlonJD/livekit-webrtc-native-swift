@@ -75,6 +75,23 @@ package struct DTLSSignature: Equatable, Sendable {
         self.value = value
     }
 
+    package var normalizedHashFunction: String {
+        hashFunction.lowercased()
+    }
+
+    package var normalizedValue: String {
+        value.uppercased()
+    }
+
+    package func isEquivalent(to other: DTLSSignature) -> Bool {
+        normalizedHashFunction == other.normalizedHashFunction
+            && normalizedValue == other.normalizedValue
+    }
+
+    package static func == (lhs: DTLSSignature, rhs: DTLSSignature) -> Bool {
+        lhs.isEquivalent(to: rhs)
+    }
+
     package static func sha256Fingerprint(for data: Data) -> DTLSSignature {
         let digest = SHA256.hash(data: data)
         let value = digest
@@ -82,6 +99,14 @@ package struct DTLSSignature: Equatable, Sendable {
             .joined(separator: ":")
 
         return DTLSSignature(hashFunction: "sha-256", value: value)
+    }
+
+    package static func sha256CertificateFingerprint(certificateDER: Data) -> DTLSSignature {
+        sha256Fingerprint(for: certificateDER)
+    }
+
+    package static func sha256Fingerprint(for certificate: SecCertificate) -> DTLSSignature {
+        sha256CertificateFingerprint(certificateDER: SecCertificateCopyData(certificate) as Data)
     }
 
     package static func ephemeralIdentityFingerprint() -> DTLSSignature {

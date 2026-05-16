@@ -1245,6 +1245,94 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(datagramFactory.capturedPair?.remote.foundation, "2")
     }
 
+    func testPublisherRTPBridgeSendsThroughStartedSecureMediaTransport() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makePublisherAnswerResponse(),
+            makePublisherTrickleResponse(),
+            makePublisherTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let localCandidate = ICECandidate(
+            foundation: "local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.10",
+            port: 55000,
+            type: .host
+        )
+        let datagramTransport = RoomMediaStartupDatagramTransport()
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(transport: datagramTransport),
+            handshaker: RoomMediaStartupDTLSHandshaker(
+                result: try DTLSSRTPHandshakeResult(
+                    role: .server,
+                    exportedKeyingMaterial: Data(
+                        (0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init)
+                    ),
+                    remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+                )
+            )
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            publisherPeerConnection: PeerConnectionCoordinator(configuration: NativeWebRTCConfiguration(role: .publisher)),
+            publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 42,
+                checker: RoomMediaStartupICEChecker(),
+                binder: binder
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let startupResult = await waitForPublisherMediaStartupResult(room)
+        _ = try XCTUnwrap(startupResult)
+        let packet = RTPPacket(
+            marker: true,
+            payloadType: 102,
+            sequenceNumber: 12,
+            timestamp: 90_000,
+            ssrc: 0x1122_3344,
+            payload: Data([0x01, 0x02, 0x03])
+        )
+
+        try await room.sendPublisherRTP(packet)
+
+        let sentDatagram = try XCTUnwrap(datagramTransport.sentDatagrams.first)
+        XCTAssertEqual(datagramTransport.sentDatagrams.count, 1)
+        XCTAssertNotEqual(sentDatagram, packet.encoded())
+        XCTAssertGreaterThan(sentDatagram.count, packet.encoded().count)
+    }
+
+    func testPublisherRTPBridgeRejectsMissingSecureMediaTransport() async {
+        let room = Room()
+        let packet = RTPPacket(
+            marker: true,
+            payloadType: 102,
+            sequenceNumber: 12,
+            timestamp: 90_000,
+            ssrc: 0x1122_3344,
+            payload: Data([0x01])
+        )
+
+        do {
+            try await room.sendPublisherRTP(packet)
+            XCTFail("Expected missing publisher media transport failure.")
+        } catch {
+            XCTAssertEqual(
+                error as? LiveKitNativeError,
+                .requestFailed(
+                    action: "send RTP",
+                    reason: "publisherMediaTransportUnavailable",
+                    message: "Publisher secure media transport is not started."
+                )
+            )
+        }
+    }
+
     func testUnpublishLastTrackClosesPublisherMediaTransport() async throws {
         let frames = try [
             makeJoinResponse(),

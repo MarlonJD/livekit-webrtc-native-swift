@@ -200,6 +200,22 @@ public final class Room: @unchecked Sendable {
         await task?.value
     }
 
+    func sendPublisherRTP(_ packet: RTPPacket) async throws {
+        let transport = publisherMediaStartupLock.withLock {
+            publisherMediaStartupResult?.transport
+        }
+
+        guard let transport else {
+            throw LiveKitNativeError.requestFailed(
+                action: "send RTP",
+                reason: "publisherMediaTransportUnavailable",
+                message: "Publisher secure media transport is not started."
+            )
+        }
+
+        try await transport.sendRTP(packet)
+    }
+
     public convenience init(options: RoomOptions = .init()) {
         self.init(options: options, signalConnection: SignalConnection())
     }

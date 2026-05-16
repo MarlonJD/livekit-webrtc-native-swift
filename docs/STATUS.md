@@ -1,6 +1,6 @@
 # LiveKitNative Status
 
-Last updated: 2026-05-15
+Last updated: 2026-05-16
 
 ## Current State
 
@@ -11,17 +11,18 @@ client.
 Production readiness is intentionally represented in code through
 `LiveKitNative.productionReadiness` and `LiveKitNative.assertProductionReady()`.
 The current status is `developerPreview`, with explicit blockers for the real
-DTLS handshake/exporter implementation, TURN/ICE hardening, live media startup
-integration, VideoToolbox-backed production H.264 encode/decode with hardware
-path verification and fallback policy, DTLS-backed SCTP, media recovery during
-reconnect, meeting-grade audio, jitter buffering, packet-loss recovery,
-congestion control, adaptive quality, real-device iOS soak/performance tests,
-and end-to-end LiveKit compatibility testing.
+DTLS handshake/exporter implementation, TURN/ICE hardening, default live media
+startup integration, VideoToolbox-backed production H.264 encode/decode with
+hardware path verification and fallback policy, DTLS-backed SCTP, media
+recovery during reconnect, meeting-grade audio, jitter buffering, packet-loss
+recovery, congestion control, adaptive quality, real-device iOS
+soak/performance tests, and end-to-end LiveKit compatibility testing.
 Publisher `AddTrackRequest` signaling is now wired for local audio/video
 publishes, publisher SDP offers are generated and sent after
 `TrackPublishedResponse`, and publisher answers and publisher-targeted trickle
 candidates are routed into the publisher peer connection adapter, but media
-sender transport is still open.
+sender capture/encode pipeline and end-to-end live media transport are still
+open.
 Data-track publish/unpublish/update-subscription signaling is also wired at
 unit-test level, including server/SFU data-track unpublish cleanup for local
 publication and reconnect state; live SCTP transport remains open.
@@ -37,16 +38,28 @@ publisher peer connection configurations. In the injected bound-socket media
 startup path, supported `stun:` UDP URLs can be queried for server-reflexive
 candidate discovery while preserving socket reuse. TURN ICE server URLs are
 also parsed from `turn:` and `turns:` entries with UDP/TCP/TLS intent and
-credentials retained for future relay allocation, and TURN Allocate request
-message primitives now cover requested transport, lifetime, realm, nonce, and
-relayed-address decoding. Fresh join, reconnect, and disconnect paths now reset
-stale remote SDP, ICE candidate, and final-trickle state and regenerate local
-ICE credentials without replacing the rest of the local peer connection
+credentials retained for future relay allocation, and TURN Allocate, Refresh,
+CreatePermission, and ChannelBind request primitives now cover requested
+transport, lifetime, realm, nonce, `ERROR-CODE`, relayed-address decoding,
+IPv4 `XOR-PEER-ADDRESS`, and channel-number validation. TURN allocation,
+refresh, permission, and channel-bind clients can send requests over the STUN
+datagram transport abstraction, validate success/error responses, and perform
+the covered long-term credential authentication plus one-shot stale nonce retry
+behavior at unit-test level. TURN ChannelData framing now covers encode/decode,
+stream parsing, 4-byte padding, and invalid frame rejection, and deterministic
+TURN allocation/permission maintenance planning now calculates refresh
+deadlines without a wall-clock dependency. Fresh join, reconnect, and
+disconnect paths now reset stale
+remote SDP, ICE candidate, and final-trickle state and regenerate local ICE
+credentials without replacing the rest of the local peer connection
 configuration. Resume reconnect `SyncState` now includes
 retained subscription preferences, disabled track SIDs, local media/data
 publications, and the latest negotiated subscriber answer / publisher offer SDP
 state at unit-test level, while publisher offer track state is preserved so
 later publishes after resume do not drop existing local media sections.
+Room-level publisher RTP sending can now hand packets to a started injected
+secure media transport in tests; the default capture/packetizer loop is still
+open.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -291,8 +304,32 @@ The old binary WebRTC dependency path has been removed from the package model.
     coverage
   - `FINGERPRINT` CRC32 signing and validation with tamper detection tests
   - TURN Allocate request/success/error message type support
-  - TURN `REQUESTED-TRANSPORT`, `LIFETIME`, `REALM`, `NONCE`, and IPv4
-    `XOR-RELAYED-ADDRESS` encode/decode primitives
+  - TURN Refresh, CreatePermission, and ChannelBind request/success/error
+    message type support
+  - TURN `REQUESTED-TRANSPORT`, `LIFETIME`, `REALM`, `NONCE`, `ERROR-CODE`,
+    IPv4 `XOR-RELAYED-ADDRESS`, IPv4 `XOR-PEER-ADDRESS`, and `CHANNEL-NUMBER`
+    encode/decode primitives
+  - TURN allocation request/response client over the STUN datagram transport
+    abstraction, including relayed-address/lifetime parsing, transaction
+    validation, response `MESSAGE-INTEGRITY` / `FINGERPRINT` validation, and
+    one long-term credential 401 `REALM` / `NONCE` challenge retry
+  - TURN refresh request/response client with lifetime parsing, deallocation
+    lifetime support, transaction validation, optional response integrity /
+    fingerprint validation, and error-code mapping
+  - TURN CreatePermission request/response client with IPv4 peer-address
+    encoding, transaction validation, optional response integrity / fingerprint
+    validation, and error-code mapping
+  - TURN ChannelBind request/response client with channel-number range
+    validation, IPv4 peer-address encoding, optional response integrity /
+    fingerprint validation, and error-code mapping
+  - one-shot stale nonce retry for authenticated TURN Allocate, Refresh,
+    CreatePermission, and ChannelBind flows
+  - TURN ChannelData frame encode/decode with channel-range validation,
+    declared-length validation, and 4-byte padding
+  - TURN ChannelData stream parsing that returns complete frames and preserves
+    partial trailing bytes as remainder
+  - deterministic TURN allocation and permission maintenance planning with
+    safety margins and wall-clock-free refresh/expiry decisions
 - ICE basics:
   - local ICE username fragment and password generation
   - host candidate construction from local interface addresses
@@ -332,8 +369,11 @@ The old binary WebRTC dependency path has been removed from the package model.
     responses, with duplicate mapped endpoints ignored
 - DTLS/SRTP groundwork:
   - SHA-256 fingerprint formatting
-  - ephemeral Security framework key material for SDP fingerprint generation
-  - SDP `fingerprint` and `setup` role extraction for remote offers/answers
+  - certificate-DER SHA-256 fingerprint helper for real DTLS identity wiring
+  - case-normalized DTLS fingerprint comparison
+  - ephemeral Security framework key material for preview SDP fingerprint generation
+  - SDP `fingerprint` and `setup` role extraction for remote offers/answers,
+    including media-level fallback when session-level attributes are absent
   - DTLS-SRTP protection profile metadata for
     `SRTP_AES128_CM_HMAC_SHA1_80` and `SRTP_AES128_CM_HMAC_SHA1_32`
   - DTLS-SRTP `use_srtp` extension encode/decode, MKI handling, malformed
@@ -357,6 +397,9 @@ The old binary WebRTC dependency path has been removed from the package model.
   - `Room` can trigger injected publisher and subscriber media startup after
     negotiated SDP and final ICE trickle, so runtime signaling can now reach the
     coordinator-run ICE + media binder path in tests
+  - `Room` can send publisher RTP packets through a started injected secure
+    media transport, giving the future capture/packetizer loop a tested bridge
+    into protected SRTP sending
   - publisher offer and subscriber answer signaling can send encoded local ICE
     candidates and final trickle markers when media startup has supplied local
     candidates
@@ -393,8 +436,8 @@ The old binary WebRTC dependency path has been removed from the package model.
     actor-backed `DTLSSRTPMediaTransport`
   - handshaker-backed media session binder that validates the nominated ICE
     pair, builds the datagram transport, invokes an injected DTLS-SRTP
-    handshaker, validates the completed remote fingerprint, and returns a
-    protected media transport
+    handshaker, validates the completed remote fingerprint, role, and negotiated
+    SRTP protection profile, and returns a protected media transport
   - UDP media datagram socket transport for IPv4 RTP-component candidate pairs,
     including loopback send/receive coverage
   - bound local ICE UDP socket lifecycle that can gather host candidates from
@@ -497,7 +540,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 268 tests passed
+  - 318 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -510,7 +553,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,381,296 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,423,924 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -525,8 +568,9 @@ The following checks passed after the latest implementation pass:
 
 ### LiveKit Signaling
 
-- Transceiver negotiation, RTP sender transport, and LiveKit integration
-  coverage for AddTrack publishes beyond unit-level publisher offer signaling.
+- Transceiver negotiation, default capture/encode-to-RTP sender pipeline, and
+  LiveKit integration coverage for AddTrack publishes beyond unit-level
+  publisher offer signaling and injected RTP bridge coverage.
 - Production-hardened reconnect across live media recovery, data channel
   recovery, and server migration beyond the current local ICE credential
   restart plus signal `SyncState` unit coverage for state and SDP recovery.
@@ -546,9 +590,11 @@ The following checks passed after the latest implementation pass:
 - Full ICE restart signaling against LiveKit, connectivity-check pacing,
   timeout, triggered checks, and role-conflict handling.
 - Consent freshness.
-- TURN allocation client behavior, authentication challenge handling, refresh,
-  permissions, channels, and UDP/TCP/TLS relay behavior beyond current URL
-  parsing and STUN Allocate message primitives.
+- Full TURN relay client behavior beyond the current Allocate, Refresh,
+  CreatePermission, ChannelBind, ChannelData framing, and deterministic
+  maintenance-planning primitives: timer-driven refresh/permission maintenance,
+  relay send/receive socket integration, UDP/TCP/TLS fallback, and ICE relay
+  candidate integration.
 
 ### DTLS, SRTP, RTP, and RTCP
 
@@ -557,6 +603,8 @@ The following checks passed after the latest implementation pass:
 - Invoking the real DTLS exporter from a completed handshake.
 - Wiring the handshaker-backed secure RTP/RTCP media session binder as the
   default live Room runtime path using the bound candidate socket lifecycle.
+- Connecting the tested Room publisher RTP bridge to the default camera/audio
+  capture, encode, and packetizer loops.
 - Wiring RTCP feedback/report packets into live media transport.
 - TWCC, REMB, or congestion control.
 - Jitter buffer.
@@ -652,8 +700,8 @@ The following checks passed after the latest implementation pass:
    congestion control, adaptive quality, TURN-only operation, reconnect media
    recovery, and real-device iOS soak/performance testing production blockers.
 10. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
-   publisher transceiver negotiation, RTP sender transport, and real DTLS
-   handshake/exporter integration as the hardening path before a usable
+   publisher transceiver negotiation, the default RTP sender pipeline, and real
+   DTLS handshake/exporter integration as the hardening path before a usable
    end-to-end release.
 
 ## Practical Release Status

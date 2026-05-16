@@ -135,10 +135,33 @@ package struct SDPSessionDescription: Equatable, Sendable {
     }
 
     private func firstAttributeValue(prefix: String) -> String? {
-        lines.first { line in
-            line.field == "a" && line.value.hasPrefix(prefix)
+        firstSessionAttributeValue(prefix: prefix)
+            ?? firstMediaAttributeValue(prefix: prefix)
+    }
+
+    private func firstSessionAttributeValue(prefix: String) -> String? {
+        for line in lines {
+            if line.field == "m" {
+                return nil
+            }
+
+            if line.field == "a", line.value.hasPrefix(prefix) {
+                return String(line.value.dropFirst(prefix.count))
+            }
         }
-        .map { String($0.value.dropFirst(prefix.count)) }
+
+        return nil
+    }
+
+    private func firstMediaAttributeValue(prefix: String) -> String? {
+        mediaSections
+            .lazy
+            .compactMap { section in
+                section.attributes
+                    .first { $0.hasPrefix(prefix) }
+                    .map { String($0.dropFirst(prefix.count)) }
+            }
+            .first
     }
 
     private static func mediaSections(from lines: [SDPLine]) -> [SDPMediaSection] {
