@@ -56,7 +56,9 @@ channel bindings. TURN relay session configuration can now select supported UDP
 relay endpoints from parsed ICE server URLs when credentials, realm, and nonce
 are available. A bounded TURN relay session now composes allocation, permission
 creation, channel binding, relay candidate planning, relay transport metadata,
-and deterministic maintenance execution over abstract transports. A ChannelData
+and deterministic maintenance execution over abstract transports, and a setup
+plan can create and execute that configured session over scripted abstract
+transports. A ChannelData
 relay transport can encode outbound payloads and decode inbound packets over an
 abstract media datagram transport with partial stream remainder handling. Fresh
 join, reconnect, and disconnect paths now
@@ -81,8 +83,10 @@ media transport, inbound publisher RTCP can be decoded through a registered
 handler loop, subscriber RTCP packets can be handed to the injected secure
 media transport, and inbound subscriber RTCP can be decoded through a registered
 handler loop. A deterministic RTCP feedback policy primitive can now build
-Generic NACK and PLI packets from subscriber-side packet-loss/keyframe needs;
-the default capture/encode loop and live feedback integration remain open.
+Generic NACK and PLI packets from subscriber-side packet-loss/keyframe needs,
+and a subscriber feedback planner maps H.264/VP8 RTP sequence gaps plus
+explicit keyframe requests into bounded RTCP feedback packets; the default
+capture/encode loop and live feedback integration remain open.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -369,6 +373,10 @@ The old binary WebRTC dependency path has been removed from the package model.
     CreatePermission, ChannelBind, relayed ICE candidate planning, ChannelData
     relay transport metadata, and deterministic maintenance execution over
     abstract transports
+  - deterministic TURN relay setup plan factory/execution that carries
+    credentials, endpoint, relayed transport, peer address, channel number,
+    lifetime preferences, and candidate preference metadata over abstract
+    transports
   - TURN ChannelData relay transport over `MediaDatagramTransport` that
     encodes outbound payloads, decodes inbound channel-bound packets, keeps
     partial stream remainder, rejects unbound channels, and preserves peer
@@ -464,6 +472,8 @@ The old binary WebRTC dependency path has been removed from the package model.
     async handler loop with disconnect cleanup coverage
   - deterministic RTCP feedback policy that builds Generic NACK and PLI packets
     from missing RTP sequence numbers and keyframe requests
+  - subscriber RTCP feedback planner that maps H.264/VP8 RTP sequence gaps and
+    explicit keyframe requests into bounded NACK/PLI packet plans
   - publisher offer and subscriber answer signaling can send encoded local ICE
     candidates and final trickle markers when media startup has supplied local
     candidates
@@ -604,7 +614,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 363 tests passed
+  - 374 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -617,7 +627,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,517,672 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,528,386 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -656,10 +666,10 @@ The following checks passed after the latest implementation pass:
 - Consent freshness.
 - Full TURN relay client behavior beyond the current Allocate, Refresh,
   CreatePermission, ChannelBind, ChannelData framing, abstract relay transport,
-  deterministic maintenance scheduler/executor, relayed candidate planning, and
-  bounded relay session orchestration primitives: default relay allocation and
-  socket lifecycle integration, UDP/TCP/TLS fallback, and ICE relay candidate
-  integration.
+  deterministic maintenance scheduler/executor, relayed candidate planning,
+  bounded relay session orchestration, and deterministic setup-plan execution
+  primitives: default relay allocation and socket lifecycle integration,
+  UDP/TCP/TLS fallback, and ICE relay candidate integration.
 
 ### DTLS, SRTP, RTP, and RTCP
 
@@ -673,8 +683,8 @@ The following checks passed after the latest implementation pass:
   loops.
 - Live RTCP feedback/report integration, retransmission/keyframe-request
   dispatch from subscriber pipelines, and policy wiring beyond the current
-  publisher/subscriber RTCP send/receive hooks plus deterministic NACK/PLI
-  packet builder.
+  publisher/subscriber RTCP send/receive hooks plus deterministic bounded
+  NACK/PLI packet builder and subscriber feedback planner.
 - TWCC, REMB, or congestion control.
 - Jitter buffer.
 - Packet-loss recovery beyond basic RTP/RTCP packet primitives.

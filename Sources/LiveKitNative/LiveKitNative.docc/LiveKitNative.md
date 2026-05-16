@@ -86,8 +86,8 @@ reconnect. Encoded Opus packets, H.264 frames, publisher RTCP packets, and
 subscriber RTCP packets can now be handed through the tested Room-level media
 hooks, registered publisher/subscriber RTCP handlers can receive decoded
 inbound RTCP from the injected secure media transport, and a deterministic
-feedback policy can build NACK/PLI RTCP packets for future subscriber
-packet-loss and keyframe-request handling.
+feedback planner can map H.264/VP8 subscriber packet-loss and keyframe-request
+signals into bounded NACK/PLI RTCP packets.
 `Room.updateSubscription` and `Room.updateTrackSettings` expose media
 subscription and subscribed track settings signaling.
 `LocalParticipant.setTrackSubscriptionPermissions` exposes publisher-controlled
@@ -130,7 +130,8 @@ can now select supported UDP relay endpoints from parsed ICE server URLs when
 credentials, realm, and nonce are available. A bounded TURN relay session
 composes allocation, permission creation, channel binding, relayed candidate
 planning, relay transport metadata, and deterministic maintenance execution
-over abstract transports. A ChannelData relay transport can
+over abstract transports, and a setup plan can create and execute that
+configured session deterministically. A ChannelData relay transport can
 encode outbound payloads and decode inbound packets over an abstract media
 datagram transport while
 preserving partial stream remainder and peer endpoint metadata. Fresh join,
@@ -143,7 +144,7 @@ the latest negotiated subscriber answer / publisher offer SDP state at
 unit-test level, and keep publisher offer track state so a later local publish
 after resume still includes existing local media sections. Real DTLS
 handshake/exporter implementation, default Room media transport wiring, default
-RTP sender capture/encode startup, live RTCP feedback integration, and
+RTP sender capture/encode startup, live RTCP feedback dispatch, and
 reconnect media recovery remain part of production hardening.
 
 Release-mode microbenchmarks are available with

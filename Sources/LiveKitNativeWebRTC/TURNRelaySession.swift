@@ -265,6 +265,46 @@ package struct TURNRelaySessionSetupPlan: Equatable, Sendable {
             jitterSeconds: jitterSeconds
         )
     }
+
+    package func executeSetup(
+        stunTransport: any STUNDatagramTransport,
+        datagramTransport: any MediaDatagramTransport,
+        at now: TimeInterval,
+        policy: TURNMaintenancePolicy = .standard,
+        jitterSeconds: TimeInterval = 0,
+        includeFingerprint: Bool = true,
+        requireResponseMessageIntegrity: Bool = false,
+        requireResponseFingerprint: Bool = false
+    ) throws -> TURNRelaySessionSetupExecution {
+        var session = makeSession(
+            stunTransport: stunTransport,
+            policy: policy,
+            jitterSeconds: jitterSeconds
+        )
+        let result = try session.setupRelay(
+            plan: self,
+            datagramTransport: datagramTransport,
+            at: now,
+            includeFingerprint: includeFingerprint,
+            requireResponseMessageIntegrity: requireResponseMessageIntegrity,
+            requireResponseFingerprint: requireResponseFingerprint
+        )
+
+        return TURNRelaySessionSetupExecution(session: session, result: result)
+    }
+}
+
+package struct TURNRelaySessionSetupExecution: Sendable {
+    package var session: TURNRelaySession
+    package var result: TURNRelaySessionSetupResult
+
+    package init(
+        session: TURNRelaySession,
+        result: TURNRelaySessionSetupResult
+    ) {
+        self.session = session
+        self.result = result
+    }
 }
 
 package struct TURNRelaySessionTransportMetadata: Equatable, Sendable {

@@ -187,6 +187,229 @@ final class TURNRelaySessionTests: XCTestCase {
         }
     }
 
+    func testSetupPlanCarriesConfigurationPeerChannelAndLifetimeDetails() throws {
+        let endpoint = TURNServerEndpoint(
+            host: "relay.example.test",
+            port: 3_478,
+            transport: .udp,
+            isSecure: false,
+            username: "relay-user",
+            credential: "relay-password"
+        )
+        let configuration = try TURNRelaySessionConfiguration(
+            endpoint: endpoint,
+            realm: "turn.example.test",
+            nonce: "nonce-1"
+        )
+        let peerAddress = STUNMappedAddress(address: "203.0.113.44", port: 5_000)
+        let transactionIDs = try setupTransactionIDs()
+
+        let plan = configuration.makeSetupPlan(
+            peerAddress: peerAddress,
+            channelNumber: 0x4007,
+            transactionIDs: transactionIDs,
+            permissionID: "peer-1",
+            allocationLifetimeSeconds: 180,
+            permissionLifetimeSeconds: 120,
+            foundation: "relay-foundation",
+            localPreference: 250
+        )
+        let session = plan.makeSession(stunTransport: EmptyTURNRelaySessionSTUNTransport())
+
+        XCTAssertEqual(plan.configuration, configuration)
+        XCTAssertEqual(plan.endpoint, endpoint)
+        XCTAssertEqual(
+            plan.credentials,
+            TURNRelaySessionCredentials(
+                username: "relay-user",
+                realm: "turn.example.test",
+                nonce: "nonce-1",
+                password: "relay-password"
+            )
+        )
+        XCTAssertEqual(plan.relayedTransport, .udp)
+        XCTAssertEqual(plan.peerAddress, peerAddress)
+        XCTAssertEqual(plan.channelNumber, 0x4007)
+        XCTAssertEqual(plan.transactionIDs, transactionIDs)
+        XCTAssertEqual(plan.permissionID, "peer-1")
+        XCTAssertEqual(plan.allocationLifetimeSeconds, 180)
+        XCTAssertEqual(plan.permissionLifetimeSeconds, 120)
+        XCTAssertEqual(plan.foundation, "relay-foundation")
+        XCTAssertEqual(plan.localPreference, 250)
+        XCTAssertEqual(session.credentials, plan.credentials)
+        XCTAssertEqual(session.turnEndpoint, endpoint)
+        XCTAssertEqual(session.relayedTransport, .udp)
+    }
+
+    func testSetupPlanUsesDeterministicDefaultPermissionID() throws {
+        let configuration = try TURNRelaySessionConfiguration(
+            endpoint: TURNServerEndpoint(
+                host: "relay.example.test",
+                port: 3_478,
+                transport: .udp,
+                isSecure: false,
+                username: "relay-user",
+                credential: "relay-password"
+            ),
+            realm: "turn.example.test",
+            nonce: "nonce-1"
+        )
+        let peerAddress = STUNMappedAddress(address: "203.0.113.45", port: 5_001)
+
+        let plan = configuration.makeSetupPlan(
+            peerAddress: peerAddress,
+            channelNumber: 0x4008,
+            transactionIDs: try setupTransactionIDs()
+        )
+
+        XCTAssertEqual(plan.permissionID, "203.0.113.45:5001")
+        XCTAssertNil(plan.allocationLifetimeSeconds)
+        XCTAssertEqual(
+            plan.permissionLifetimeSeconds,
+            TURNMaintenancePolicy.defaultPermissionLifetimeSeconds
+        )
+        XCTAssertNil(plan.foundation)
+        XCTAssertEqual(
+            plan.localPreference,
+            TURNRelayCandidateFactory.defaultLocalPreference
+        )
+    }
+
+    func testSetupPlanExecutesThroughScriptedTransportAndPreservesMetadata() async throws {
+        let endpoint = TURNServerEndpoint(
+            host: "relay.example.test",
+            port: 3_478,
+            transport: .udp,
+            isSecure: false,
+            username: "relay-user",
+            credential: "relay-password"
+        )
+        let configuration = try TURNRelaySessionConfiguration(
+            endpoint: endpoint,
+            realm: "turn.example.test",
+            nonce: "nonce-1"
+        )
+        let credentials = configuration.credentials
+        let key = TURNLongTermCredential.messageIntegrityKey(
+            username: credentials.username,
+            realm: credentials.realm,
+            password: credentials.password
+        )
+        let peerAddress = STUNMappedAddress(address: "203.0.113.46", port: 5_002)
+        let relayedAddress = STUNMappedAddress(address: "192.0.2.79", port: 49_154)
+        let transactionIDs = try setupTransactionIDs()
+        let plan = configuration.makeSetupPlan(
+            peerAddress: peerAddress,
+            channelNumber: 0x4009,
+            transactionIDs: transactionIDs,
+            permissionID: "peer-plan",
+            allocationLifetimeSeconds: 180,
+            permissionLifetimeSeconds: 120,
+            foundation: "relay-foundation",
+            localPreference: 250
+        )
+        let stunTransport = ScriptedTURNRelaySessionSTUNTransport { attempt, request in
+            switch attempt {
+            case 1:
+                XCTAssertEqual(request.type, .allocateRequest)
+                XCTAssertEqual(request.transactionID, transactionIDs.allocation)
+                XCTAssertNil(request.firstAttribute(.messageIntegrity))
+
+                return try STUNMessage(
+                    type: .allocateErrorResponse,
+                    transactionID: request.transactionID,
+                    attributes: [
+                        .errorCode(401, reason: "Unauthorized"),
+                        .realm(credentials.realm),
+                        .nonce(credentials.nonce),
+                    ]
+                ).encoded(includeFingerprint: true)
+            case 2:
+                XCTAssertEqual(request.type, .allocateRequest)
+                XCTAssertEqual(request.transactionID, transactionIDs.authenticatedAllocation)
+                XCTAssertEqual(request.firstAttribute(.requestedTransport)?.requestedTransportProtocol, .udp)
+                XCTAssertEqual(request.firstAttribute(.lifetime)?.uint32Value, 180)
+                XCTAssertEqual(try request.firstAttribute(.username)?.stringValue, credentials.username)
+                XCTAssertEqual(try request.firstAttribute(.realm)?.stringValue, credentials.realm)
+                XCTAssertEqual(try request.firstAttribute(.nonce)?.stringValue, credentials.nonce)
+                XCTAssertTrue(try request.validatesMessageIntegrity(key: key))
+                XCTAssertTrue(try request.validatesFingerprint())
+
+                return try STUNMessage(
+                    type: .allocateSuccessResponse,
+                    transactionID: request.transactionID,
+                    attributes: [
+                        try .xorRelayedAddressIPv4(
+                            address: relayedAddress.address,
+                            port: relayedAddress.port,
+                            transactionID: request.transactionID
+                        ),
+                        .lifetime(seconds: 180),
+                    ]
+                ).encoded(messageIntegrityKey: key, includeFingerprint: true)
+            case 3:
+                XCTAssertEqual(request.type, .createPermissionRequest)
+                XCTAssertEqual(request.transactionID, transactionIDs.createPermission)
+                XCTAssertEqual(
+                    try request.firstAttribute(.xorPeerAddress)?.xorPeerAddressValue,
+                    peerAddress
+                )
+                XCTAssertTrue(try request.validatesMessageIntegrity(key: key))
+                XCTAssertTrue(try request.validatesFingerprint())
+
+                return try STUNMessage(
+                    type: .createPermissionSuccessResponse,
+                    transactionID: request.transactionID
+                ).encoded(messageIntegrityKey: key, includeFingerprint: true)
+            case 4:
+                XCTAssertEqual(request.type, .channelBindRequest)
+                XCTAssertEqual(request.transactionID, transactionIDs.channelBind)
+                XCTAssertEqual(request.firstAttribute(.channelNumber)?.channelNumberValue, 0x4009)
+                XCTAssertEqual(
+                    try request.firstAttribute(.xorPeerAddress)?.xorPeerAddressValue,
+                    peerAddress
+                )
+                XCTAssertTrue(try request.validatesMessageIntegrity(key: key))
+                XCTAssertTrue(try request.validatesFingerprint())
+
+                return try STUNMessage(
+                    type: .channelBindSuccessResponse,
+                    transactionID: request.transactionID
+                ).encoded(messageIntegrityKey: key, includeFingerprint: true)
+            default:
+                XCTFail("Unexpected TURN request attempt \(attempt).")
+                return Data()
+            }
+        }
+        let policy = TURNMaintenancePolicy(
+            allocationRefreshSafetyMarginSeconds: 10,
+            permissionRefreshSafetyMarginSeconds: 20
+        )
+
+        let execution = try plan.executeSetup(
+            stunTransport: stunTransport,
+            datagramTransport: FakeTURNRelaySessionMediaDatagramTransport(),
+            at: 100,
+            policy: policy,
+            requireResponseMessageIntegrity: true,
+            requireResponseFingerprint: true
+        )
+
+        XCTAssertEqual(execution.session.credentials, credentials)
+        XCTAssertEqual(execution.session.turnEndpoint, endpoint)
+        XCTAssertEqual(execution.session.relayedTransport, .udp)
+        XCTAssertEqual(execution.result.allocation.relayedAddress, relayedAddress)
+        XCTAssertEqual(execution.result.metadata.turnEndpoint, endpoint)
+        XCTAssertEqual(execution.result.metadata.relayedTransport, .udp)
+        XCTAssertEqual(execution.result.metadata.peerAddress, peerAddress)
+        XCTAssertEqual(execution.result.metadata.channelNumber, 0x4009)
+        XCTAssertEqual(execution.result.metadata.permissionID, "peer-plan")
+        XCTAssertEqual(execution.result.metadata.nextMaintenanceDeadline, 200)
+        XCTAssertEqual(execution.result.candidatePlan.candidate.foundation, "relay-foundation")
+        XCTAssertEqual(execution.result.candidatePlan.candidate.localPreference, 250)
+        XCTAssertEqual(stunTransport.attemptCount, 4)
+    }
+
     func testSetupAllocatesCreatesPermissionBindsChannelAndReturnsRelayPlan() async throws {
         let credentials = TURNRelaySessionCredentials(
             username: "relay-user",
