@@ -115,7 +115,7 @@ package struct DTLSSignature: Equatable, Sendable {
     }
 }
 
-package struct RTCIceCandidateInit: Equatable, Sendable, Decodable {
+package struct RTCIceCandidateInit: Equatable, Sendable, Codable {
     package var candidate: String
     package var sdpMid: String?
     package var sdpMLineIndex: Int32?
@@ -133,9 +133,32 @@ package struct RTCIceCandidateInit: Equatable, Sendable, Decodable {
         self.usernameFragment = usernameFragment
     }
 
+    package init(
+        candidate: ICECandidate,
+        sdpMid: String? = nil,
+        sdpMLineIndex: Int32? = nil,
+        usernameFragment: String? = nil
+    ) {
+        self.init(
+            candidate: candidate.sdpAttributeValue,
+            sdpMid: sdpMid,
+            sdpMLineIndex: sdpMLineIndex,
+            usernameFragment: usernameFragment
+        )
+    }
+
     package init(jsonString: String) throws {
         let data = Data(jsonString.utf8)
         self = try JSONDecoder().decode(Self.self, from: data)
+    }
+
+    package func jsonString() throws -> String {
+        let data = try JSONEncoder().encode(self)
+        guard let string = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+
+        return string
     }
 }
 
@@ -231,7 +254,24 @@ package enum PeerConnectionNegotiationError: Error, Equatable, Sendable {
     case missingRemoteICECredentials
     case missingRemoteDTLSFingerprint
     case missingRemoteDTLSSetupRole
+    case missingSelectedICECandidatePair
     case unsupportedRemoteDTLSSetupRole(SDPDTLSSetupRole)
+}
+
+package struct PeerConnectionMediaStartupResult: Sendable {
+    package var transport: DTLSSRTPMediaTransport
+    package var iceSummary: ICEAgentCheckSummary
+    package var selectedCandidatePair: ICECandidatePair
+
+    package init(
+        transport: DTLSSRTPMediaTransport,
+        iceSummary: ICEAgentCheckSummary,
+        selectedCandidatePair: ICECandidatePair
+    ) {
+        self.transport = transport
+        self.iceSummary = iceSummary
+        self.selectedCandidatePair = selectedCandidatePair
+    }
 }
 
 package struct RemoteSessionDescription: Equatable, Sendable {
@@ -247,10 +287,11 @@ package struct RemoteSessionDescription: Equatable, Sendable {
 }
 
 package final class PeerConnectionCoordinator: @unchecked Sendable {
-    package let configuration: NativeWebRTCConfiguration
     package private(set) var state: PeerConnectionState = .new
+    private let configurationLock = NSLock()
     private let remoteCandidateLock = NSLock()
     private let remoteDescriptionLock = NSLock()
+    private var mutableConfiguration: NativeWebRTCConfiguration
     private var mutableRemoteICECandidates: [RemoteICECandidate] = []
     private var mutableRemoteICEGatheringComplete = false
     private var mutableRemoteAnswer: RemoteSessionDescription?
@@ -259,7 +300,45 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
     private var mutableRemoteDTLSSetupRole: SDPDTLSSetupRole?
 
     package init(configuration: NativeWebRTCConfiguration) {
-        self.configuration = configuration
+        self.mutableConfiguration = configuration
+    }
+
+    package var configuration: NativeWebRTCConfiguration {
+        configurationLock.lock()
+        defer { configurationLock.unlock() }
+        return mutableConfiguration
+    }
+
+    package func updateICEServers(_ iceServers: [ICEServer]) {
+        configurationLock.lock()
+        defer { configurationLock.unlock() }
+        mutableConfiguration.iceServers = iceServers
+    }
+
+    package func resetNegotiationState() {
+        remoteCandidateLock.lock()
+        mutableRemoteICECandidates = []
+        mutableRemoteICEGatheringComplete = false
+        remoteCandidateLock.unlock()
+
+        remoteDescriptionLock.lock()
+        mutableRemoteAnswer = nil
+        mutableRemoteICECredentials = nil
+        mutableRemoteDTLSFingerprint = nil
+        mutableRemoteDTLSSetupRole = nil
+        remoteDescriptionLock.unlock()
+
+        state = .new
+    }
+
+    package func restartICE() {
+        let newCredentials = ICECredentials.random()
+
+        resetNegotiationState()
+
+        configurationLock.lock()
+        mutableConfiguration.iceCredentials = newCredentials
+        configurationLock.unlock()
     }
 
     package var remoteICECandidates: [RemoteICECandidate] {
@@ -303,6 +382,7 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
     }
 
     package var localCapabilities: [SDPCodecCapability] {
+        let configuration = configuration
         var capabilities: [SDPCodecCapability] = []
 
         for codec in configuration.mediaProfile.publishAudioCodecs {
@@ -362,6 +442,7 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         guard let remoteICECredentials else {
             throw PeerConnectionNegotiationError.missingRemoteICECredentials
         }
+        let configuration = configuration
 
         return ICEAgent(
             localCandidates: localCandidates,
@@ -378,6 +459,7 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
     }
 
     package func makeSubscriberAnswer(for offerSDP: String) throws -> String {
+        let configuration = configuration
         guard configuration.role == .subscriber else {
             throw PeerConnectionNegotiationError.subscriberAnswerRequestedForPublisher
         }
@@ -396,6 +478,7 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
     }
 
     package func makePublisherOffer(for tracks: [PublisherSDPOfferTrack]) throws -> String {
+        let configuration = configuration
         guard configuration.role == .publisher else {
             throw PeerConnectionNegotiationError.publisherOfferRequestedForSubscriber
         }
@@ -408,6 +491,7 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
     }
 
     package func applyPublisherAnswer(type: String, sdp: String, id: UInt32) throws {
+        let configuration = configuration
         guard configuration.role == .publisher else {
             throw PeerConnectionNegotiationError.publisherAnswerAppliedToSubscriber
         }
@@ -449,6 +533,38 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         try await binder.makeMediaTransport(
             selectedCandidatePair: selectedCandidatePair,
             handshakeConfiguration: try makeDTLSSRTPHandshakeConfiguration()
+        )
+    }
+
+    package func startSecureMediaTransport(
+        localCandidates: [ICECandidate],
+        iceRole: ICEAgentRole,
+        tieBreaker: UInt64,
+        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        checker: any ICEConnectivityChecking = STUNICEConnectivityChecker(),
+        binder: DTLSSRTPMediaSessionBinder
+    ) async throws -> PeerConnectionMediaStartupResult {
+        let iceAgent = try makeICEAgent(
+            localCandidates: localCandidates,
+            role: iceRole,
+            tieBreaker: tieBreaker,
+            nominationPolicy: nominationPolicy,
+            checker: checker
+        )
+        let summary = await iceAgent.performConnectivityChecks()
+        guard let selectedCandidatePair = summary.selectedPair else {
+            throw PeerConnectionNegotiationError.missingSelectedICECandidatePair
+        }
+
+        let transport = try await makeSecureMediaTransport(
+            selectedCandidatePair: selectedCandidatePair,
+            binder: binder
+        )
+
+        return PeerConnectionMediaStartupResult(
+            transport: transport,
+            iceSummary: summary,
+            selectedCandidatePair: selectedCandidatePair
         )
     }
 

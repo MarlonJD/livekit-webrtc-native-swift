@@ -42,6 +42,128 @@ final class WebRTCMediaProfileTests: XCTestCase {
         XCTAssertEqual(configuration.dtlsFingerprint.value.split(separator: ":").count, 32)
     }
 
+    func testPeerConnectionUpdatesICEServersFromSignalingConfiguration() {
+        let coordinator = PeerConnectionCoordinator(configuration: .init(role: .subscriber))
+        let iceServers = [
+            ICEServer(
+                urls: ["stun:stun.example.test:3478"],
+                username: nil,
+                credential: nil
+            ),
+            ICEServer(
+                urls: ["turn:turn.example.test:3478?transport=udp"],
+                username: "user",
+                credential: "pass"
+            ),
+        ]
+
+        coordinator.updateICEServers(iceServers)
+
+        XCTAssertEqual(coordinator.configuration.iceServers, iceServers)
+        XCTAssertEqual(coordinator.configuration.role, .subscriber)
+    }
+
+    func testPeerConnectionResetNegotiationStatePreservesConfigurationAndClearsRemoteState() throws {
+        let coordinator = PeerConnectionCoordinator(configuration: .init(role: .publisher))
+        let iceServers = [
+            ICEServer(
+                urls: ["turn:turn.example.test:3478?transport=udp"],
+                username: "user",
+                credential: "pass"
+            ),
+        ]
+        let answer = """
+        v=0
+        o=- 1 1 IN IP4 127.0.0.1
+        s=-
+        t=0 0
+        a=ice-ufrag:remote-ufrag
+        a=ice-pwd:remote-password
+        a=fingerprint:sha-256 00:11:22
+        a=setup:active
+        m=audio 9 UDP/TLS/RTP/SAVPF 111
+        a=mid:0
+        a=rtcp-mux
+        a=rtpmap:111 opus/48000/2
+        """
+
+        coordinator.updateICEServers(iceServers)
+        try coordinator.applyPublisherAnswer(type: "answer", sdp: answer, id: 10)
+        try coordinator.addRemoteICECandidate(
+            candidateInitJSON: #"{"candidate":"candidate:remote 1 UDP 1694498815 203.0.113.9 6000 typ srflx","sdpMid":"0","sdpMLineIndex":0}"#,
+            isFinal: true
+        )
+
+        XCTAssertEqual(coordinator.state, .connected)
+        XCTAssertNotNil(coordinator.remoteAnswer)
+        XCTAssertNotNil(coordinator.remoteICECredentials)
+        XCTAssertNotNil(coordinator.remoteDTLSFingerprint)
+        XCTAssertTrue(coordinator.isRemoteICEGatheringComplete)
+        XCTAssertEqual(coordinator.remoteICECandidates.count, 1)
+
+        coordinator.resetNegotiationState()
+
+        XCTAssertEqual(coordinator.state, .new)
+        XCTAssertEqual(coordinator.configuration.iceServers, iceServers)
+        XCTAssertNil(coordinator.remoteAnswer)
+        XCTAssertNil(coordinator.remoteICECredentials)
+        XCTAssertNil(coordinator.remoteDTLSFingerprint)
+        XCTAssertNil(coordinator.remoteDTLSSetupRole)
+        XCTAssertFalse(coordinator.isRemoteICEGatheringComplete)
+        XCTAssertTrue(coordinator.remoteICECandidates.isEmpty)
+    }
+
+    func testPeerConnectionRestartICERegeneratesLocalCredentialsAndClearsRemoteState() throws {
+        let initialCredentials = ICECredentials(
+            usernameFragment: "initial-local",
+            password: "initial-password"
+        )
+        let coordinator = PeerConnectionCoordinator(configuration: .init(
+            role: .publisher,
+            iceCredentials: initialCredentials
+        ))
+        let iceServers = [
+            ICEServer(
+                urls: ["turn:turn.example.test:3478?transport=udp"],
+                username: "user",
+                credential: "pass"
+            ),
+        ]
+        let answer = """
+        v=0
+        o=- 1 1 IN IP4 127.0.0.1
+        s=-
+        t=0 0
+        a=ice-ufrag:remote-ufrag
+        a=ice-pwd:remote-password
+        a=fingerprint:sha-256 00:11:22
+        a=setup:active
+        m=audio 9 UDP/TLS/RTP/SAVPF 111
+        a=mid:0
+        a=rtcp-mux
+        a=rtpmap:111 opus/48000/2
+        """
+
+        coordinator.updateICEServers(iceServers)
+        try coordinator.applyPublisherAnswer(type: "answer", sdp: answer, id: 10)
+        try coordinator.addRemoteICECandidate(
+            candidateInitJSON: #"{"candidate":"candidate:remote 1 UDP 1694498815 203.0.113.9 6000 typ srflx","sdpMid":"0","sdpMLineIndex":0}"#,
+            isFinal: true
+        )
+
+        coordinator.restartICE()
+
+        XCTAssertEqual(coordinator.state, .new)
+        XCTAssertEqual(coordinator.configuration.iceServers, iceServers)
+        XCTAssertNotEqual(coordinator.configuration.iceCredentials, initialCredentials)
+        XCTAssertNil(coordinator.remoteAnswer)
+        XCTAssertNil(coordinator.remoteICECredentials)
+        XCTAssertNil(coordinator.remoteDTLSFingerprint)
+        XCTAssertNil(coordinator.remoteDTLSSetupRole)
+        XCTAssertFalse(coordinator.isRemoteICEGatheringComplete)
+        XCTAssertTrue(coordinator.remoteICECandidates.isEmpty)
+    }
+
     func testPeerConnectionBuildsChecklistFromParsedRemoteICECandidates() throws {
         let coordinator = PeerConnectionCoordinator(configuration: .init(role: .subscriber))
         try coordinator.addRemoteICECandidate(
@@ -250,6 +372,129 @@ final class WebRTCMediaProfileTests: XCTestCase {
         XCTAssertEqual(handshaker.capturedConfiguration?.remoteFingerprint, fingerprint)
         XCTAssertEqual(datagramFactory.capturedPair?.remote.foundation, "remote")
         XCTAssertEqual(sentDatagrams.count, 1)
+    }
+
+    func testPeerConnectionRunsICEAndStartsSecureMediaTransport() async throws {
+        let fingerprint = DTLSSignature(hashFunction: "sha-256", value: "00:11:22")
+        let coordinator = PeerConnectionCoordinator(
+            configuration: .init(
+                role: .publisher,
+                iceCredentials: ICECredentials(usernameFragment: "local-ufrag", password: "local-password")
+            )
+        )
+        let answer = """
+        v=0
+        o=- 1 1 IN IP4 127.0.0.1
+        s=-
+        t=0 0
+        a=ice-ufrag:remote-ufrag
+        a=ice-pwd:remote-password
+        a=fingerprint:sha-256 00:11:22
+        a=setup:active
+        m=video 9 UDP/TLS/RTP/SAVPF 102
+        a=mid:0
+        a=rtcp-mux
+        a=rtpmap:102 H264/90000
+        """
+        let datagrams = WebRTCMediaProfileMockDatagramTransport()
+        let datagramFactory = WebRTCMediaProfileDatagramTransportFactory(transport: datagrams)
+        let handshaker = WebRTCMediaProfileDTLSHandshaker(
+            result: try DTLSSRTPHandshakeResult(
+                role: .server,
+                exportedKeyingMaterial: Data(
+                    (0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init)
+                ),
+                remoteFingerprint: fingerprint
+            )
+        )
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: datagramFactory,
+            handshaker: handshaker
+        )
+        let checker = CapturingICEConnectivityChecker()
+
+        try coordinator.applyPublisherAnswer(type: "answer", sdp: answer, id: 10)
+        try coordinator.addRemoteICECandidate(
+            candidateInitJSON: #"{"candidate":"candidate:remote 1 UDP 1694498815 203.0.113.10 6000 typ srflx","sdpMid":"0","sdpMLineIndex":0}"#,
+            isFinal: false
+        )
+        let result = try await coordinator.startSecureMediaTransport(
+            localCandidates: [candidatePair(state: .succeeded, nominated: true).local],
+            iceRole: .controlling,
+            tieBreaker: 99,
+            checker: checker,
+            binder: binder
+        )
+        try await result.transport.sendRTP(
+            RTPPacket(
+                marker: true,
+                payloadType: 102,
+                sequenceNumber: 8,
+                timestamp: 90_000,
+                ssrc: 0x1122_3344,
+                payload: Data([0xCC])
+            )
+        )
+
+        let sentDatagrams = await datagrams.sentDatagramsSnapshot()
+        XCTAssertEqual(result.iceSummary.state, .connected)
+        XCTAssertEqual(result.iceSummary.checkedPairCount, 1)
+        XCTAssertEqual(result.selectedCandidatePair.remote.foundation, "remote")
+        XCTAssertEqual(checker.capturedConfiguration?.localCredentials.usernameFragment, "local-ufrag")
+        XCTAssertEqual(checker.capturedConfiguration?.remoteCredentials.usernameFragment, "remote-ufrag")
+        XCTAssertEqual(handshaker.capturedConfiguration?.remoteFingerprint, fingerprint)
+        XCTAssertEqual(datagramFactory.capturedPair?.remote.foundation, "remote")
+        XCTAssertEqual(sentDatagrams.count, 1)
+    }
+
+    func testPeerConnectionStartSecureMediaTransportRequiresSelectedICEPair() async throws {
+        let fingerprint = DTLSSignature(hashFunction: "sha-256", value: "00:11:22")
+        let coordinator = PeerConnectionCoordinator(configuration: .init(role: .publisher))
+        let answer = """
+        v=0
+        o=- 1 1 IN IP4 127.0.0.1
+        s=-
+        t=0 0
+        a=ice-ufrag:remote-ufrag
+        a=ice-pwd:remote-password
+        a=fingerprint:sha-256 00:11:22
+        a=setup:active
+        m=video 9 UDP/TLS/RTP/SAVPF 102
+        a=mid:0
+        a=rtcp-mux
+        a=rtpmap:102 H264/90000
+        """
+        let datagramFactory = WebRTCMediaProfileDatagramTransportFactory(
+            transport: WebRTCMediaProfileMockDatagramTransport()
+        )
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: datagramFactory,
+            handshaker: WebRTCMediaProfileDTLSHandshaker(
+                result: try DTLSSRTPHandshakeResult(
+                    role: .server,
+                    exportedKeyingMaterial: Data(
+                        (0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init)
+                    ),
+                    remoteFingerprint: fingerprint
+                )
+            )
+        )
+
+        try coordinator.applyPublisherAnswer(type: "answer", sdp: answer, id: 10)
+
+        do {
+            _ = try await coordinator.startSecureMediaTransport(
+                localCandidates: [candidatePair(state: .succeeded, nominated: true).local],
+                iceRole: .controlling,
+                tieBreaker: 99,
+                checker: CapturingICEConnectivityChecker(),
+                binder: binder
+            )
+            XCTFail("Expected selected ICE candidate pair requirement.")
+        } catch {
+            XCTAssertEqual(error as? PeerConnectionNegotiationError, .missingSelectedICECandidatePair)
+        }
+        XCTAssertNil(datagramFactory.capturedPair)
     }
 
     func testPeerConnectionRequiresRemoteDTLSFingerprintForHandshakeConfiguration() throws {

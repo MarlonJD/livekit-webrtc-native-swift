@@ -6,6 +6,7 @@ package enum SecureMediaTransportError: Error, Equatable, Sendable {
     case srtcpIndexExhausted
     case candidatePairNotSucceeded
     case candidatePairNotNominated
+    case missingLocalCandidateSocket(String)
     case unsupportedCandidatePairTransport
     case unsupportedCandidatePairComponent
     case unsupportedCandidateAddress(String)
@@ -16,8 +17,11 @@ package enum SecureMediaTransportError: Error, Equatable, Sendable {
     case socketConnectFailed(Int32)
     case socketSendFailed(Int32)
     case socketReceiveFailed(Int32)
+    case transportClosed
     case missingRemoteFingerprint(DTLSSignature)
     case remoteFingerprintMismatch(expected: DTLSSignature, actual: DTLSSignature)
+    case handshakeRoleMismatch(expected: DTLSSRTPRole, actual: DTLSSRTPRole)
+    case unofferedHandshakeProtectionProfile(SRTPProtectionProfile)
 }
 
 package enum SecureMediaTransportPacket: Equatable, Sendable {
@@ -39,6 +43,447 @@ package protocol DTLSSRTPHandshaking: Sendable {
         configuration: DTLSSRTPHandshakeConfiguration,
         transport: any MediaDatagramTransport
     ) async throws -> DTLSSRTPHandshakeResult
+}
+
+package struct LocalICEUDPSocketCandidate: Sendable {
+    package var candidate: ICECandidate
+    package var socket: LocalICEUDPSocket
+
+    package init(candidate: ICECandidate, socket: LocalICEUDPSocket) {
+        self.candidate = candidate
+        self.socket = socket
+    }
+
+    package static func gatherHostCandidates(
+        bindAddress: String = "0.0.0.0",
+        includeLoopback: Bool = false,
+        receiveTimeoutMilliseconds: Int = 1_000
+    ) throws -> [LocalICEUDPSocketCandidate] {
+        try hostCandidates(
+            from: ICEHostCandidateGatherer.localInterfaceAddresses(includeLoopback: includeLoopback),
+            bindAddress: bindAddress,
+            receiveTimeoutMilliseconds: receiveTimeoutMilliseconds
+        )
+    }
+
+    package static func hostCandidates(
+        from addresses: [ICEInterfaceAddress],
+        bindAddress: String = "0.0.0.0",
+        receiveTimeoutMilliseconds: Int = 1_000
+    ) throws -> [LocalICEUDPSocketCandidate] {
+        guard !addresses.isEmpty else {
+            return []
+        }
+
+        let socket = try LocalICEUDPSocket(
+            bindAddress: bindAddress,
+            port: 0,
+            receiveTimeoutMilliseconds: receiveTimeoutMilliseconds
+        )
+        return ICEHostCandidateGatherer.candidates(
+            from: addresses,
+            port: socket.localPort
+        ).map { candidate in
+            LocalICEUDPSocketCandidate(candidate: candidate, socket: socket)
+        }
+    }
+
+    package func serverReflexiveCandidates(
+        iceServers: [ICEServer],
+        retryPolicy: STUNBindingRetryPolicy = .once
+    ) -> [LocalICEUDPSocketCandidate] {
+        guard candidate.type == .host else {
+            return []
+        }
+
+        let gatherer = STUNServerReflexiveCandidateGatherer { endpoint in
+            LocalICEUDPSocketSTUNServerTransport(socket: socket, endpoint: endpoint)
+        }
+
+        return gatherer.gatherCandidates(
+            for: candidate,
+            iceServers: iceServers,
+            retryPolicy: retryPolicy
+        ).map { reflexiveCandidate in
+            LocalICEUDPSocketCandidate(candidate: reflexiveCandidate, socket: socket)
+        }
+    }
+}
+
+package final class LocalICEUDPSocketCandidateStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var candidatesByFoundation: [String: LocalICEUDPSocketCandidate]
+
+    package init(candidates: [LocalICEUDPSocketCandidate]) {
+        self.candidatesByFoundation = Self.makeCandidateMap(candidates)
+    }
+
+    package var candidates: [LocalICEUDPSocketCandidate] {
+        lock.withLock {
+            candidatesByFoundation.values.sorted { lhs, rhs in
+                lhs.candidate.foundation < rhs.candidate.foundation
+            }
+        }
+    }
+
+    package func add(_ candidates: [LocalICEUDPSocketCandidate]) {
+        lock.withLock {
+            for candidate in candidates {
+                candidatesByFoundation[candidate.candidate.foundation] = candidate
+            }
+        }
+    }
+
+    package func replace(with candidates: [LocalICEUDPSocketCandidate]) {
+        lock.withLock {
+            candidatesByFoundation = Self.makeCandidateMap(candidates)
+        }
+    }
+
+    package func socket(forFoundation foundation: String) -> LocalICEUDPSocket? {
+        lock.withLock {
+            candidatesByFoundation[foundation]?.socket
+        }
+    }
+
+    private static func makeCandidateMap(
+        _ candidates: [LocalICEUDPSocketCandidate]
+    ) -> [String: LocalICEUDPSocketCandidate] {
+        var candidatesByFoundation: [String: LocalICEUDPSocketCandidate] = [:]
+        for candidate in candidates {
+            candidatesByFoundation[candidate.candidate.foundation] = candidate
+        }
+        return candidatesByFoundation
+    }
+}
+
+package final class LocalICEUDPSocket: @unchecked Sendable {
+    package let bindAddress: String
+    package let localPort: UInt16
+
+    private let socketDescriptor: Int32
+    private let lock: NSLock
+
+    package init(
+        bindAddress: String = "0.0.0.0",
+        port: UInt16 = 0,
+        receiveTimeoutMilliseconds: Int = 1_000
+    ) throws {
+        let descriptor = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        guard descriptor >= 0 else {
+            throw SecureMediaTransportError.socketCreationFailed(errno)
+        }
+
+        do {
+            var reuseAddress: Int32 = 1
+            guard setsockopt(
+                descriptor,
+                SOL_SOCKET,
+                SO_REUSEADDR,
+                &reuseAddress,
+                socklen_t(MemoryLayout<Int32>.size)
+            ) == 0 else {
+                throw SecureMediaTransportError.socketOptionFailed(errno)
+            }
+
+            var timeout = timeval(
+                tv_sec: receiveTimeoutMilliseconds / 1_000,
+                tv_usec: Int32((receiveTimeoutMilliseconds % 1_000) * 1_000)
+            )
+            guard setsockopt(
+                descriptor,
+                SOL_SOCKET,
+                SO_RCVTIMEO,
+                &timeout,
+                socklen_t(MemoryLayout<timeval>.size)
+            ) == 0 else {
+                throw SecureMediaTransportError.socketOptionFailed(errno)
+            }
+
+            var localAddress = try makeIPv4SocketAddress(address: bindAddress, port: port)
+            let bindResult = withUnsafePointer(to: &localAddress) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                    Darwin.bind(
+                        descriptor,
+                        socketAddress,
+                        socklen_t(MemoryLayout<sockaddr_in>.size)
+                    )
+                }
+            }
+            guard bindResult == 0 else {
+                throw SecureMediaTransportError.socketBindFailed(errno)
+            }
+
+            self.bindAddress = bindAddress
+            self.localPort = try Self.boundPort(socketDescriptor: descriptor)
+            self.socketDescriptor = descriptor
+            self.lock = NSLock()
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+    }
+
+    deinit {
+        Darwin.close(socketDescriptor)
+    }
+
+    package func hostCandidate(
+        foundation: String,
+        advertisedAddress: String,
+        localPreference: UInt16 = UInt16.max
+    ) -> ICECandidate {
+        ICECandidate(
+            foundation: foundation,
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(
+                type: .host,
+                localPreference: localPreference
+            ).value,
+            address: advertisedAddress,
+            port: localPort,
+            type: .host
+        )
+    }
+
+    fileprivate func send(_ datagram: Data, to remoteCandidate: ICECandidate) throws {
+        guard datagram.count <= UInt16.max else {
+            throw SecureMediaTransportError.datagramTooLarge(datagram.count)
+        }
+
+        try validateCandidateEndpoint(remoteCandidate)
+        var remoteAddress = try makeIPv4SocketAddress(
+            address: remoteCandidate.address,
+            port: remoteCandidate.port
+        )
+        try send(datagram, to: &remoteAddress)
+    }
+
+    fileprivate func send(_ datagram: Data, toHost host: String, port: UInt16) throws {
+        guard datagram.count <= UInt16.max else {
+            throw SecureMediaTransportError.datagramTooLarge(datagram.count)
+        }
+
+        var hints = addrinfo(
+            ai_flags: AI_NUMERICSERV,
+            ai_family: AF_INET,
+            ai_socktype: SOCK_DGRAM,
+            ai_protocol: IPPROTO_UDP,
+            ai_addrlen: 0,
+            ai_canonname: nil,
+            ai_addr: nil,
+            ai_next: nil
+        )
+        var resolvedAddresses: UnsafeMutablePointer<addrinfo>?
+        let resolveResult = getaddrinfo(host, String(port), &hints, &resolvedAddresses)
+        guard resolveResult == 0, let address = resolvedAddresses else {
+            throw SecureMediaTransportError.unsupportedCandidateAddress(host)
+        }
+        defer { freeaddrinfo(resolvedAddresses) }
+
+        try send(
+            datagram,
+            to: address.pointee.ai_addr,
+            addressLength: address.pointee.ai_addrlen
+        )
+    }
+
+    private func send(_ datagram: Data, to remoteAddress: inout sockaddr_in) throws {
+        try lock.withLock {
+            let sentCount = datagram.withUnsafeBytes { buffer in
+                withUnsafePointer(to: &remoteAddress) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                        Darwin.sendto(
+                            socketDescriptor,
+                            buffer.baseAddress,
+                            datagram.count,
+                            0,
+                            socketAddress,
+                            socklen_t(MemoryLayout<sockaddr_in>.size)
+                        )
+                    }
+                }
+            }
+            guard sentCount == datagram.count else {
+                throw SecureMediaTransportError.socketSendFailed(errno)
+            }
+        }
+    }
+
+    private func send(
+        _ datagram: Data,
+        to remoteAddress: UnsafePointer<sockaddr>,
+        addressLength: socklen_t
+    ) throws {
+        try lock.withLock {
+            let sentCount = datagram.withUnsafeBytes { buffer in
+                Darwin.sendto(
+                    socketDescriptor,
+                    buffer.baseAddress,
+                    datagram.count,
+                    0,
+                    remoteAddress,
+                    addressLength
+                )
+            }
+            guard sentCount == datagram.count else {
+                throw SecureMediaTransportError.socketSendFailed(errno)
+            }
+        }
+    }
+
+    fileprivate func receive(maxByteCount: Int = Int(UInt16.max)) throws -> Data {
+        var buffer = [UInt8](repeating: 0, count: maxByteCount)
+
+        return try lock.withLock {
+            let receivedCount = Darwin.recv(socketDescriptor, &buffer, buffer.count, 0)
+            guard receivedCount > 0 else {
+                throw SecureMediaTransportError.socketReceiveFailed(errno)
+            }
+
+            return Data(buffer.prefix(receivedCount))
+        }
+    }
+
+    private static func boundPort(socketDescriptor: Int32) throws -> UInt16 {
+        var address = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let result = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.getsockname(socketDescriptor, socketAddress, &length)
+            }
+        }
+
+        guard result == 0 else {
+            throw SecureMediaTransportError.socketBindFailed(errno)
+        }
+
+        return UInt16(bigEndian: address.sin_port)
+    }
+}
+
+package struct LocalICEUDPSocketConnectivityChecker: ICEConnectivityChecking {
+    private var socketForFoundation: @Sendable (String) -> LocalICEUDPSocket?
+
+    package init(candidates: [LocalICEUDPSocketCandidate]) {
+        var mutableSocketsByFoundation: [String: LocalICEUDPSocket] = [:]
+        for candidate in candidates {
+            mutableSocketsByFoundation[candidate.candidate.foundation] = candidate.socket
+        }
+        let socketsByFoundation = mutableSocketsByFoundation
+        self.socketForFoundation = { foundation in
+            socketsByFoundation[foundation]
+        }
+    }
+
+    package init(candidateStore: LocalICEUDPSocketCandidateStore) {
+        self.socketForFoundation = { foundation in
+            candidateStore.socket(forFoundation: foundation)
+        }
+    }
+
+    package func checkCandidatePair(
+        _ pair: ICECandidatePair,
+        configuration: ICEAgentConfiguration,
+        nominate: Bool
+    ) throws -> ICEConnectivityCheckResult {
+        try validateCandidateEndpoint(pair.local)
+        try validateCandidateEndpoint(pair.remote)
+        guard let socket = socketForFoundation(pair.local.foundation) else {
+            throw SecureMediaTransportError.missingLocalCandidateSocket(pair.local.foundation)
+        }
+
+        return try STUNBindingClient(
+            transport: LocalICEUDPSocketSTUNTransport(
+                socket: socket,
+                remoteCandidate: pair.remote
+            )
+        ).requestServerReflexiveAddress(
+            localCredentials: configuration.localCredentials,
+            remoteCredentials: configuration.remoteCredentials,
+            priority: pair.local.priority,
+            role: configuration.role,
+            tieBreaker: configuration.tieBreaker,
+            useCandidate: nominate,
+            requireResponseMessageIntegrity: configuration.requireResponseMessageIntegrity,
+            requireResponseFingerprint: configuration.requireResponseFingerprint,
+            retryPolicy: configuration.retryPolicy
+        )
+    }
+}
+
+package struct LocalICEUDPSocketMediaDatagramTransportFactory: MediaDatagramTransportFactory {
+    private var socketForFoundation: @Sendable (String) -> LocalICEUDPSocket?
+
+    package init(candidates: [LocalICEUDPSocketCandidate]) {
+        var mutableSocketsByFoundation: [String: LocalICEUDPSocket] = [:]
+        for candidate in candidates {
+            mutableSocketsByFoundation[candidate.candidate.foundation] = candidate.socket
+        }
+        let socketsByFoundation = mutableSocketsByFoundation
+        self.socketForFoundation = { foundation in
+            socketsByFoundation[foundation]
+        }
+    }
+
+    package init(candidateStore: LocalICEUDPSocketCandidateStore) {
+        self.socketForFoundation = { foundation in
+            candidateStore.socket(forFoundation: foundation)
+        }
+    }
+
+    package func makeTransport(selectedCandidatePair: ICECandidatePair) throws -> any MediaDatagramTransport {
+        try UDPMediaDatagramTransport.validateCandidatePair(selectedCandidatePair)
+        guard let socket = socketForFoundation(selectedCandidatePair.local.foundation) else {
+            throw SecureMediaTransportError.missingLocalCandidateSocket(
+                selectedCandidatePair.local.foundation
+            )
+        }
+
+        return LocalICEUDPSocketMediaDatagramTransport(
+            socket: socket,
+            remoteCandidate: selectedCandidatePair.remote
+        )
+    }
+}
+
+package struct LocalICEUDPSocketMediaDatagramTransport: MediaDatagramTransport {
+    package var socket: LocalICEUDPSocket
+    package var remoteCandidate: ICECandidate
+
+    package init(socket: LocalICEUDPSocket, remoteCandidate: ICECandidate) {
+        self.socket = socket
+        self.remoteCandidate = remoteCandidate
+    }
+
+    package func send(_ datagram: Data) async throws {
+        try socket.send(datagram, to: remoteCandidate)
+    }
+
+    package func receive() async throws -> Data {
+        try socket.receive()
+    }
+}
+
+private struct LocalICEUDPSocketSTUNTransport: STUNDatagramTransport {
+    var socket: LocalICEUDPSocket
+    var remoteCandidate: ICECandidate
+
+    func send(_ data: Data) throws -> Data {
+        try socket.send(data, to: remoteCandidate)
+        return try socket.receive(maxByteCount: 1_500)
+    }
+}
+
+private struct LocalICEUDPSocketSTUNServerTransport: STUNDatagramTransport {
+    var socket: LocalICEUDPSocket
+    var endpoint: STUNServerEndpoint
+
+    func send(_ data: Data) throws -> Data {
+        try socket.send(data, toHost: endpoint.host, port: endpoint.port)
+        return try socket.receive(maxByteCount: 1_500)
+    }
 }
 
 package struct UDPMediaDatagramTransportFactory: MediaDatagramTransportFactory {
@@ -122,7 +567,7 @@ package final class UDPMediaDatagramTransport: MediaDatagramTransport, @unchecke
                 throw SecureMediaTransportError.socketOptionFailed(errno)
             }
 
-            var localAddress = try Self.makeIPv4SocketAddress(
+            var localAddress = try makeIPv4SocketAddress(
                 address: localCandidate.address,
                 port: localCandidate.port
             )
@@ -139,7 +584,7 @@ package final class UDPMediaDatagramTransport: MediaDatagramTransport, @unchecke
                 throw SecureMediaTransportError.socketBindFailed(errno)
             }
 
-            var remoteAddress = try Self.makeIPv4SocketAddress(
+            var remoteAddress = try makeIPv4SocketAddress(
                 address: remoteCandidate.address,
                 port: remoteCandidate.port
             )
@@ -217,20 +662,6 @@ package final class UDPMediaDatagramTransport: MediaDatagramTransport, @unchecke
         }
     }
 
-    private static func makeIPv4SocketAddress(address: String, port: UInt16) throws -> sockaddr_in {
-        var ipv4Address = in_addr()
-        guard inet_pton(AF_INET, address, &ipv4Address) == 1 else {
-            throw SecureMediaTransportError.unsupportedCandidateAddress(address)
-        }
-
-        return sockaddr_in(
-            sin_len: UInt8(MemoryLayout<sockaddr_in>.size),
-            sin_family: sa_family_t(AF_INET),
-            sin_port: port.bigEndian,
-            sin_addr: ipv4Address,
-            sin_zero: (0, 0, 0, 0, 0, 0, 0, 0)
-        )
-    }
 }
 
 package actor DTLSSRTPMediaTransport {
@@ -239,6 +670,7 @@ package actor DTLSSRTPMediaTransport {
     private var outboundRTPSequenceExtenders: [UInt32: RTPSequenceNumberExtender]
     private var inboundRTPSequenceExtenders: [UInt32: RTPSequenceNumberExtender]
     private var outboundSRTCPIndex: UInt32
+    private var isClosed: Bool
 
     package init(
         packetProtectionContext: DTLSSRTPPacketProtectionContext,
@@ -249,6 +681,7 @@ package actor DTLSSRTPMediaTransport {
         self.outboundRTPSequenceExtenders = [:]
         self.inboundRTPSequenceExtenders = [:]
         self.outboundSRTCPIndex = 0
+        self.isClosed = false
     }
 
     package init(
@@ -269,6 +702,8 @@ package actor DTLSSRTPMediaTransport {
     }
 
     package func sendRTP(_ packet: RTPPacket) async throws {
+        try ensureOpen()
+
         var sequenceExtender = outboundRTPSequenceExtenders[packet.ssrc] ?? RTPSequenceNumberExtender()
         let extendedSequenceNumber = sequenceExtender.extend(packet.sequenceNumber)
         let rolloverCounter = UInt32(extendedSequenceNumber >> 16)
@@ -282,6 +717,8 @@ package actor DTLSSRTPMediaTransport {
     }
 
     package func sendRTCP(_ packet: RTCPPacket) async throws {
+        try ensureOpen()
+
         guard outboundSRTCPIndex < SRTCPIndex.maxValue else {
             throw SecureMediaTransportError.srtcpIndexExhausted
         }
@@ -299,12 +736,24 @@ package actor DTLSSRTPMediaTransport {
     }
 
     package func receive() async throws -> SecureMediaTransportPacket {
+        try ensureOpen()
+
         let datagram = try await datagramTransport.receive()
         switch try classify(datagram) {
         case .rtp:
             return try .rtp(receiveRTP(datagram))
         case .rtcp:
             return try .rtcp(packetProtectionContext.unprotectRTCP(encoded: datagram).rtcpPacket)
+        }
+    }
+
+    package func close() {
+        isClosed = true
+    }
+
+    private func ensureOpen() throws {
+        guard !isClosed else {
+            throw SecureMediaTransportError.transportClosed
         }
     }
 
@@ -439,6 +888,7 @@ package struct DTLSSRTPMediaSessionBinder: Sendable {
             configuration: handshakeConfiguration,
             transport: datagramTransport
         )
+        try validateHandshakeResult(handshakeResult, matches: handshakeConfiguration)
 
         return try DTLSSRTPMediaSessionFactory(
             datagramTransportFactory: datagramTransportFactory
@@ -449,9 +899,51 @@ package struct DTLSSRTPMediaSessionBinder: Sendable {
             datagramTransport: datagramTransport
         )
     }
+
+    private func validateHandshakeResult(
+        _ result: DTLSSRTPHandshakeResult,
+        matches configuration: DTLSSRTPHandshakeConfiguration
+    ) throws {
+        guard result.role == configuration.role else {
+            throw SecureMediaTransportError.handshakeRoleMismatch(
+                expected: configuration.role,
+                actual: result.role
+            )
+        }
+
+        guard configuration.useSRTExtension.protectionProfiles.contains(result.protectionProfile) else {
+            throw SecureMediaTransportError.unofferedHandshakeProtectionProfile(
+                result.protectionProfile
+            )
+        }
+    }
 }
 
 private enum MediaDatagramKind {
     case rtp
     case rtcp
+}
+
+private func validateCandidateEndpoint(_ candidate: ICECandidate) throws {
+    guard candidate.componentID == .rtp else {
+        throw SecureMediaTransportError.unsupportedCandidatePairComponent
+    }
+    guard candidate.transport == .udp else {
+        throw SecureMediaTransportError.unsupportedCandidatePairTransport
+    }
+}
+
+private func makeIPv4SocketAddress(address: String, port: UInt16) throws -> sockaddr_in {
+    var ipv4Address = in_addr()
+    guard inet_pton(AF_INET, address, &ipv4Address) == 1 else {
+        throw SecureMediaTransportError.unsupportedCandidateAddress(address)
+    }
+
+    return sockaddr_in(
+        sin_len: UInt8(MemoryLayout<sockaddr_in>.size),
+        sin_family: sa_family_t(AF_INET),
+        sin_port: port.bigEndian,
+        sin_addr: ipv4Address,
+        sin_zero: (0, 0, 0, 0, 0, 0, 0, 0)
+    )
 }

@@ -7,6 +7,7 @@ actor SignalRequestTracker {
     private var trackPublishedResponses: [String: Livekit_TrackPublishedResponse] = [:]
     private var publishDataTrackResponses: [UInt32: Livekit_PublishDataTrackResponse] = [:]
     private var unpublishDataTrackResponses: [UInt32: Livekit_UnpublishDataTrackResponse] = [:]
+    private var embeddedRequestResponses: [Livekit_RequestResponse] = []
 
     func nextID() -> UInt32 {
         let requestID = nextRequestID
@@ -19,6 +20,9 @@ actor SignalRequestTracker {
 
     func fulfill(_ response: Livekit_RequestResponse) {
         responses[response.requestID] = response
+        if response.request != nil {
+            embeddedRequestResponses.append(response)
+        }
     }
 
     func fulfill(_ response: Livekit_TrackPublishedResponse) {
@@ -54,9 +58,31 @@ actor SignalRequestTracker {
         throw LiveKitNativeError.requestTimedOut(action: action)
     }
 
+    func waitForResponse(
+        matching request: Livekit_RequestResponse.OneOf_Request,
+        action: String,
+        timeoutNanoseconds: UInt64 = 10_000_000_000
+    ) async throws -> Livekit_RequestResponse {
+        let pollInterval: UInt64 = 10_000_000
+        var waited: UInt64 = 0
+
+        while waited < timeoutNanoseconds {
+            if let index = embeddedRequestResponses.firstIndex(where: { $0.request == request }) {
+                return embeddedRequestResponses.remove(at: index)
+            }
+
+            try await Task.sleep(nanoseconds: pollInterval)
+            waited += pollInterval
+        }
+
+        embeddedRequestResponses.removeAll { $0.request == request }
+        throw LiveKitNativeError.requestTimedOut(action: action)
+    }
+
     func waitForTrackPublished(
         cid: String,
         action: String,
+        request: Livekit_RequestResponse.OneOf_Request? = nil,
         timeoutNanoseconds: UInt64 = 10_000_000_000
     ) async throws -> Livekit_TrackPublishedResponse {
         let pollInterval: UInt64 = 10_000_000
@@ -65,6 +91,10 @@ actor SignalRequestTracker {
         while waited < timeoutNanoseconds {
             if let response = trackPublishedResponses.removeValue(forKey: cid) {
                 return response
+            }
+
+            if let request {
+                try removeMatchingRequestResponseFailure(for: request, action: action)
             }
 
             try await Task.sleep(nanoseconds: pollInterval)
@@ -78,6 +108,7 @@ actor SignalRequestTracker {
     func waitForPublishDataTrack(
         publisherHandle: UInt32,
         action: String,
+        request: Livekit_RequestResponse.OneOf_Request? = nil,
         timeoutNanoseconds: UInt64 = 10_000_000_000
     ) async throws -> Livekit_PublishDataTrackResponse {
         let pollInterval: UInt64 = 10_000_000
@@ -86,6 +117,10 @@ actor SignalRequestTracker {
         while waited < timeoutNanoseconds {
             if let response = publishDataTrackResponses.removeValue(forKey: publisherHandle) {
                 return response
+            }
+
+            if let request {
+                try removeMatchingRequestResponseFailure(for: request, action: action)
             }
 
             try await Task.sleep(nanoseconds: pollInterval)
@@ -99,6 +134,7 @@ actor SignalRequestTracker {
     func waitForUnpublishDataTrack(
         publisherHandle: UInt32,
         action: String,
+        request: Livekit_RequestResponse.OneOf_Request? = nil,
         timeoutNanoseconds: UInt64 = 10_000_000_000
     ) async throws -> Livekit_UnpublishDataTrackResponse {
         let pollInterval: UInt64 = 10_000_000
@@ -109,6 +145,10 @@ actor SignalRequestTracker {
                 return response
             }
 
+            if let request {
+                try removeMatchingRequestResponseFailure(for: request, action: action)
+            }
+
             try await Task.sleep(nanoseconds: pollInterval)
             waited += pollInterval
         }
@@ -117,10 +157,34 @@ actor SignalRequestTracker {
         throw LiveKitNativeError.requestTimedOut(action: action)
     }
 
+    private func removeMatchingRequestResponseFailure(
+        for request: Livekit_RequestResponse.OneOf_Request,
+        action: String
+    ) throws {
+        guard let index = embeddedRequestResponses.firstIndex(where: { $0.request == request }) else {
+            return
+        }
+
+        let response = embeddedRequestResponses.remove(at: index)
+        switch response.reason {
+        case .ok, .queued:
+            return
+        case .notAllowed:
+            throw LiveKitNativeError.permissionDenied(action: action)
+        default:
+            throw LiveKitNativeError.requestFailed(
+                action: action,
+                reason: String(describing: response.reason),
+                message: response.message
+            )
+        }
+    }
+
     func clear() {
         responses.removeAll()
         trackPublishedResponses.removeAll()
         publishDataTrackResponses.removeAll()
         unpublishDataTrackResponses.removeAll()
+        embeddedRequestResponses.removeAll()
     }
 }

@@ -8,6 +8,108 @@ Swift. The media engine is an internal `LiveKitNativeWebRTC` target, designed
 around Apple-native media frameworks and a small LiveKit-focused WebRTC
 profile.
 
+## Why We Needed This Project
+
+iOS and macOS applications that use LiveKit usually inherit a large WebRTC
+stack through mostly opaque binary dependencies maintained outside the Apple
+platform toolchain. This project exists to split LiveKit client behavior into
+smaller Swift-native pieces that can be audited, tested, and reasoned about
+directly.
+
+The goal is not to build a general-purpose browser WebRTC engine. The goal is
+to implement the narrow LiveKit-focused profile needed for signaling,
+publishing and subscribing to media, data channels, and reconnect behavior on
+top of Apple-native frameworks. That keeps package shape, release size,
+security surface, debugging experience, and production-readiness boundaries
+under explicit project control.
+
+This approach is valuable for applications that need a SwiftPM-distributed,
+LiveKit-focused client SDK without Rust/UniFFI, a heavyweight WebRTC
+xcframework, or broad media dependencies that are difficult to inspect and
+ship.
+
+## Performance Expectations
+
+This project's core promise is not to be faster than official WebRTC stacks in
+every situation. Its purpose is to provide a smaller, inspectable, LiveKit
+focused client surface. Low-level pieces such as protobuf, SDP, STUN, RTP,
+SRTP, and data-channel framing can run with very low latency in
+microbenchmarks, but those numbers alone do not define real-time media quality.
+
+Production behavior is shaped more by video encode/decode cost, audio capture
+and playout, packet loss, jitter, TURN usage, reconnect handling, battery
+usage, thermal behavior, and multi-participant room load. Performance is
+therefore not irrelevant; it is just not the only decision point. A real
+evaluation should measure join latency, CPU, memory, FPS, audio drops, packet
+loss recovery, reconnect time, battery usage, and thermal behavior on real
+devices.
+
+Performance issues may be manageable in small, controlled LiveKit scenarios.
+Applications with larger rooms, weak network conditions, long-running mobile
+sessions, or strict media-quality expectations should benchmark this package
+side by side with the official SDK and validate it with end-to-end tests before
+making a production decision.
+
+## Codec Acceleration and Swift Scope
+
+The H.264 encoder and decoder are intentionally not expected to be pure Swift
+implementations. Video codec work is one of the few places where "all Swift"
+would be the wrong production tradeoff: a Swift H.264 codec would be large,
+hard to validate, difficult to keep power-efficient, and unlikely to match the
+hardware acceleration, battery behavior, and thermal characteristics provided
+by Apple platforms.
+
+The intended production model is to keep LiveKit client logic, signaling,
+state, RTP/SRTP framing, SDP, ICE/STUN, and media pipeline orchestration in
+Swift, while using Apple-native system frameworks for heavy media primitives.
+For H.264, that means real VideoToolbox-backed encode and decode paths through
+`VTCompressionSession` and `VTDecompressionSession`, with hardware acceleration
+used when the platform supports it.
+
+Using VideoToolbox does not add a vendored WebRTC binary or a third-party codec
+library to the package. It links against Apple system frameworks that are
+already part of the target OS. This preserves the goal of a small,
+inspectable, Swift-native LiveKit client while avoiding an impractical and
+power-hungry pure Swift codec implementation.
+
+Production readiness must require the H.264 media path to use VideoToolbox for
+real frame encode/decode, verify whether the hardware path is active where the
+OS exposes that signal, and define explicit fallback behavior for devices or
+profiles where hardware acceleration is unavailable.
+
+H.265/HEVC is a reasonable future codec profile for Apple-focused deployments
+because Apple platforms expose HEVC through VideoToolbox and can benefit from
+its better compression efficiency. It is intentionally not part of the initial
+production-ready core because H.264 is the safer WebRTC compatibility baseline.
+Adding HEVC later should be treated as an optional negotiated profile with its
+own SDP/RTP handling, hardware/fallback policy, LiveKit compatibility testing,
+and cross-client support matrix.
+
+VP9 and AV1 are also future codec candidates, but they should be treated as
+advanced profiles rather than production-readiness requirements for v1. Their
+main value is SVC and better bandwidth adaptation in supported LiveKit/WebRTC
+environments. Before either codec is enabled, the project needs an explicit
+hardware/software dependency policy, SVC handling, battery and thermal
+measurements, and cross-client compatibility coverage.
+
+## Production Meeting Bar
+
+This package should not be considered competitive with `LiveKitWebRTC` for
+general production video meetings until the hardening bar covers the full call
+experience, not only the signaling and media packet paths.
+
+Production readiness must include meeting-grade audio capture and playout,
+echo cancellation, route changes, Bluetooth behavior, interruptions,
+background/foreground transitions, jitter buffering, packet-loss recovery,
+RTCP feedback, bandwidth estimation, congestion control, adaptive quality,
+bounded frame dropping, reconnect media recovery, TURN-only operation, and
+multi-participant behavior.
+
+Those requirements are intentionally production blockers. A release can only be
+called production-ready after automated LiveKit integration tests, weak-network
+tests, TURN-only tests, long-running soak tests, battery/thermal measurements,
+and real-device iOS validation pass.
+
 ## Status
 
 Detailed project status is tracked in [docs/STATUS.md](docs/STATUS.md).
@@ -55,7 +157,20 @@ with RTCP mux demux, RTP rollover tracking, and nominated ICE-pair guarded
 construction, exporter-backed secure media session construction, UDP media
 datagram socket transport with loopback coverage, handshaker-backed media
 session binder coverage, coordinator-level secure media transport startup from
-negotiated SDP and nominated ICE pairs, RTCP
+negotiated SDP and nominated ICE pairs, coordinator-run ICE checks that select
+a pair before secure transport binding, Room-level publisher/subscriber media
+startup triggering after negotiated SDP and final ICE trickle when a media
+binder is injected, local publisher/subscriber ICE candidate JSON encoding and
+trickle/final-trickle signaling, bound local ICE UDP sockets that can gather
+host candidates and reuse the candidate port for STUN checks and media
+datagrams, server-provided `JoinResponse` and `ReconnectResponse` ICE server
+configuration mapping onto subscriber and publisher peer connections, STUN UDP
+server-reflexive candidate discovery from supported `stun:` ICE server URLs
+for injected bound-socket startup, TURN endpoint parsing from `turn:`/`turns:`
+ICE server URLs with UDP/TCP/TLS intent and credentials retained for future
+relay allocation, TURN Allocate request primitives for requested transport,
+lifetime, realm, nonce, and relayed-address decoding, peer negotiation state
+reset across fresh join/reconnect/disconnect boundaries, RTCP
 sender/receiver report and PLI/NACK feedback wire-format groundwork, H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
 assembly, native camera track scaffolding, VideoToolbox H.264 encoder
@@ -80,12 +195,14 @@ channels, binary PPID envelopes, LiveKit `DataPacket` user-packet mapping,
 `publish(data:options:)` local publish planning, data-track publish/unpublish
 request/response signaling, data subscription update signaling, and
 `RoomEvent.dataReceived` mapping for decoded packets.
+Media section requirements and data-track subscriber handles are retained as
+latest-value Room state and emitted as typed room events.
 
 The active implementation focus is now `1.0.0` hardening: implementing the
 real DTLS handshake/exporter, wiring coordinator-backed secure media transport
-startup into the live Room runtime, reconnect, TURN, quality controls, real RTP
-sender media transport, DTLS-SCTP network transport, integration apps, and size
-gates.
+startup into the default live Room runtime, reconnect, TURN, quality controls,
+real RTP sender media transport, DTLS-SCTP network transport, integration apps,
+and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -96,28 +213,53 @@ LiveKit `UpdateParticipantMetadata` requests and map server
 remote participant state, sends a client-initiated `LeaveRequest`, and emits
 cleanup lifecycle events. Refreshed signal tokens are retained for subsequent
 resume reconnects. Basic signal resume/full-reconnect and
-`JoinResponse.alternative_url` retry are unit-tested, and room-connected
+`JoinResponse.alternative_url` retry are unit-tested. `JoinResponse` and
+`ReconnectResponse` ICE server lists are applied to both subscriber and
+publisher peer connection configurations, injected bound-socket media startup
+can use supported `stun:` UDP URLs to add server-reflexive local candidates
+while reusing the same local UDP socket, fresh joins/reconnect responses clear
+stale peer negotiation state and regenerate local ICE credentials before
+applying new signaling configuration, resume reconnects send LiveKit
+`SyncState` for current media subscription preferences, disabled subscribed
+tracks, local media/data publications, and the latest negotiated subscriber
+answer / publisher offer SDP state in unit tests, preserve publisher offer
+track state so later publishes after resume do not drop existing local media,
+and
+room-connected
 `publish(videoTrack:)` / `publish(audioTrack:)` calls send LiveKit
 `AddTrackRequest` messages and wait for matching `TrackPublishedResponse`
-acknowledgements before recording local publications.
+acknowledgements before recording local publications, while matching
+`RequestResponse` failures are mapped to typed SDK errors instead of timing out.
 `LocalParticipant.setTrackMuted(publication:muted:)` now sends LiveKit
-`MuteTrackRequest` messages for local publications. Room-connected local
+`MuteTrackRequest` messages for local publications and waits for matching
+`RequestResponse` acknowledgements before applying local mute state.
+Room-connected local
 track unpublish and camera/microphone disable flows also send a muted
-`MuteTrackRequest` before removing the local publication. Server-initiated
-mute messages update local/remote track publication state and emit
+`MuteTrackRequest` and wait for matching `RequestResponse` acknowledgements
+before removing the local publication, and multi-track unpublish sends a
+refreshed publisher offer for the remaining local media. Server-initiated
+`TrackUnpublishedResponse` messages for local media publications clear local
+publication and cached publisher offer reconnect state so resume reconnects and
+later publisher offers do not replay removed tracks. When the last local media
+track is unpublished, the injected publisher media transport is closed and its
+startup state is cleared so stale SRTP transports cannot keep sending.
+Server-initiated mute messages update local/remote track publication state and emit
 `RoomEvent.trackMuteChanged`. Room-level media subscription and subscribed
 track settings requests are available through `Room.updateSubscription` and
 `Room.updateTrackSettings`; publisher track subscription permissions are
 available through `LocalParticipant.setTrackSubscriptionPermissions`. Local
 publisher audio/video track update signaling is exposed through
-`LocalParticipant.updateAudioTrack` and `LocalParticipant.updateVideoTrack`.
+`LocalParticipant.updateAudioTrack` and `LocalParticipant.updateVideoTrack`,
+with matching `RequestResponse` acknowledgement handling.
 After `TrackPublishedResponse`, publisher publish flows now generate a send-only
 SDP offer and send it as `SignalRequest.offer` for the publisher negotiation
 path.
-Publisher answer routing, data-track control event mapping, and data-track
-publish/unpublish request flows are unit-tested,
-while ICE-bound media transport, RTP sender startup, media recovery,
-and end-to-end reconnect hardening are still open.
+Publisher answer routing, data-track control event mapping, data-track
+publish/unpublish request flows, and server/SFU media/data-track unpublish cleanup
+for reconnect state, injected publisher transport teardown, and matching
+`RequestResponse` failure mapping are unit-tested, while default live media
+transport wiring, RTP sender startup, media recovery, and end-to-end reconnect
+hardening are still open.
 
 ## Benchmarks
 
@@ -133,18 +275,18 @@ SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting and
 session-protection context, RTCP feedback, H.264, VP8, Opus RTP scaffolding,
 and SCTP data-channel message paths. On this machine, the latest
 release-readiness smoke medians include protobuf signal roundtrip at
-`9.287 us/op`, subscriber SDP answer generation at `101.394 us/op`, STUN
-binding roundtrip at `1.834 us/op`, RTP encode/decode at `0.592 us/op`, SRTP
+`8.895 us/op`, subscriber SDP answer generation at `96.354 us/op`, STUN
+binding roundtrip at `1.758 us/op`, RTP encode/decode at `0.599 us/op`, SRTP
 replay protection at `0.047 us/op`, SRTP authenticated roundtrip at
-`8.326 us/op`, SRTP AES-CM payload roundtrip at `63.258 us/op`, full SRTP
-packet protect/unprotect at `71.503 us/op`, RTCP feedback roundtrip at
-`1.732 us/op`, SRTCP packet/replay roundtrip at `0.784 us/op`, SRTCP
-authenticated roundtrip at `6.884 us/op`, full SRTCP packet protect/unprotect
-at `9.414 us/op`, DTLS-SRTP exporter split at `0.332 us/op`, DTLS-SRTP session
-protect/unprotect at `81.446 us/op`, H.264 packetize/depacketize at
-`2.493 us/op`, VP8 payload depacketize at `0.149 us/op`, Opus RTP
-packetize/depacketize at `0.027 us/op`, and SCTP DCEP open/ack roundtrip at
-`0.804 us/op`.
+`8.115 us/op`, SRTP AES-CM payload roundtrip at `61.305 us/op`, full SRTP
+packet protect/unprotect at `70.147 us/op`, RTCP feedback roundtrip at
+`1.654 us/op`, SRTCP packet/replay roundtrip at `0.761 us/op`, SRTCP
+authenticated roundtrip at `6.594 us/op`, full SRTCP packet protect/unprotect
+at `9.030 us/op`, DTLS-SRTP exporter split at `0.325 us/op`, DTLS-SRTP session
+protect/unprotect at `79.544 us/op`, H.264 packetize/depacketize at
+`2.411 us/op`, VP8 payload depacketize at `0.143 us/op`, Opus RTP
+packetize/depacketize at `0.026 us/op`, and SCTP DCEP open/ack roundtrip at
+`0.788 us/op`.
 
 Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
 CSV so this package does not reintroduce the forbidden binary WebRTC dependency.
@@ -219,6 +361,10 @@ try await room.connect(
   product and not a separate semver surface.
 - The tiny media profile publishes H.264 video, receives H.264 and VP8 video,
   and uses Opus for audio.
+- H.265/HEVC is a future optional Apple-focused codec profile, not a v1
+  production-readiness requirement.
+- VP9 and AV1 are future advanced codec profiles for SVC and bandwidth
+  efficiency work, not v1 production-readiness requirements.
 - The WebRTC engine is planned around `AVFoundation`, `AudioToolbox`,
   `VideoToolbox`, `CoreMedia`, `Security`, `Network`, and `CryptoKit`.
 - LiveKit protocol sources are pinned to

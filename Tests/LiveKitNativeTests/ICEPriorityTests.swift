@@ -104,6 +104,89 @@ final class ICEPriorityTests: XCTestCase {
         XCTAssertEqual(candidates[1].priority, 2_130_706_175)
     }
 
+    func testParsesSTUNServerEndpointsFromICEServerURLs() {
+        let endpoints = STUNServerEndpoint.endpoints(
+            from: [
+                ICEServer(urls: [
+                    "stun:stun.example.test:3478",
+                    "stun:stun.example.test:3478",
+                    "stun:backup.example.test?transport=udp",
+                    "stun:tcp.example.test:3478?transport=tcp",
+                    "turn:turn.example.test:3478?transport=udp",
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(endpoints, [
+            STUNServerEndpoint(host: "stun.example.test", port: 3_478),
+            STUNServerEndpoint(host: "backup.example.test", port: 3_478),
+        ])
+    }
+
+    func testParsesTURNServerEndpointsFromICEServerURLsWithCredentials() {
+        let endpoints = TURNServerEndpoint.endpoints(
+            from: [
+                ICEServer(
+                    urls: [
+                        "turn:turn.example.test:3478?transport=udp",
+                        "turn:turn.example.test:3478?transport=udp",
+                        "turn:turn-tcp.example.test:3478?transport=tcp",
+                        "turn:default.example.test",
+                        "turns:secure.example.test",
+                        "turns:[2001:db8::1]:5349?transport=tcp",
+                        "turn:bad.example.test?transport=sctp",
+                        "stun:stun.example.test:3478",
+                    ],
+                    username: "relay-user",
+                    credential: "relay-password"
+                ),
+            ]
+        )
+
+        XCTAssertEqual(endpoints, [
+            TURNServerEndpoint(
+                host: "turn.example.test",
+                port: 3_478,
+                transport: .udp,
+                isSecure: false,
+                username: "relay-user",
+                credential: "relay-password"
+            ),
+            TURNServerEndpoint(
+                host: "turn-tcp.example.test",
+                port: 3_478,
+                transport: .tcp,
+                isSecure: false,
+                username: "relay-user",
+                credential: "relay-password"
+            ),
+            TURNServerEndpoint(
+                host: "default.example.test",
+                port: 3_478,
+                transport: .udp,
+                isSecure: false,
+                username: "relay-user",
+                credential: "relay-password"
+            ),
+            TURNServerEndpoint(
+                host: "secure.example.test",
+                port: 5_349,
+                transport: .tcp,
+                isSecure: true,
+                username: "relay-user",
+                credential: "relay-password"
+            ),
+            TURNServerEndpoint(
+                host: "2001:db8::1",
+                port: 5_349,
+                transport: .tcp,
+                isSecure: true,
+                username: "relay-user",
+                credential: "relay-password"
+            ),
+        ])
+    }
+
     func testBuildsICEConnectivityCheckBindingRequest() throws {
         let transactionID = try STUNTransactionID(bytes: Array(repeating: 9, count: 12))
         let local = ICECredentials(usernameFragment: "local", password: "local-password")
@@ -244,6 +327,76 @@ final class ICEPriorityTests: XCTestCase {
         )
 
         XCTAssertEqual(result.mappedAddress, STUNMappedAddress(address: "203.0.113.5", port: 54_321))
+    }
+
+    func testSTUNBindingClientRequestsUnauthenticatedMappedAddress() throws {
+        let transport = FakeSTUNDatagramTransport { requestData in
+            let request = try STUNMessage(decoding: requestData)
+
+            XCTAssertNil(request.firstAttribute(.username))
+            XCTAssertNil(request.firstAttribute(.messageIntegrity))
+            XCTAssertNotNil(request.firstAttribute(.fingerprint))
+            XCTAssertTrue(try request.validatesFingerprint())
+
+            let response = STUNMessage(
+                type: .bindingSuccessResponse,
+                transactionID: request.transactionID,
+                attributes: [
+                    try .xorMappedAddressIPv4(address: "203.0.113.6", port: 54_322, transactionID: request.transactionID),
+                ]
+            )
+            return try response.encoded(includeFingerprint: true)
+        }
+        let client = STUNBindingClient(transport: transport)
+        let result = try client.requestMappedAddress(
+            requireResponseFingerprint: true,
+            retryPolicy: .once
+        )
+
+        XCTAssertEqual(result.mappedAddress, STUNMappedAddress(address: "203.0.113.6", port: 54_322))
+    }
+
+    func testSTUNServerReflexiveGathererBuildsCandidatesFromICEServers() {
+        let local = iceCandidate(foundation: "local", address: "192.0.2.10", port: 50_000)
+        let gatherer = STUNServerReflexiveCandidateGatherer { endpoint in
+            FakeSTUNDatagramTransport { requestData in
+                let request = try STUNMessage(decoding: requestData)
+                let mappedAddress = endpoint.host == "stun-a.example.test"
+                    ? "203.0.113.30"
+                    : "203.0.113.31"
+                let response = STUNMessage(
+                    type: .bindingSuccessResponse,
+                    transactionID: request.transactionID,
+                    attributes: [
+                        try .xorMappedAddressIPv4(
+                            address: mappedAddress,
+                            port: endpoint.port,
+                            transactionID: request.transactionID
+                        ),
+                    ]
+                )
+                return try response.encoded(includeFingerprint: true)
+            }
+        }
+
+        let candidates = gatherer.gatherCandidates(
+            for: local,
+            iceServers: [
+                ICEServer(urls: [
+                    "stun:stun-a.example.test:3478",
+                    "turn:turn.example.test:3478?transport=udp",
+                    "stun:stun-b.example.test:5349",
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(candidates.count, 2)
+        XCTAssertEqual(candidates.map(\.foundation), ["local-srflx-1", "local-srflx-2"])
+        XCTAssertEqual(candidates.map(\.address), ["203.0.113.30", "203.0.113.31"])
+        XCTAssertEqual(candidates.map(\.port), [3_478, 5_349])
+        XCTAssertEqual(candidates.map(\.type), [.serverReflexive, .serverReflexive])
+        XCTAssertEqual(candidates[0].localPreference, local.localPreference)
+        XCTAssertLessThan(candidates[0].priority, local.priority)
     }
 
     func testSTUNBindingClientSendsAuthenticatedRequestAndValidatesAuthenticatedResponse() throws {

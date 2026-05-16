@@ -27,6 +27,28 @@ final class STUNTests: XCTestCase {
         XCTAssertEqual(decoded.firstAttribute(.iceControlling)?.uint64Value, 0x0102_0304_0506_0708)
     }
 
+    func testBuildsTURNAllocateRequestWithAuthenticationChallengeAttributes() throws {
+        let transactionID = try STUNTransactionID(bytes: Array(repeating: 4, count: 12))
+        let message = TURNAllocateRequestFactory.makeAllocateRequest(
+            relayedTransport: .udp,
+            username: "relay-user",
+            realm: "example.org",
+            nonce: "nonce-1",
+            lifetimeSeconds: 600,
+            transactionID: transactionID
+        )
+
+        let decoded = try STUNMessage(decoding: try message.encoded())
+
+        XCTAssertEqual(decoded.type, .allocateRequest)
+        XCTAssertEqual(decoded.transactionID, transactionID)
+        XCTAssertEqual(decoded.firstAttribute(.requestedTransport)?.requestedTransportProtocol, .udp)
+        XCTAssertEqual(decoded.firstAttribute(.lifetime)?.uint32Value, 600)
+        XCTAssertEqual(try decoded.firstAttribute(.username)?.stringValue, "relay-user")
+        XCTAssertEqual(try decoded.firstAttribute(.realm)?.stringValue, "example.org")
+        XCTAssertEqual(try decoded.firstAttribute(.nonce)?.stringValue, "nonce-1")
+    }
+
     func testPadsAttributesToFourByteBoundaryWithoutChangingValueLength() throws {
         let transactionID = try STUNTransactionID(bytes: Array(repeating: 7, count: 12))
         let message = STUNMessage(type: .bindingRequest, transactionID: transactionID, attributes: [.username("abc")])
@@ -72,6 +94,29 @@ final class STUNTests: XCTestCase {
         let mappedAddress = try decoded.firstAttribute(.xorMappedAddress)?.xorMappedAddressValue
 
         XCTAssertEqual(mappedAddress, STUNMappedAddress(address: "203.0.113.5", port: 54_321))
+    }
+
+    func testDecodesXORRelayedAddressFromTURNAllocateSuccessResponse() throws {
+        let transactionID = try STUNTransactionID(bytes: [11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0])
+        let message = STUNMessage(
+            type: .allocateSuccessResponse,
+            transactionID: transactionID,
+            attributes: [
+                .lifetime(seconds: 1_200),
+                try .xorRelayedAddressIPv4(
+                    address: "192.0.2.55",
+                    port: 49_152,
+                    transactionID: transactionID
+                ),
+            ]
+        )
+
+        let decoded = try STUNMessage(decoding: try message.encoded())
+        let relayedAddress = try decoded.firstAttribute(.xorRelayedAddress)?.xorRelayedAddressValue
+
+        XCTAssertEqual(decoded.type, .allocateSuccessResponse)
+        XCTAssertEqual(decoded.firstAttribute(.lifetime)?.uint32Value, 1_200)
+        XCTAssertEqual(relayedAddress, STUNMappedAddress(address: "192.0.2.55", port: 49_152))
     }
 
     func testRejectsInvalidXORMappedAddress() throws {

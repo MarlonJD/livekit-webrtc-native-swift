@@ -2,6 +2,104 @@ import Foundation
 import LiveKitNativeProtocol
 import LiveKitNativeWebRTC
 
+struct RoomMediaStartupConfiguration: Sendable {
+    var localCandidates: @Sendable ([ICEServer]) -> [ICECandidate]
+    var iceRole: ICEAgentRole
+    var tieBreaker: UInt64
+    var nominationPolicy: ICEPairNominationPolicy
+    var checker: any ICEConnectivityChecking
+    var binder: DTLSSRTPMediaSessionBinder
+
+    init(
+        localCandidates: @escaping @Sendable () -> [ICECandidate],
+        iceRole: ICEAgentRole = .controlling,
+        tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
+        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        checker: any ICEConnectivityChecking = STUNICEConnectivityChecker(),
+        binder: DTLSSRTPMediaSessionBinder
+    ) {
+        self.init(
+            localCandidatesProvider: { _ in localCandidates() },
+            iceRole: iceRole,
+            tieBreaker: tieBreaker,
+            nominationPolicy: nominationPolicy,
+            checker: checker,
+            binder: binder
+        )
+    }
+
+    init(
+        localCandidatesProvider: @escaping @Sendable ([ICEServer]) -> [ICECandidate],
+        iceRole: ICEAgentRole = .controlling,
+        tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
+        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        checker: any ICEConnectivityChecking = STUNICEConnectivityChecker(),
+        binder: DTLSSRTPMediaSessionBinder
+    ) {
+        self.localCandidates = localCandidatesProvider
+        self.iceRole = iceRole
+        self.tieBreaker = tieBreaker
+        self.nominationPolicy = nominationPolicy
+        self.checker = checker
+        self.binder = binder
+    }
+
+    init(
+        localCandidateSockets: [LocalICEUDPSocketCandidate],
+        iceRole: ICEAgentRole = .controlling,
+        tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
+        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        handshaker: any DTLSSRTPHandshaking
+    ) {
+        let candidateStore = LocalICEUDPSocketCandidateStore(candidates: localCandidateSockets)
+        self.init(
+            localCandidatesProvider: { iceServers in
+                let serverReflexiveCandidates = localCandidateSockets.flatMap {
+                    $0.serverReflexiveCandidates(iceServers: iceServers)
+                }
+                let allCandidates = localCandidateSockets + serverReflexiveCandidates
+                candidateStore.replace(with: allCandidates)
+                return allCandidates.map(\.candidate)
+            },
+            iceRole: iceRole,
+            tieBreaker: tieBreaker,
+            nominationPolicy: nominationPolicy,
+            checker: LocalICEUDPSocketConnectivityChecker(candidateStore: candidateStore),
+            binder: DTLSSRTPMediaSessionBinder(
+                datagramTransportFactory: LocalICEUDPSocketMediaDatagramTransportFactory(
+                    candidateStore: candidateStore
+                ),
+                handshaker: handshaker
+            )
+        )
+    }
+
+    init(
+        hostCandidateAddresses: [ICEInterfaceAddress] = ICEHostCandidateGatherer.localInterfaceAddresses(),
+        bindAddress: String = "0.0.0.0",
+        receiveTimeoutMilliseconds: Int = 1_000,
+        iceRole: ICEAgentRole = .controlling,
+        tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
+        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        handshaker: any DTLSSRTPHandshaking
+    ) throws {
+        self.init(
+            localCandidateSockets: try LocalICEUDPSocketCandidate.hostCandidates(
+                from: hostCandidateAddresses,
+                bindAddress: bindAddress,
+                receiveTimeoutMilliseconds: receiveTimeoutMilliseconds
+            ),
+            iceRole: iceRole,
+            tieBreaker: tieBreaker,
+            nominationPolicy: nominationPolicy,
+            handshaker: handshaker
+        )
+    }
+}
+
+typealias RoomPublisherMediaStartupConfiguration = RoomMediaStartupConfiguration
+typealias RoomSubscriberMediaStartupConfiguration = RoomMediaStartupConfiguration
+
 public final class Room: @unchecked Sendable {
     public weak var delegate: (any RoomDelegate)?
     public let events: AsyncStream<RoomEvent>
@@ -12,15 +110,37 @@ public final class Room: @unchecked Sendable {
     private let requestTracker = SignalRequestTracker()
     private let subscriberPeerConnection: PeerConnectionCoordinator
     private let publisherPeerConnection: PeerConnectionCoordinator
+    private let subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration?
+    private let publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration?
     private let snapshots: RoomSnapshotStore
     private let signalLoopLock = NSLock()
     private let connectionContextLock = NSLock()
     private let publisherOfferLock = NSLock()
+    private let subscriberMediaStartupLock = NSLock()
+    private let publisherMediaStartupLock = NSLock()
+    private let reconnectSyncStateLock = NSLock()
+    private let reconnectSessionDescriptionLock = NSLock()
     private let eventContinuation: AsyncStream<RoomEvent>.Continuation
     private var signalLoopTask: Task<Void, Never>?
     private var connectionContext: RoomConnectionContext?
     private var publisherOfferTracks: [PublisherSDPOfferTrack] = []
     private var nextPublisherOfferID: UInt32 = 1
+    private var subscriberMediaStartupStarted = false
+    private var subscriberMediaStartupTask: Task<Void, Never>?
+    private var subscriberMediaStartupResult: PeerConnectionMediaStartupResult?
+    private var subscriberMediaStartupError: (any Error)?
+    private var subscriberLocalCandidatesGathered = false
+    private var subscriberLocalCandidates: [ICECandidate] = []
+    private var publisherMediaStartupStarted = false
+    private var publisherMediaStartupTask: Task<Void, Never>?
+    private var publisherMediaStartupResult: PeerConnectionMediaStartupResult?
+    private var publisherMediaStartupError: (any Error)?
+    private var publisherLocalCandidatesGathered = false
+    private var publisherLocalCandidates: [ICECandidate] = []
+    private var reconnectSubscribedTrackSIDs: Set<String> = []
+    private var reconnectDisabledTrackSIDs: Set<String> = []
+    private var reconnectSubscriberAnswer: Livekit_SessionDescription?
+    private var reconnectPublisherOffer: Livekit_SessionDescription?
 
     public var localParticipant: LocalParticipant {
         snapshots.localParticipant
@@ -32,6 +152,52 @@ public final class Room: @unchecked Sendable {
 
     public var connectionState: ConnectionState {
         snapshots.connectionState
+    }
+
+    public var mediaSectionsRequirement: MediaSectionsRequirementInfo? {
+        snapshots.mediaSectionsRequirement
+    }
+
+    public var dataTrackSubscriberHandles: DataTrackSubscriberHandlesInfo? {
+        snapshots.dataTrackSubscriberHandles
+    }
+
+    var lastPublisherMediaStartupResult: PeerConnectionMediaStartupResult? {
+        publisherMediaStartupLock.withLock {
+            publisherMediaStartupResult
+        }
+    }
+
+    var lastPublisherMediaStartupError: (any Error)? {
+        publisherMediaStartupLock.withLock {
+            publisherMediaStartupError
+        }
+    }
+
+    var lastSubscriberMediaStartupResult: PeerConnectionMediaStartupResult? {
+        subscriberMediaStartupLock.withLock {
+            subscriberMediaStartupResult
+        }
+    }
+
+    var lastSubscriberMediaStartupError: (any Error)? {
+        subscriberMediaStartupLock.withLock {
+            subscriberMediaStartupError
+        }
+    }
+
+    func waitForPublisherMediaStartup() async {
+        let task = publisherMediaStartupLock.withLock {
+            publisherMediaStartupTask
+        }
+        await task?.value
+    }
+
+    func waitForSubscriberMediaStartup() async {
+        let task = subscriberMediaStartupLock.withLock {
+            subscriberMediaStartupTask
+        }
+        await task?.value
     }
 
     public convenience init(options: RoomOptions = .init()) {
@@ -46,12 +212,16 @@ public final class Room: @unchecked Sendable {
         ),
         publisherPeerConnection: PeerConnectionCoordinator = PeerConnectionCoordinator(
             configuration: NativeWebRTCConfiguration(role: .publisher)
-        )
+        ),
+        subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration? = nil,
+        publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration? = nil
     ) {
         self.options = options
         self.signalConnection = signalConnection
         self.subscriberPeerConnection = subscriberPeerConnection
         self.publisherPeerConnection = publisherPeerConnection
+        self.subscriberMediaStartupConfiguration = subscriberMediaStartupConfiguration
+        self.publisherMediaStartupConfiguration = publisherMediaStartupConfiguration
 
         let localParticipant = LocalParticipant(identity: "local")
         self.actor = RoomActor(localParticipant: localParticipant)
@@ -66,6 +236,8 @@ public final class Room: @unchecked Sendable {
 
     deinit {
         stopSignalLoop()
+        closeMediaStartupTransportDetached(clearSubscriberMediaStartupState())
+        closeMediaStartupTransportDetached(clearPublisherMediaStartupState())
         Task { [signalConnection] in
             await signalConnection.close()
         }
@@ -76,6 +248,7 @@ public final class Room: @unchecked Sendable {
         LiveKitNativeLogging.log(.info, "Connecting room.")
         let context = RoomConnectionContext(serverURL: url, token: token, connectOptions: connectOptions)
         setConnectionContext(context)
+        resetPeerConnectionNegotiationState()
 
         await transition(to: .connecting)
 
@@ -91,7 +264,8 @@ public final class Room: @unchecked Sendable {
             stopSignalLoop()
             await signalConnection.close()
             clearConnectionContext()
-            clearPublisherOfferState()
+            resetPeerConnectionNegotiationState(restartICE: true)
+            clearLocalParticipantCommandHandler()
             await transition(to: .disconnected)
             LiveKitNativeLogging.log(.error, "Room connect failed: \(error.localizedDescription)")
             throw error
@@ -107,9 +281,11 @@ public final class Room: @unchecked Sendable {
         await signalConnection.close()
         await requestTracker.clear()
         clearConnectionContext()
-        clearPublisherOfferState()
+        resetPeerConnectionNegotiationState(restartICE: true)
+        clearReconnectSessionDescriptionState()
         let result = await actor.disconnect()
         snapshots.replace(with: result.0)
+        clearLocalParticipantCommandHandler()
 
         for event in result.1 {
             emit(event)
@@ -131,6 +307,7 @@ public final class Room: @unchecked Sendable {
         var request = Livekit_SignalRequest()
         request.subscription = update
         try await signalConnection.send(request)
+        storeReconnectSubscriptionUpdate(trackSIDs: trackSIDs, subscribe: subscribe)
     }
 
     public func updateTrackSettings(
@@ -158,6 +335,7 @@ public final class Room: @unchecked Sendable {
         var request = Livekit_SignalRequest()
         request.trackSetting = settings
         try await signalConnection.send(request)
+        storeReconnectTrackSettingsUpdate(trackSIDs: trackSIDs, disabled: disabled)
     }
 
     func applyRemoteParticipantSnapshots(_ participantSnapshots: [ParticipantSnapshot]) async {
@@ -180,10 +358,12 @@ public final class Room: @unchecked Sendable {
             throw LiveKitNativeError.invalidSignalFrame("Expected initial JoinResponse from LiveKit signaling.")
         }
 
+        resetPeerConnectionNegotiationState(restartICE: true)
+        clearReconnectSessionDescriptionState()
+        applyICEServers(joinResponse.iceServers)
         let result = await actor.applyJoin(RoomJoinSnapshot(joinResponse: joinResponse))
         snapshots.replace(with: result.0)
         configureLocalParticipant(result.0.localParticipant)
-        clearPublisherOfferState()
         emit(.connectionStateChanged(.connected))
 
         for event in result.1 {
@@ -217,6 +397,8 @@ public final class Room: @unchecked Sendable {
                     await signalConnection.close()
                     await self.requestTracker.clear()
                     self.clearConnectionContext()
+                    self.resetPeerConnectionNegotiationState(restartICE: true)
+                    self.clearLocalParticipantCommandHandler()
                     await self.transition(to: .disconnected)
                     LiveKitNativeLogging.log(.error, "Signal loop stopped: \(error.localizedDescription)")
                     return
@@ -262,10 +444,10 @@ public final class Room: @unchecked Sendable {
             try await answerSubscriberOffer(offer)
             return true
         case let .answer(answer):
-            try handlePublisherAnswer(answer)
+            try await handlePublisherAnswer(answer)
             return true
         case let .trickle(trickle):
-            try handleTrickle(trickle)
+            try await handleTrickle(trickle)
             return true
         case let .mute(mute):
             await applyTrackMute(mute)
@@ -298,18 +480,22 @@ public final class Room: @unchecked Sendable {
             emit(.trackSubscribed(TrackSubscribedInfo(trackSID: trackSubscribed.trackSid)))
             return true
         case let .mediaSectionsRequirement(requirement):
-            emit(.mediaSectionsRequirementChanged(MediaSectionsRequirementInfo(requirement: requirement)))
+            await applyMediaSectionsRequirement(requirement)
             return true
         case let .publishDataTrackResponse(response):
+            let dataTrack = DataTrackInfo(info: response.info)
+            localParticipant.applyDataTrackPublication(dataTrack)
             await requestTracker.fulfill(response)
-            emit(.dataTrackPublished(DataTrackInfo(info: response.info)))
+            emit(.dataTrackPublished(dataTrack))
             return true
         case let .unpublishDataTrackResponse(response):
+            let dataTrack = DataTrackInfo(info: response.info)
+            localParticipant.removeDataTrackPublication(publisherHandle: dataTrack.publisherHandle)
             await requestTracker.fulfill(response)
-            emit(.dataTrackUnpublished(DataTrackInfo(info: response.info)))
+            emit(.dataTrackUnpublished(dataTrack))
             return true
         case let .dataTrackSubscriberHandles(handles):
-            emit(.dataTrackSubscriberHandlesChanged(DataTrackSubscriberHandlesInfo(handles: handles)))
+            await applyDataTrackSubscriberHandles(handles)
             return true
         case let .roomMoved(roomMoved):
             await applyRoomMoved(roomMoved)
@@ -334,6 +520,16 @@ public final class Room: @unchecked Sendable {
     }
 
     private func applyTrackUnpublished(trackSID: String) async {
+        if localParticipant.removeLocalTrackPublication(sid: trackSID) != nil {
+            let removal = removePublisherOfferTrack(sid: trackSID)
+            if removal.removed != nil {
+                clearReconnectPublisherOffer()
+                if removal.tracks.isEmpty {
+                    await closeMediaStartupTransport(clearPublisherMediaStartupState())
+                }
+            }
+        }
+
         let result = await actor.removeTrackPublication(sid: trackSID)
         snapshots.replace(with: result.0)
 
@@ -351,13 +547,38 @@ public final class Room: @unchecked Sendable {
         }
     }
 
-    private func handleTrickle(_ trickle: Livekit_TrickleRequest) throws {
+    private func applyMediaSectionsRequirement(_ requirement: Livekit_MediaSectionsRequirement) async {
+        let result = await actor.applyMediaSectionsRequirement(
+            MediaSectionsRequirementInfo(requirement: requirement)
+        )
+        snapshots.replace(with: result.0)
+
+        for event in result.1 {
+            emit(event)
+        }
+    }
+
+    private func applyDataTrackSubscriberHandles(_ handles: Livekit_DataTrackSubscriberHandles) async {
+        let result = await actor.applyDataTrackSubscriberHandles(
+            DataTrackSubscriberHandlesInfo(handles: handles)
+        )
+        snapshots.replace(with: result.0)
+
+        for event in result.1 {
+            emit(event)
+        }
+    }
+
+    private func handleTrickle(_ trickle: Livekit_TrickleRequest) async throws {
         let peerConnection: PeerConnectionCoordinator
+        let isPublisherTarget: Bool
         switch trickle.target {
         case .publisher:
             peerConnection = publisherPeerConnection
+            isPublisherTarget = true
         case .subscriber:
             peerConnection = subscriberPeerConnection
+            isPublisherTarget = false
         case .UNRECOGNIZED:
             return
         }
@@ -366,10 +587,17 @@ public final class Room: @unchecked Sendable {
             candidateInitJSON: trickle.candidateInit,
             isFinal: trickle.final
         )
+
+        if isPublisherTarget {
+            startPublisherMediaTransportIfReady()
+        } else {
+            startSubscriberMediaTransportIfReady()
+        }
     }
 
-    private func handlePublisherAnswer(_ answer: Livekit_SessionDescription) throws {
+    private func handlePublisherAnswer(_ answer: Livekit_SessionDescription) async throws {
         try publisherPeerConnection.applyPublisherAnswer(type: answer.type, sdp: answer.sdp, id: answer.id)
+        startPublisherMediaTransportIfReady()
     }
 
     private func applyRoomMoved(_ roomMoved: Livekit_RoomMovedResponse) async {
@@ -403,6 +631,8 @@ public final class Room: @unchecked Sendable {
                 await signalConnection.close()
                 await requestTracker.clear()
                 clearConnectionContext()
+                resetPeerConnectionNegotiationState(restartICE: true)
+                clearLocalParticipantCommandHandler()
                 await transition(to: .disconnected)
                 return false
             }
@@ -410,6 +640,8 @@ public final class Room: @unchecked Sendable {
             await signalConnection.close()
             await requestTracker.clear()
             clearConnectionContext()
+            resetPeerConnectionNegotiationState(restartICE: true)
+            clearLocalParticipantCommandHandler()
             await transition(to: .disconnected)
             return false
         }
@@ -424,6 +656,9 @@ public final class Room: @unchecked Sendable {
         var request = Livekit_SignalRequest()
         request.answer = answer
         try await signalConnection.send(request)
+        storeReconnectSubscriberAnswer(answer)
+        try await sendSubscriberLocalICETrickleCandidates()
+        startSubscriberMediaTransportIfReady()
     }
 
     private func configureLocalParticipant(_ localParticipant: LocalParticipant) {
@@ -521,6 +756,10 @@ public final class Room: @unchecked Sendable {
         )
     }
 
+    private func clearLocalParticipantCommandHandler() {
+        snapshots.localParticipant.setCommandHandler(nil)
+    }
+
     private func sendAddTrack(
         _ addTrackRequest: Livekit_AddTrackRequest,
         cid: String,
@@ -534,7 +773,11 @@ public final class Room: @unchecked Sendable {
         request.addTrack = addTrackRequest
 
         try await signalConnection.send(request)
-        let response = try await requestTracker.waitForTrackPublished(cid: cid, action: action)
+        let response = try await requestTracker.waitForTrackPublished(
+            cid: cid,
+            action: action,
+            request: .addTrack(addTrackRequest)
+        )
         let publishedTrack = LocalPublishedTrack(
             trackInfo: response.track,
             fallbackCID: cid,
@@ -549,7 +792,7 @@ public final class Room: @unchecked Sendable {
             do {
                 try await sendPublisherOffer(for: tracks)
             } catch {
-                removePublisherOfferTrack(sid: offerTrack.trackID)
+                _ = removePublisherOfferTrack(sid: offerTrack.trackID)
                 throw error
             }
         }
@@ -589,7 +832,8 @@ public final class Room: @unchecked Sendable {
         try await signalConnection.send(request)
         let response = try await requestTracker.waitForPublishDataTrack(
             publisherHandle: plan.pubHandle,
-            action: action
+            action: action,
+            request: .publishDataTrack(plan.publishRequest)
         )
         return DataTrackInfo(info: response.info)
     }
@@ -602,16 +846,49 @@ public final class Room: @unchecked Sendable {
         try await signalConnection.send(request)
         let response = try await requestTracker.waitForUnpublishDataTrack(
             publisherHandle: plan.pubHandle,
-            action: action
+            action: action,
+            request: .unpublishDataTrack(plan.unpublishRequest)
         )
         return DataTrackInfo(info: response.info)
     }
 
     private func sendUnpublishTrack(_ plan: LocalTrackUnpublishPlan) async throws {
+        let action = "unpublish track"
+        let muteRequest = plan.muteRequest
+
         var request = Livekit_SignalRequest()
-        request.mute = plan.muteRequest
+        request.mute = muteRequest
         try await signalConnection.send(request)
-        removePublisherOfferTrack(sid: plan.sid)
+
+        let response = try await requestTracker.waitForResponse(
+            matching: .mute(muteRequest),
+            action: action
+        )
+        try validateRequestResponse(response, action: action)
+
+        let removal = removePublisherOfferTrack(sid: plan.sid)
+        guard removal.removed != nil else {
+            if removal.tracks.isEmpty {
+                clearReconnectPublisherOffer()
+                await closeMediaStartupTransport(clearPublisherMediaStartupState())
+            }
+            return
+        }
+
+        guard !removal.tracks.isEmpty else {
+            clearReconnectPublisherOffer()
+            await closeMediaStartupTransport(clearPublisherMediaStartupState())
+            return
+        }
+
+        do {
+            try await sendPublisherOffer(for: removal.tracks)
+        } catch {
+            if let removed = removal.removed {
+                _ = addPublisherOfferTrack(removed)
+            }
+            throw error
+        }
     }
 
     private func sendPublisherOffer(for tracks: [PublisherSDPOfferTrack]) async throws {
@@ -627,6 +904,8 @@ public final class Room: @unchecked Sendable {
         var request = Livekit_SignalRequest()
         request.offer = offer
         try await signalConnection.send(request)
+        storeReconnectPublisherOffer(offer)
+        try await sendPublisherLocalICETrickleCandidates()
     }
 
     private func sendUpdateDataSubscription(_ plan: DataSubscriptionUpdatePlan) async throws {
@@ -645,22 +924,49 @@ public final class Room: @unchecked Sendable {
     }
 
     private func sendUpdateAudioTrack(_ plan: LocalAudioTrackUpdatePlan) async throws {
+        let action = "update audio track"
+        let updateRequest = plan.updateRequest
+
         var request = Livekit_SignalRequest()
-        request.updateAudioTrack = plan.updateRequest
+        request.updateAudioTrack = updateRequest
         try await signalConnection.send(request)
+
+        let response = try await requestTracker.waitForResponse(
+            matching: .updateAudioTrack(updateRequest),
+            action: action
+        )
+        try validateRequestResponse(response, action: action)
     }
 
     private func sendUpdateVideoTrack(_ plan: LocalVideoTrackUpdatePlan) async throws {
+        let action = "update video track"
+        let updateRequest = plan.updateRequest
+
         var request = Livekit_SignalRequest()
-        request.updateVideoTrack = plan.updateRequest
+        request.updateVideoTrack = updateRequest
         try await signalConnection.send(request)
+
+        let response = try await requestTracker.waitForResponse(
+            matching: .updateVideoTrack(updateRequest),
+            action: action
+        )
+        try validateRequestResponse(response, action: action)
     }
 
     private func sendTrackMute(_ plan: LocalTrackMutePlan) async throws {
+        let action = "mute track"
+        let muteRequest = plan.muteRequest
+
         var request = Livekit_SignalRequest()
-        request.mute = plan.muteRequest
+        request.mute = muteRequest
 
         try await signalConnection.send(request)
+
+        let response = try await requestTracker.waitForResponse(
+            matching: .mute(muteRequest),
+            action: action
+        )
+        try validateRequestResponse(response, action: action)
 
         let result = await actor.applyTrackMute(sid: plan.sid, muted: plan.muted)
         snapshots.replace(with: result.0)
@@ -761,7 +1067,10 @@ public final class Room: @unchecked Sendable {
         switch response.message {
         case .join?:
             try await applyInitialSignalResponse(response)
-        case .reconnect?:
+        case let .reconnect(reconnectResponse)?:
+            resetPeerConnectionNegotiationState(restartICE: true, preservePublisherOfferState: true)
+            applyICEServers(reconnectResponse.iceServers)
+            try await sendReconnectSyncStateIfNeeded()
             await transition(to: .connected)
         default:
             let expected = reconnect ? "ReconnectResponse or JoinResponse" : "JoinResponse"
@@ -830,6 +1139,142 @@ public final class Room: @unchecked Sendable {
         }
     }
 
+    private func applyICEServers(_ iceServers: [Livekit_ICEServer]) {
+        let nativeICEServers = iceServers.map(ICEServer.init(protocolServer:))
+        subscriberPeerConnection.updateICEServers(nativeICEServers)
+        publisherPeerConnection.updateICEServers(nativeICEServers)
+    }
+
+    private func resetPeerConnectionNegotiationState(
+        restartICE: Bool = false,
+        preservePublisherOfferState: Bool = false
+    ) {
+        if restartICE {
+            subscriberPeerConnection.restartICE()
+            publisherPeerConnection.restartICE()
+        } else {
+            subscriberPeerConnection.resetNegotiationState()
+            publisherPeerConnection.resetNegotiationState()
+        }
+        if !preservePublisherOfferState {
+            clearPublisherOfferState()
+        }
+        closeMediaStartupTransportDetached(clearSubscriberMediaStartupState())
+        closeMediaStartupTransportDetached(clearPublisherMediaStartupState())
+    }
+
+    private func storeReconnectSubscriptionUpdate(trackSIDs: [String], subscribe: Bool) {
+        reconnectSyncStateLock.withLock {
+            if subscribe {
+                reconnectSubscribedTrackSIDs.formUnion(trackSIDs)
+            } else {
+                reconnectSubscribedTrackSIDs.subtract(trackSIDs)
+            }
+        }
+    }
+
+    private func storeReconnectTrackSettingsUpdate(trackSIDs: [String], disabled: Bool) {
+        reconnectSyncStateLock.withLock {
+            if disabled {
+                reconnectDisabledTrackSIDs.formUnion(trackSIDs)
+            } else {
+                reconnectDisabledTrackSIDs.subtract(trackSIDs)
+            }
+        }
+    }
+
+    private func sendReconnectSyncStateIfNeeded() async throws {
+        guard let syncState = reconnectSyncState() else {
+            return
+        }
+
+        var request = Livekit_SignalRequest()
+        request.syncState = syncState
+        try await signalConnection.send(request)
+    }
+
+    private func reconnectSyncState() -> Livekit_SyncState? {
+        var syncState = Livekit_SyncState()
+        var hasSyncState = false
+
+        let reconnectState = reconnectSyncStateLock.withLock {
+            (
+                subscribedTrackSIDs: reconnectSubscribedTrackSIDs.sorted(),
+                disabledTrackSIDs: reconnectDisabledTrackSIDs.sorted()
+            )
+        }
+
+        if !reconnectState.subscribedTrackSIDs.isEmpty {
+            var subscription = Livekit_UpdateSubscription()
+            subscription.trackSids = reconnectState.subscribedTrackSIDs
+            subscription.subscribe = true
+            syncState.subscription = subscription
+            hasSyncState = true
+        }
+
+        if !reconnectState.disabledTrackSIDs.isEmpty {
+            syncState.trackSidsDisabled = reconnectState.disabledTrackSIDs
+            hasSyncState = true
+        }
+
+        let sessionDescriptions = reconnectSessionDescriptionLock.withLock {
+            (
+                subscriberAnswer: reconnectSubscriberAnswer,
+                publisherOffer: reconnectPublisherOffer
+            )
+        }
+
+        if let subscriberAnswer = sessionDescriptions.subscriberAnswer {
+            syncState.answer = subscriberAnswer
+            hasSyncState = true
+        }
+
+        if let publisherOffer = sessionDescriptions.publisherOffer {
+            syncState.offer = publisherOffer
+            hasSyncState = true
+        }
+
+        let publishTracks = localParticipant.trackPublications.map { Self.publishResponse(for: $0) }
+        if !publishTracks.isEmpty {
+            syncState.publishTracks = publishTracks
+            hasSyncState = true
+        }
+
+        let publishDataTracks = localParticipant.dataTrackPublications.map { Self.publishDataTrackResponse(for: $0) }
+        if !publishDataTracks.isEmpty {
+            syncState.publishDataTracks = publishDataTracks
+            hasSyncState = true
+        }
+
+        return hasSyncState ? syncState : nil
+    }
+
+    private static func publishResponse(for publication: LocalTrackPublication) -> Livekit_TrackPublishedResponse {
+        var track = Livekit_TrackInfo()
+        track.sid = publication.sid
+        track.name = publication.name
+        track.type = publication.kind.protocolTrackType
+        track.source = publication.source.protocolTrackSource
+        track.muted = publication.isMuted
+
+        var response = Livekit_TrackPublishedResponse()
+        response.cid = publication.track?.id ?? publication.sid
+        response.track = track
+        return response
+    }
+
+    private static func publishDataTrackResponse(for dataTrack: DataTrackInfo) -> Livekit_PublishDataTrackResponse {
+        var info = Livekit_DataTrackInfo()
+        info.pubHandle = dataTrack.publisherHandle
+        info.sid = dataTrack.sid
+        info.name = dataTrack.name
+        info.encryption = dataTrack.encryption.protocolEncryption
+
+        var response = Livekit_PublishDataTrackResponse()
+        response.info = info
+        return response
+    }
+
     private func addPublisherOfferTrack(_ track: PublisherSDPOfferTrack) -> [PublisherSDPOfferTrack] {
         publisherOfferLock.withLock {
             if let index = publisherOfferTracks.firstIndex(where: { $0.trackID == track.trackID }) {
@@ -842,9 +1287,17 @@ public final class Room: @unchecked Sendable {
         }
     }
 
-    private func removePublisherOfferTrack(sid: String) {
+    private func removePublisherOfferTrack(
+        sid: String
+    ) -> (removed: PublisherSDPOfferTrack?, tracks: [PublisherSDPOfferTrack]) {
         publisherOfferLock.withLock {
-            publisherOfferTracks.removeAll { $0.trackID == sid }
+            let removed: PublisherSDPOfferTrack?
+            if let index = publisherOfferTracks.firstIndex(where: { $0.trackID == sid }) {
+                removed = publisherOfferTracks.remove(at: index)
+            } else {
+                removed = nil
+            }
+            return (removed, publisherOfferTracks)
         }
     }
 
@@ -853,6 +1306,321 @@ public final class Room: @unchecked Sendable {
             publisherOfferTracks.removeAll()
             nextPublisherOfferID = 1
         }
+    }
+
+    private func storeReconnectSubscriberAnswer(_ answer: Livekit_SessionDescription) {
+        reconnectSessionDescriptionLock.withLock {
+            reconnectSubscriberAnswer = answer
+        }
+    }
+
+    private func storeReconnectPublisherOffer(_ offer: Livekit_SessionDescription) {
+        reconnectSessionDescriptionLock.withLock {
+            reconnectPublisherOffer = offer
+        }
+    }
+
+    private func clearReconnectPublisherOffer() {
+        reconnectSessionDescriptionLock.withLock {
+            reconnectPublisherOffer = nil
+        }
+    }
+
+    private func clearReconnectSessionDescriptionState() {
+        reconnectSessionDescriptionLock.withLock {
+            reconnectSubscriberAnswer = nil
+            reconnectPublisherOffer = nil
+        }
+    }
+
+    private func startSubscriberMediaTransportIfReady() {
+        guard let subscriberMediaStartupConfiguration else {
+            return
+        }
+        guard subscriberPeerConnection.remoteICECredentials != nil,
+              subscriberPeerConnection.isRemoteICEGatheringComplete
+        else {
+            return
+        }
+
+        let shouldStart = subscriberMediaStartupLock.withLock {
+            guard !subscriberMediaStartupStarted else {
+                return false
+            }
+
+            subscriberMediaStartupStarted = true
+            subscriberMediaStartupError = nil
+            return true
+        }
+        guard shouldStart else {
+            return
+        }
+
+        let localCandidates = subscriberLocalICECandidates()
+        guard !localCandidates.isEmpty else {
+            storeSubscriberMediaStartupError(
+                PeerConnectionNegotiationError.missingSelectedICECandidatePair
+            )
+            return
+        }
+
+        let task = Task { [weak self, subscriberPeerConnection, subscriberMediaStartupConfiguration, localCandidates] in
+            do {
+                let result = try await subscriberPeerConnection.startSecureMediaTransport(
+                    localCandidates: localCandidates,
+                    iceRole: subscriberMediaStartupConfiguration.iceRole,
+                    tieBreaker: subscriberMediaStartupConfiguration.tieBreaker,
+                    nominationPolicy: subscriberMediaStartupConfiguration.nominationPolicy,
+                    checker: subscriberMediaStartupConfiguration.checker,
+                    binder: subscriberMediaStartupConfiguration.binder
+                )
+                self?.storeSubscriberMediaStartupResult(result)
+                LiveKitNativeLogging.log(.info, "Subscriber media transport started.")
+            } catch {
+                self?.storeSubscriberMediaStartupError(error)
+                LiveKitNativeLogging.log(.error, "Subscriber media transport startup failed: \(error.localizedDescription)")
+            }
+        }
+
+        subscriberMediaStartupLock.withLock {
+            subscriberMediaStartupTask = task
+        }
+    }
+
+    private func startPublisherMediaTransportIfReady() {
+        guard let publisherMediaStartupConfiguration else {
+            return
+        }
+        guard publisherPeerConnection.remoteAnswer != nil,
+              publisherPeerConnection.isRemoteICEGatheringComplete
+        else {
+            return
+        }
+
+        let shouldStart = publisherMediaStartupLock.withLock {
+            guard !publisherMediaStartupStarted else {
+                return false
+            }
+
+            publisherMediaStartupStarted = true
+            publisherMediaStartupError = nil
+            return true
+        }
+        guard shouldStart else {
+            return
+        }
+
+        let localCandidates = publisherLocalICECandidates()
+        guard !localCandidates.isEmpty else {
+            storePublisherMediaStartupError(
+                PeerConnectionNegotiationError.missingSelectedICECandidatePair
+            )
+            return
+        }
+
+        let task = Task { [weak self, publisherPeerConnection, publisherMediaStartupConfiguration, localCandidates] in
+            do {
+                let result = try await publisherPeerConnection.startSecureMediaTransport(
+                    localCandidates: localCandidates,
+                    iceRole: publisherMediaStartupConfiguration.iceRole,
+                    tieBreaker: publisherMediaStartupConfiguration.tieBreaker,
+                    nominationPolicy: publisherMediaStartupConfiguration.nominationPolicy,
+                    checker: publisherMediaStartupConfiguration.checker,
+                    binder: publisherMediaStartupConfiguration.binder
+                )
+                self?.storePublisherMediaStartupResult(result)
+                LiveKitNativeLogging.log(.info, "Publisher media transport started.")
+            } catch {
+                self?.storePublisherMediaStartupError(error)
+                LiveKitNativeLogging.log(.error, "Publisher media transport startup failed: \(error.localizedDescription)")
+            }
+        }
+
+        publisherMediaStartupLock.withLock {
+            publisherMediaStartupTask = task
+        }
+    }
+
+    private func storePublisherMediaStartupResult(_ result: PeerConnectionMediaStartupResult) {
+        publisherMediaStartupLock.withLock {
+            publisherMediaStartupResult = result
+            publisherMediaStartupError = nil
+        }
+    }
+
+    private func storeSubscriberMediaStartupResult(_ result: PeerConnectionMediaStartupResult) {
+        subscriberMediaStartupLock.withLock {
+            subscriberMediaStartupResult = result
+            subscriberMediaStartupError = nil
+        }
+    }
+
+    private func storePublisherMediaStartupError(_ error: any Error) {
+        publisherMediaStartupLock.withLock {
+            publisherMediaStartupError = error
+        }
+    }
+
+    private func storeSubscriberMediaStartupError(_ error: any Error) {
+        subscriberMediaStartupLock.withLock {
+            subscriberMediaStartupError = error
+        }
+    }
+
+    @discardableResult
+    private func clearSubscriberMediaStartupState() -> PeerConnectionMediaStartupResult? {
+        let cleared = subscriberMediaStartupLock.withLock {
+            let task = subscriberMediaStartupTask
+            let result = subscriberMediaStartupResult
+            subscriberMediaStartupStarted = false
+            subscriberMediaStartupTask = nil
+            subscriberMediaStartupResult = nil
+            subscriberMediaStartupError = nil
+            subscriberLocalCandidatesGathered = false
+            subscriberLocalCandidates = []
+            return (task, result)
+        }
+
+        cleared.0?.cancel()
+        return cleared.1
+    }
+
+    @discardableResult
+    private func clearPublisherMediaStartupState() -> PeerConnectionMediaStartupResult? {
+        let cleared = publisherMediaStartupLock.withLock {
+            let task = publisherMediaStartupTask
+            let result = publisherMediaStartupResult
+            publisherMediaStartupStarted = false
+            publisherMediaStartupTask = nil
+            publisherMediaStartupResult = nil
+            publisherMediaStartupError = nil
+            publisherLocalCandidatesGathered = false
+            publisherLocalCandidates = []
+            return (task, result)
+        }
+
+        cleared.0?.cancel()
+        return cleared.1
+    }
+
+    private func closeMediaStartupTransport(_ result: PeerConnectionMediaStartupResult?) async {
+        await result?.transport.close()
+    }
+
+    private func closeMediaStartupTransportDetached(_ result: PeerConnectionMediaStartupResult?) {
+        guard let result else {
+            return
+        }
+
+        Task {
+            await result.transport.close()
+        }
+    }
+
+    private func subscriberLocalICECandidates() -> [ICECandidate] {
+        if let candidates = subscriberMediaStartupLock.withLock({ () -> [ICECandidate]? in
+            subscriberLocalCandidatesGathered ? subscriberLocalCandidates : nil
+        }) {
+            return candidates
+        }
+
+        guard let subscriberMediaStartupConfiguration else {
+            return []
+        }
+
+        let candidates = subscriberMediaStartupConfiguration.localCandidates(
+            subscriberPeerConnection.configuration.iceServers
+        )
+        return subscriberMediaStartupLock.withLock {
+            if !subscriberLocalCandidatesGathered {
+                subscriberLocalCandidates = candidates
+                subscriberLocalCandidatesGathered = true
+            }
+
+            return subscriberLocalCandidates
+        }
+    }
+
+    private func publisherLocalICECandidates() -> [ICECandidate] {
+        if let candidates = publisherMediaStartupLock.withLock({ () -> [ICECandidate]? in
+            publisherLocalCandidatesGathered ? publisherLocalCandidates : nil
+        }) {
+            return candidates
+        }
+
+        guard let publisherMediaStartupConfiguration else {
+            return []
+        }
+
+        let candidates = publisherMediaStartupConfiguration.localCandidates(
+            publisherPeerConnection.configuration.iceServers
+        )
+        return publisherMediaStartupLock.withLock {
+            if !publisherLocalCandidatesGathered {
+                publisherLocalCandidates = candidates
+                publisherLocalCandidatesGathered = true
+            }
+
+            return publisherLocalCandidates
+        }
+    }
+
+    private func sendSubscriberLocalICETrickleCandidates() async throws {
+        guard subscriberMediaStartupConfiguration != nil else {
+            return
+        }
+
+        for candidate in subscriberLocalICECandidates() {
+            var trickle = Livekit_TrickleRequest()
+            trickle.target = .subscriber
+            trickle.candidateInit = try RTCIceCandidateInit(
+                candidate: candidate,
+                sdpMid: "0",
+                sdpMLineIndex: 0,
+                usernameFragment: subscriberPeerConnection.configuration.iceCredentials.usernameFragment
+            ).jsonString()
+
+            var request = Livekit_SignalRequest()
+            request.trickle = trickle
+            try await signalConnection.send(request)
+        }
+
+        var finalTrickle = Livekit_TrickleRequest()
+        finalTrickle.target = .subscriber
+        finalTrickle.final = true
+
+        var finalRequest = Livekit_SignalRequest()
+        finalRequest.trickle = finalTrickle
+        try await signalConnection.send(finalRequest)
+    }
+
+    private func sendPublisherLocalICETrickleCandidates() async throws {
+        guard publisherMediaStartupConfiguration != nil else {
+            return
+        }
+
+        for candidate in publisherLocalICECandidates() {
+            var trickle = Livekit_TrickleRequest()
+            trickle.target = .publisher
+            trickle.candidateInit = try RTCIceCandidateInit(
+                candidate: candidate,
+                sdpMid: "0",
+                sdpMLineIndex: 0,
+                usernameFragment: publisherPeerConnection.configuration.iceCredentials.usernameFragment
+            ).jsonString()
+
+            var request = Livekit_SignalRequest()
+            request.trickle = trickle
+            try await signalConnection.send(request)
+        }
+
+        var finalTrickle = Livekit_TrickleRequest()
+        finalTrickle.target = .publisher
+        finalTrickle.final = true
+
+        var finalRequest = Livekit_SignalRequest()
+        finalRequest.trickle = finalTrickle
+        try await signalConnection.send(finalRequest)
     }
 
     private func nextPublisherOfferIdentifier() -> UInt32 {
@@ -873,6 +1641,33 @@ private struct RoomConnectionContext: Sendable {
     var serverURL: URL
     var token: String
     var connectOptions: ConnectOptions
+}
+
+private extension ICEServer {
+    init(protocolServer: Livekit_ICEServer) {
+        self.init(
+            urls: protocolServer.urls,
+            username: protocolServer.username.nilIfEmpty,
+            credential: protocolServer.credential.nilIfEmpty
+        )
+    }
+}
+
+private extension TrackKind {
+    var protocolTrackType: Livekit_TrackType {
+        switch self {
+        case .audio:
+            .audio
+        case .video:
+            .video
+        }
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
 }
 
 private extension SpeakerInfo {

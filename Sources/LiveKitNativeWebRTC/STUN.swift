@@ -8,6 +8,7 @@ package enum STUNError: Error, Equatable, Sendable {
     case invalidTransactionIDLength(Int)
     case invalidUTF8Attribute(UInt16)
     case invalidAddressAttribute
+    case invalidErrorCodeAttribute
     case missingAttribute(UInt16)
     case invalidAttributeLength(UInt16, Int)
     case unsupportedAddressFamily(UInt8)
@@ -21,8 +22,11 @@ package struct STUNMessageType: RawRepresentable, Equatable, Sendable {
     }
 
     package static let bindingRequest = STUNMessageType(rawValue: 0x0001)
+    package static let allocateRequest = STUNMessageType(rawValue: 0x0003)
     package static let bindingSuccessResponse = STUNMessageType(rawValue: 0x0101)
+    package static let allocateSuccessResponse = STUNMessageType(rawValue: 0x0103)
     package static let bindingErrorResponse = STUNMessageType(rawValue: 0x0111)
+    package static let allocateErrorResponse = STUNMessageType(rawValue: 0x0113)
 }
 
 package struct STUNTransactionID: Equatable, Sendable {
@@ -49,12 +53,23 @@ package enum STUNAttributeType: UInt16, Equatable, Sendable {
     case mappedAddress = 0x0001
     case username = 0x0006
     case messageIntegrity = 0x0008
+    case errorCode = 0x0009
+    case lifetime = 0x000D
+    case realm = 0x0014
+    case nonce = 0x0015
+    case xorRelayedAddress = 0x0016
+    case requestedTransport = 0x0019
     case xorMappedAddress = 0x0020
     case priority = 0x0024
     case useCandidate = 0x0025
     case fingerprint = 0x8028
     case iceControlled = 0x8029
     case iceControlling = 0x802A
+}
+
+package enum TURNRequestedTransportProtocol: UInt8, Equatable, Sendable {
+    case tcp = 6
+    case udp = 17
 }
 
 package struct STUNMappedAddress: Equatable, Sendable {
@@ -64,6 +79,16 @@ package struct STUNMappedAddress: Equatable, Sendable {
     package init(address: String, port: UInt16) {
         self.address = address
         self.port = port
+    }
+}
+
+package struct STUNErrorCode: Equatable, Sendable {
+    package var code: Int
+    package var reason: String
+
+    package init(code: Int, reason: String) {
+        self.code = code
+        self.reason = reason
     }
 }
 
@@ -84,6 +109,24 @@ package struct STUNAttribute: Equatable, Sendable {
         STUNAttribute(type: .username, value: Data(value.utf8))
     }
 
+    package static func realm(_ value: String) -> STUNAttribute {
+        STUNAttribute(type: .realm, value: Data(value.utf8))
+    }
+
+    package static func nonce(_ value: String) -> STUNAttribute {
+        STUNAttribute(type: .nonce, value: Data(value.utf8))
+    }
+
+    package static func lifetime(seconds: UInt32) -> STUNAttribute {
+        var data = Data()
+        data.appendNetworkUInt32(seconds)
+        return STUNAttribute(type: .lifetime, value: data)
+    }
+
+    package static func requestedTransport(_ transport: TURNRequestedTransportProtocol) -> STUNAttribute {
+        STUNAttribute(type: .requestedTransport, value: Data([transport.rawValue, 0, 0, 0]))
+    }
+
     package static func priority(_ value: UInt32) -> STUNAttribute {
         var data = Data()
         data.appendNetworkUInt32(value)
@@ -94,6 +137,12 @@ package struct STUNAttribute: Equatable, Sendable {
 
     package static func messageIntegrity(_ value: Data) -> STUNAttribute {
         STUNAttribute(type: .messageIntegrity, value: value)
+    }
+
+    package static func errorCode(_ code: Int, reason: String) -> STUNAttribute {
+        var data = Data([0, 0, UInt8((code / 100) & 0x07), UInt8(code % 100)])
+        data.append(contentsOf: reason.utf8)
+        return STUNAttribute(type: .errorCode, value: data)
     }
 
     package static func fingerprint(_ value: UInt32) -> STUNAttribute {
@@ -107,21 +156,25 @@ package struct STUNAttribute: Equatable, Sendable {
         port: UInt16,
         transactionID: STUNTransactionID
     ) throws -> STUNAttribute {
-        _ = transactionID
-        let octets = try ipv4Octets(from: address)
-        let addressValue = UInt32(octets[0]) << 24 |
-            UInt32(octets[1]) << 16 |
-            UInt32(octets[2]) << 8 |
-            UInt32(octets[3])
-        let xoredPort = port ^ UInt16(STUNMessage.magicCookie >> 16)
-        let xoredAddress = addressValue ^ STUNMessage.magicCookie
+        try xorAddressIPv4Attribute(
+            type: .xorMappedAddress,
+            address: address,
+            port: port,
+            transactionID: transactionID
+        )
+    }
 
-        var data = Data()
-        data.append(0)
-        data.append(0x01)
-        data.appendNetworkUInt16(xoredPort)
-        data.appendNetworkUInt32(xoredAddress)
-        return STUNAttribute(type: .xorMappedAddress, value: data)
+    package static func xorRelayedAddressIPv4(
+        address: String,
+        port: UInt16,
+        transactionID: STUNTransactionID
+    ) throws -> STUNAttribute {
+        try xorAddressIPv4Attribute(
+            type: .xorRelayedAddress,
+            address: address,
+            port: port,
+            transactionID: transactionID
+        )
     }
 
     package static func iceControlled(tieBreaker: UInt64) -> STUNAttribute {
@@ -156,34 +209,61 @@ package struct STUNAttribute: Equatable, Sendable {
         return try? value.networkUInt64(at: 0)
     }
 
-    package var xorMappedAddressValue: STUNMappedAddress? {
+    package var errorCodeValue: STUNErrorCode? {
         get throws {
-            guard type == STUNAttributeType.xorMappedAddress.rawValue else {
+            guard type == STUNAttributeType.errorCode.rawValue else {
                 return nil
             }
 
-            guard value.count >= 8 else {
-                throw STUNError.invalidAddressAttribute
+            guard value.count >= 4 else {
+                throw STUNError.invalidErrorCodeAttribute
             }
 
-            let family = value[value.index(value.startIndex, offsetBy: 1)]
-            let port = try value.networkUInt16(at: 2) ^ UInt16(STUNMessage.magicCookie >> 16)
-
-            switch family {
-            case 0x01:
-                let address = try value.networkUInt32(at: 4) ^ STUNMessage.magicCookie
-                return STUNMappedAddress(
-                    address: [
-                        String((address >> 24) & 0xFF),
-                        String((address >> 16) & 0xFF),
-                        String((address >> 8) & 0xFF),
-                        String(address & 0xFF),
-                    ].joined(separator: "."),
-                    port: port
-                )
-            default:
-                throw STUNError.unsupportedAddressFamily(family)
+            guard value[value.startIndex] == 0,
+                  value[value.index(after: value.startIndex)] == 0
+            else {
+                throw STUNError.invalidErrorCodeAttribute
             }
+
+            let classByte = value[value.index(value.startIndex, offsetBy: 2)]
+            guard classByte & 0xF8 == 0 else {
+                throw STUNError.invalidErrorCodeAttribute
+            }
+
+            let classValue = Int(value[value.index(value.startIndex, offsetBy: 2)] & 0x07)
+            let numberValue = Int(value[value.index(value.startIndex, offsetBy: 3)])
+            guard (3...6).contains(classValue), numberValue < 100 else {
+                throw STUNError.invalidErrorCodeAttribute
+            }
+
+            let reasonData = Data(value.dropFirst(4))
+            guard let reason = String(data: reasonData, encoding: .utf8) else {
+                throw STUNError.invalidUTF8Attribute(type)
+            }
+
+            return STUNErrorCode(code: (classValue * 100) + numberValue, reason: reason)
+        }
+    }
+
+    package var requestedTransportProtocol: TURNRequestedTransportProtocol? {
+        guard type == STUNAttributeType.requestedTransport.rawValue,
+              value.count == 4
+        else {
+            return nil
+        }
+
+        return TURNRequestedTransportProtocol(rawValue: value[value.startIndex])
+    }
+
+    package var xorMappedAddressValue: STUNMappedAddress? {
+        get throws {
+            try xorAddressValue(expectedType: .xorMappedAddress)
+        }
+    }
+
+    package var xorRelayedAddressValue: STUNMappedAddress? {
+        get throws {
+            try xorAddressValue(expectedType: .xorRelayedAddress)
         }
     }
 
@@ -207,6 +287,92 @@ package struct STUNAttribute: Equatable, Sendable {
 
             return value
         }
+    }
+
+    private static func xorAddressIPv4Attribute(
+        type: STUNAttributeType,
+        address: String,
+        port: UInt16,
+        transactionID: STUNTransactionID
+    ) throws -> STUNAttribute {
+        _ = transactionID
+        let octets = try ipv4Octets(from: address)
+        let addressValue = UInt32(octets[0]) << 24 |
+            UInt32(octets[1]) << 16 |
+            UInt32(octets[2]) << 8 |
+            UInt32(octets[3])
+        let xoredPort = port ^ UInt16(STUNMessage.magicCookie >> 16)
+        let xoredAddress = addressValue ^ STUNMessage.magicCookie
+
+        var data = Data()
+        data.append(0)
+        data.append(0x01)
+        data.appendNetworkUInt16(xoredPort)
+        data.appendNetworkUInt32(xoredAddress)
+        return STUNAttribute(type: type, value: data)
+    }
+
+    private func xorAddressValue(expectedType: STUNAttributeType) throws -> STUNMappedAddress? {
+        guard type == expectedType.rawValue else {
+            return nil
+        }
+
+        guard value.count >= 8 else {
+            throw STUNError.invalidAddressAttribute
+        }
+
+        let family = value[value.index(value.startIndex, offsetBy: 1)]
+        let port = try value.networkUInt16(at: 2) ^ UInt16(STUNMessage.magicCookie >> 16)
+
+        switch family {
+        case 0x01:
+            let address = try value.networkUInt32(at: 4) ^ STUNMessage.magicCookie
+            return STUNMappedAddress(
+                address: [
+                    String((address >> 24) & 0xFF),
+                    String((address >> 16) & 0xFF),
+                    String((address >> 8) & 0xFF),
+                    String(address & 0xFF),
+                ].joined(separator: "."),
+                port: port
+            )
+        default:
+            throw STUNError.unsupportedAddressFamily(family)
+        }
+    }
+}
+
+package enum TURNAllocateRequestFactory {
+    package static func makeAllocateRequest(
+        relayedTransport: TURNRequestedTransportProtocol = .udp,
+        username: String? = nil,
+        realm: String? = nil,
+        nonce: String? = nil,
+        lifetimeSeconds: UInt32? = nil,
+        transactionID: STUNTransactionID = .random()
+    ) -> STUNMessage {
+        var attributes: [STUNAttribute] = [
+            .requestedTransport(relayedTransport),
+        ]
+
+        if let lifetimeSeconds {
+            attributes.append(.lifetime(seconds: lifetimeSeconds))
+        }
+        if let username {
+            attributes.append(.username(username))
+        }
+        if let realm {
+            attributes.append(.realm(realm))
+        }
+        if let nonce {
+            attributes.append(.nonce(nonce))
+        }
+
+        return STUNMessage(
+            type: .allocateRequest,
+            transactionID: transactionID,
+            attributes: attributes
+        )
     }
 }
 

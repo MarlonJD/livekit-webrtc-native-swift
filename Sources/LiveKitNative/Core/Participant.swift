@@ -141,6 +141,19 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
         }
     }
 
+    func applyDataTrackPublication(_ dataTrack: DataTrackInfo) {
+        dataPublicationLock.withLock {
+            localDataTrackPublications[dataTrack.publisherHandle] = dataTrack
+        }
+    }
+
+    @discardableResult
+    func removeDataTrackPublication(publisherHandle: UInt32) -> DataTrackInfo? {
+        dataPublicationLock.withLock {
+            localDataTrackPublications.removeValue(forKey: publisherHandle)
+        }
+    }
+
     public func setCamera(enabled: Bool, options: CameraCaptureOptions = .init()) async throws {
         if enabled {
             let hasCameraPublication = publicationLock.withLock {
@@ -298,9 +311,7 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
             )
         }
 
-        dataPublicationLock.withLock {
-            localDataTrackPublications[dataTrack.publisherHandle] = dataTrack
-        }
+        applyDataTrackPublication(dataTrack)
 
         return dataTrack
     }
@@ -318,9 +329,7 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
             dataTrack
         }
 
-        dataPublicationLock.withLock {
-            _ = localDataTrackPublications.removeValue(forKey: dataTrack.publisherHandle)
-        }
+        removeDataTrackPublication(publisherHandle: dataTrack.publisherHandle)
 
         return unpublishedTrack
     }
@@ -495,7 +504,7 @@ public final class LocalParticipant: Participant, @unchecked Sendable {
     }
 
     @discardableResult
-    private func removeLocalTrackPublication(sid: String) -> LocalTrackPublication? {
+    func removeLocalTrackPublication(sid: String) -> LocalTrackPublication? {
         publicationLock.withLock {
             localTrackPublications.removeValue(forKey: sid)
         }

@@ -31,6 +31,8 @@ actor RoomActor {
             attributes: join.localParticipant.attributes
         )
         state.remoteParticipants.removeAll()
+        state.mediaSectionsRequirement = nil
+        state.dataTrackSubscriberHandles = nil
         state.connectionState = .connected
 
         applyRemoteParticipantUpdates(join.remoteParticipants, events: &events)
@@ -84,6 +86,8 @@ actor RoomActor {
 
     func disconnect() -> (RoomSnapshot, [RoomEvent]) {
         state.connectionState = .disconnected
+        state.mediaSectionsRequirement = nil
+        state.dataTrackSubscriberHandles = nil
 
         let participants = state.remoteParticipants.values.sorted { $0.id < $1.id }
         state.remoteParticipants.removeAll()
@@ -96,6 +100,16 @@ actor RoomActor {
         }
 
         return (state.snapshot, events)
+    }
+
+    func applyMediaSectionsRequirement(_ requirement: MediaSectionsRequirementInfo) -> (RoomSnapshot, [RoomEvent]) {
+        state.mediaSectionsRequirement = requirement
+        return (state.snapshot, [.mediaSectionsRequirementChanged(requirement)])
+    }
+
+    func applyDataTrackSubscriberHandles(_ handles: DataTrackSubscriberHandlesInfo) -> (RoomSnapshot, [RoomEvent]) {
+        state.dataTrackSubscriberHandles = handles
+        return (state.snapshot, [.dataTrackSubscriberHandlesChanged(handles)])
     }
 
     func dataEvent(for packet: ReceivedLiveKitDataPacket) -> RoomEvent {
@@ -177,12 +191,16 @@ struct RoomState: Sendable {
     var connectionState: ConnectionState = .disconnected
     var localParticipant: LocalParticipant
     var remoteParticipants: [String: RemoteParticipant] = [:]
+    var mediaSectionsRequirement: MediaSectionsRequirementInfo?
+    var dataTrackSubscriberHandles: DataTrackSubscriberHandlesInfo?
 
     var snapshot: RoomSnapshot {
         RoomSnapshot(
             connectionState: connectionState,
             localParticipant: localParticipant,
-            remoteParticipants: Array(remoteParticipants.values)
+            remoteParticipants: Array(remoteParticipants.values),
+            mediaSectionsRequirement: mediaSectionsRequirement,
+            dataTrackSubscriberHandles: dataTrackSubscriberHandles
         )
     }
 }
@@ -191,6 +209,8 @@ struct RoomSnapshot: Sendable {
     var connectionState: ConnectionState
     var localParticipant: LocalParticipant
     var remoteParticipants: [RemoteParticipant]
+    var mediaSectionsRequirement: MediaSectionsRequirementInfo?
+    var dataTrackSubscriberHandles: DataTrackSubscriberHandlesInfo?
 }
 
 final class RoomSnapshotStore: @unchecked Sendable {
@@ -201,7 +221,9 @@ final class RoomSnapshotStore: @unchecked Sendable {
         self.snapshot = RoomSnapshot(
             connectionState: .disconnected,
             localParticipant: localParticipant,
-            remoteParticipants: []
+            remoteParticipants: [],
+            mediaSectionsRequirement: nil,
+            dataTrackSubscriberHandles: nil
         )
     }
 
@@ -220,6 +242,18 @@ final class RoomSnapshotStore: @unchecked Sendable {
     var connectionState: ConnectionState {
         lock.withLock {
             snapshot.connectionState
+        }
+    }
+
+    var mediaSectionsRequirement: MediaSectionsRequirementInfo? {
+        lock.withLock {
+            snapshot.mediaSectionsRequirement
+        }
+    }
+
+    var dataTrackSubscriberHandles: DataTrackSubscriberHandlesInfo? {
+        lock.withLock {
+            snapshot.dataTrackSubscriberHandles
         }
     }
 

@@ -150,6 +150,10 @@ package struct ICECandidate: Equatable, Sendable {
     package var sdpAttributeValue: String {
         "candidate:\(foundation) \(componentID.rawValue) \(transport.rawValue.uppercased()) \(priority) \(address) \(port) typ \(type.sdpToken)"
     }
+
+    package var localPreference: UInt16 {
+        UInt16((priority >> 8) & 0xFFFF)
+    }
 }
 
 package enum ICECandidateSDPError: Error, Equatable, Sendable {
@@ -457,6 +461,284 @@ package enum ICEHostCandidateGatherer {
     }
 }
 
+package struct STUNServerEndpoint: Equatable, Sendable {
+    package var host: String
+    package var port: UInt16
+
+    package init(host: String, port: UInt16 = 3_478) {
+        self.host = host
+        self.port = port
+    }
+
+    package init?(iceURL: String) {
+        let lowercasedURL = iceURL.lowercased()
+        guard lowercasedURL.hasPrefix("stun:") else {
+            return nil
+        }
+
+        let remainder = String(iceURL.dropFirst("stun:".count))
+        let parts = remainder.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        let hostPort = String(parts[0])
+
+        if parts.count == 2,
+           let queryItems = URLComponents(string: "stun://ignored?\(parts[1])")?.queryItems,
+           let transport = queryItems.first(where: { $0.name.lowercased() == "transport" })?.value,
+           transport.lowercased() != "udp" {
+            return nil
+        }
+
+        let parsed: (host: String, port: UInt16)?
+        if hostPort.hasPrefix("["),
+           let endBracket = hostPort.firstIndex(of: "]") {
+            let host = String(hostPort[hostPort.index(after: hostPort.startIndex)..<endBracket])
+            let portStart = hostPort.index(after: endBracket)
+            if portStart < hostPort.endIndex, hostPort[portStart] == ":" {
+                let portString = String(hostPort[hostPort.index(after: portStart)...])
+                guard let port = UInt16(portString) else {
+                    return nil
+                }
+                parsed = (host, port)
+            } else {
+                parsed = (host, 3_478)
+            }
+        } else if let lastColon = hostPort.lastIndex(of: ":"),
+                  hostPort[..<lastColon].contains(":") == false {
+            let host = String(hostPort[..<lastColon])
+            let portString = String(hostPort[hostPort.index(after: lastColon)...])
+            guard let port = UInt16(portString) else {
+                return nil
+            }
+            parsed = (host, port)
+        } else {
+            parsed = (hostPort, 3_478)
+        }
+
+        guard let parsed, !parsed.host.isEmpty else {
+            return nil
+        }
+
+        self.init(host: parsed.host, port: parsed.port)
+    }
+
+    package static func endpoints(from iceServers: [ICEServer]) -> [STUNServerEndpoint] {
+        var endpoints: [STUNServerEndpoint] = []
+        var seen = Set<String>()
+
+        for server in iceServers {
+            for url in server.urls {
+                guard let endpoint = STUNServerEndpoint(iceURL: url) else {
+                    continue
+                }
+
+                let key = "\(endpoint.host.lowercased()):\(endpoint.port)"
+                guard seen.insert(key).inserted else {
+                    continue
+                }
+
+                endpoints.append(endpoint)
+            }
+        }
+
+        return endpoints
+    }
+}
+
+private func parseICEURLHostPort(_ hostPort: String, defaultPort: UInt16) -> (host: String, port: UInt16)? {
+    let parsed: (host: String, port: UInt16)?
+    if hostPort.hasPrefix("["),
+       let endBracket = hostPort.firstIndex(of: "]") {
+        let host = String(hostPort[hostPort.index(after: hostPort.startIndex)..<endBracket])
+        let portStart = hostPort.index(after: endBracket)
+        if portStart < hostPort.endIndex, hostPort[portStart] == ":" {
+            let portString = String(hostPort[hostPort.index(after: portStart)...])
+            guard let port = UInt16(portString) else {
+                return nil
+            }
+            parsed = (host, port)
+        } else {
+            parsed = (host, defaultPort)
+        }
+    } else if let lastColon = hostPort.lastIndex(of: ":"),
+              hostPort[..<lastColon].contains(":") == false {
+        let host = String(hostPort[..<lastColon])
+        let portString = String(hostPort[hostPort.index(after: lastColon)...])
+        guard let port = UInt16(portString) else {
+            return nil
+        }
+        parsed = (host, port)
+    } else {
+        parsed = (hostPort, defaultPort)
+    }
+
+    guard let parsed, !parsed.host.isEmpty else {
+        return nil
+    }
+
+    return parsed
+}
+
+package struct TURNServerEndpoint: Equatable, Sendable {
+    package var host: String
+    package var port: UInt16
+    package var transport: ICETransportProtocol
+    package var isSecure: Bool
+    package var username: String?
+    package var credential: String?
+
+    package init(
+        host: String,
+        port: UInt16,
+        transport: ICETransportProtocol,
+        isSecure: Bool,
+        username: String? = nil,
+        credential: String? = nil
+    ) {
+        self.host = host
+        self.port = port
+        self.transport = transport
+        self.isSecure = isSecure
+        self.username = username
+        self.credential = credential
+    }
+
+    package init?(iceURL: String, username: String? = nil, credential: String? = nil) {
+        let lowercasedURL = iceURL.lowercased()
+        let isSecure: Bool
+        let remainder: String
+        if lowercasedURL.hasPrefix("turns:") {
+            isSecure = true
+            remainder = String(iceURL.dropFirst("turns:".count))
+        } else if lowercasedURL.hasPrefix("turn:") {
+            isSecure = false
+            remainder = String(iceURL.dropFirst("turn:".count))
+        } else {
+            return nil
+        }
+
+        let parts = remainder.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        let hostPort = String(parts[0])
+        var transport: ICETransportProtocol = isSecure ? .tcp : .udp
+
+        if parts.count == 2 {
+            guard let queryItems = URLComponents(string: "turn://ignored?\(parts[1])")?.queryItems else {
+                return nil
+            }
+            if let transportValue = queryItems.first(where: { $0.name.lowercased() == "transport" })?.value {
+                guard let parsedTransport = ICETransportProtocol(rawValue: transportValue.lowercased()) else {
+                    return nil
+                }
+                transport = parsedTransport
+            }
+        }
+
+        guard let parsed = parseICEURLHostPort(hostPort, defaultPort: isSecure ? 5_349 : 3_478) else {
+            return nil
+        }
+
+        self.init(
+            host: parsed.host,
+            port: parsed.port,
+            transport: transport,
+            isSecure: isSecure,
+            username: username,
+            credential: credential
+        )
+    }
+
+    package static func endpoints(from iceServers: [ICEServer]) -> [TURNServerEndpoint] {
+        var endpoints: [TURNServerEndpoint] = []
+        var seen = Set<String>()
+
+        for server in iceServers {
+            for url in server.urls {
+                guard let endpoint = TURNServerEndpoint(
+                    iceURL: url,
+                    username: server.username,
+                    credential: server.credential
+                ) else {
+                    continue
+                }
+
+                let key = [
+                    endpoint.isSecure ? "turns" : "turn",
+                    endpoint.transport.rawValue,
+                    endpoint.host.lowercased(),
+                    String(endpoint.port),
+                    endpoint.username ?? "",
+                    endpoint.credential ?? "",
+                ].joined(separator: "|")
+                guard seen.insert(key).inserted else {
+                    continue
+                }
+
+                endpoints.append(endpoint)
+            }
+        }
+
+        return endpoints
+    }
+}
+
+package struct STUNServerReflexiveCandidateGatherer: Sendable {
+    package var makeTransport: @Sendable (STUNServerEndpoint) throws -> any STUNDatagramTransport
+
+    package init(
+        makeTransport: @escaping @Sendable (STUNServerEndpoint) throws -> any STUNDatagramTransport = { endpoint in
+            STUNUDPSocketTransport(host: endpoint.host, port: endpoint.port)
+        }
+    ) {
+        self.makeTransport = makeTransport
+    }
+
+    package func gatherCandidates(
+        for localCandidate: ICECandidate,
+        iceServers: [ICEServer],
+        retryPolicy: STUNBindingRetryPolicy = .once
+    ) -> [ICECandidate] {
+        guard localCandidate.transport == .udp,
+              localCandidate.componentID == .rtp
+        else {
+            return []
+        }
+
+        var candidates: [ICECandidate] = []
+        var seenMappedAddresses = Set<String>()
+        let endpoints = STUNServerEndpoint.endpoints(from: iceServers)
+
+        for (index, endpoint) in endpoints.enumerated() {
+            do {
+                let result = try STUNBindingClient(
+                    transport: try makeTransport(endpoint)
+                ).requestMappedAddress(retryPolicy: retryPolicy)
+                let key = "\(result.mappedAddress.address):\(result.mappedAddress.port)"
+                guard seenMappedAddresses.insert(key).inserted else {
+                    continue
+                }
+
+                candidates.append(
+                    ICECandidate(
+                        foundation: "\(localCandidate.foundation)-srflx-\(index + 1)",
+                        componentID: localCandidate.componentID,
+                        transport: .udp,
+                        priority: ICECandidatePriority(
+                            type: .serverReflexive,
+                            localPreference: localCandidate.localPreference,
+                            componentID: localCandidate.componentID
+                        ).value,
+                        address: result.mappedAddress.address,
+                        port: result.mappedAddress.port,
+                        type: .serverReflexive
+                    )
+                )
+            } catch {
+                continue
+            }
+        }
+
+        return candidates
+    }
+}
+
 package enum ICEAgentRole: Equatable, Sendable {
     case controlling
     case controlled
@@ -738,6 +1020,41 @@ package struct STUNBindingClient: Sendable {
         self.transport = transport
     }
 
+    package func requestMappedAddress(
+        transactionID: STUNTransactionID = .random(),
+        includeFingerprint: Bool = true,
+        requireResponseFingerprint: Bool = false,
+        retryPolicy: STUNBindingRetryPolicy = .connectivityCheck
+    ) throws -> ICEConnectivityCheckResult {
+        let request = STUNMessage(type: .bindingRequest, transactionID: transactionID)
+        let requestData = try request.encoded(includeFingerprint: includeFingerprint)
+
+        var lastTransportError: (any Error)?
+        for _ in 0..<retryPolicy.maxAttempts {
+            let responseData: Data
+            do {
+                responseData = try transport.send(requestData)
+            } catch {
+                lastTransportError = error
+                continue
+            }
+
+            return try validateBindingResponse(
+                responseData,
+                transactionID: transactionID,
+                messageIntegrityKey: nil,
+                requireResponseMessageIntegrity: false,
+                requireResponseFingerprint: requireResponseFingerprint
+            )
+        }
+
+        if let lastTransportError {
+            throw lastTransportError
+        }
+
+        throw ICEConnectivityCheckError.missingMappedAddress
+    }
+
     package func requestServerReflexiveAddress(
         localCredentials: ICECredentials,
         remoteCredentials: ICECredentials,
@@ -777,7 +1094,7 @@ package struct STUNBindingClient: Sendable {
             return try validateBindingResponse(
                 responseData,
                 transactionID: transactionID,
-                remoteCredentials: remoteCredentials,
+                messageIntegrityKey: remoteCredentials.password,
                 requireResponseMessageIntegrity: requireResponseMessageIntegrity,
                 requireResponseFingerprint: requireResponseFingerprint
             )
@@ -793,7 +1110,7 @@ package struct STUNBindingClient: Sendable {
     private func validateBindingResponse(
         _ responseData: Data,
         transactionID: STUNTransactionID,
-        remoteCredentials: ICECredentials,
+        messageIntegrityKey: String?,
         requireResponseMessageIntegrity: Bool,
         requireResponseFingerprint: Bool
     ) throws -> ICEConnectivityCheckResult {
@@ -810,7 +1127,9 @@ package struct STUNBindingClient: Sendable {
         }
 
         if response.firstAttribute(.messageIntegrity) != nil || requireResponseMessageIntegrity {
-            guard try response.validatesMessageIntegrity(key: remoteCredentials.password) else {
+            guard let messageIntegrityKey,
+                  try response.validatesMessageIntegrity(key: messageIntegrityKey)
+            else {
                 throw ICEConnectivityCheckError.invalidMessageIntegrity
             }
         }

@@ -42,11 +42,13 @@ and ROC-aware authentication groundwork, SRTP AES-CM payload
 encryption/decryption groundwork, full SRTP/SRTCP packet protect/unprotect APIs
 with replay rejection, secure RTP/RTCP datagram send/receive wiring,
 nominated ICE-pair guarded transport construction, UDP media datagram socket
-transport, ICE agent connectivity-check orchestration, typed DTLS-SRTP
-handshake results, `use_srtp` extension encode/decode and profile selection,
-SDP DTLS fingerprint/setup parsing, peer-connection handshake configuration,
-exporter-backed secure media session construction with remote fingerprint
-validation, handshaker-backed media session binding, plus RTCP
+transport, bound local ICE UDP sockets that gather host candidates and reuse
+the candidate port for STUN checks and media datagrams, ICE agent
+connectivity-check orchestration, typed DTLS-SRTP handshake results, `use_srtp`
+extension encode/decode and profile selection, SDP DTLS fingerprint/setup
+parsing, peer-connection handshake configuration, exporter-backed secure media
+session construction with remote fingerprint validation, handshaker-backed
+media session binding, plus RTCP
 report/feedback packet groundwork.
 Basic signal
 resume/full-reconnect and alternative signal URL retry are implemented at
@@ -56,23 +58,56 @@ subscription response, track-subscribed, room-moved, publisher answer, and
 publisher trickle messages are also mapped into typed SDK state/events at
 unit-test level. Media section requirements, subscribed audio codec updates,
 data-track publish/unpublish responses, and data-track subscriber handle
-updates are exposed as typed room events. Room-connected data-track
-publish/unpublish requests now wait for matching server responses. Room-connected
+updates are exposed as typed room events, with media section requirements and
+data-track subscriber handles also retained as latest-value Room state.
+Room-connected data-track
+publish/unpublish requests now wait for matching server responses and surface
+matching `RequestResponse` failures as typed SDK errors. Server/SFU data-track
+unpublish responses clear matching local publication state so reconnect does
+not replay stale data tracks. Server/SFU track-unpublished responses for local
+media also clear local publication and cached publisher offer state so reconnect
+and later publisher offers do not replay removed tracks. Room-connected
 `publish(videoTrack:)` and `publish(audioTrack:)` now send LiveKit
 `AddTrackRequest` messages and wait for matching `TrackPublishedResponse`
-acknowledgements. Local track unpublish and camera/microphone disable also send
-muted `MuteTrackRequest` messages before local publication removal, while
+acknowledgements, while matching `RequestResponse` failures are surfaced before
+timeout. Local track unpublish and camera/microphone disable also send
+muted `MuteTrackRequest` messages and wait for matching `RequestResponse`
+acknowledgements before local publication removal; multi-track unpublish also
+sends a refreshed publisher offer for the remaining local media, and final
+local media unpublish closes and clears the injected publisher media transport.
 `Room.updateSubscription` and `Room.updateTrackSettings` expose media
 subscription and subscribed track settings signaling.
 `LocalParticipant.setTrackSubscriptionPermissions` exposes publisher-controlled
 subscription permission signaling, and `LocalParticipant.updateAudioTrack` /
 `LocalParticipant.updateVideoTrack` expose local publisher track update
-signaling. Publisher publish acknowledgements now trigger send-only SDP offer
-signaling for the publisher negotiation path. Peer connection coordinators can
+signaling with matching `RequestResponse` acknowledgement handling. Publisher
+publish acknowledgements now trigger send-only SDP offer signaling for the
+publisher negotiation path. Peer connection coordinators can
 now hand negotiated DTLS configuration and nominated ICE pairs into the
-handshaker-backed media session binder. Real DTLS handshake/exporter
-implementation, Room runtime media startup integration, RTP sender transport,
-and reconnect media recovery remain part of production hardening.
+handshaker-backed media session binder, and can run ICE checks to select a pair
+before binding secure media. Room can now trigger injected publisher and
+subscriber media startup after negotiated SDP and final ICE trickle, and can
+send local ICE candidate and final-trickle signaling for both peer connection
+targets when media startup is configured. Injected media startup can now be
+backed by bound local ICE UDP sockets so host candidate gathering, STUN checks,
+and media datagrams share the same local port. `JoinResponse` and
+`ReconnectResponse` ICE server lists now update both subscriber and publisher
+peer connection configurations, and injected bound-socket startup can use
+supported `stun:` UDP URLs to add server-reflexive candidates while preserving
+socket reuse. `turn:` and `turns:` ICE server URLs are parsed with UDP/TCP/TLS
+intent and credentials retained for future relay allocation, and TURN Allocate
+request primitives cover requested transport, lifetime, realm, nonce, and
+relayed-address decoding. Fresh join, reconnect, and disconnect boundaries now
+reset stale remote SDP/ICE negotiation state without replacing the local peer
+connection configuration, and regenerate local ICE credentials for the next
+negotiation.
+Resume reconnects now send LiveKit `SyncState` for retained media subscription
+preferences, disabled subscribed tracks, local media/data publications, and
+the latest negotiated subscriber answer / publisher offer SDP state at
+unit-test level, and keep publisher offer track state so a later local publish
+after resume still includes existing local media sections. Real DTLS handshake/exporter
+implementation, default Room media transport wiring, RTP sender transport, and
+reconnect media recovery remain part of production hardening.
 
 Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the

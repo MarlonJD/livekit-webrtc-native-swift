@@ -12,15 +12,41 @@ Production readiness is intentionally represented in code through
 `LiveKitNative.productionReadiness` and `LiveKitNative.assertProductionReady()`.
 The current status is `developerPreview`, with explicit blockers for the real
 DTLS handshake/exporter implementation, TURN/ICE hardening, live media startup
-integration, DTLS-backed SCTP, media recovery during reconnect, and end-to-end
-LiveKit compatibility testing.
+integration, VideoToolbox-backed production H.264 encode/decode with hardware
+path verification and fallback policy, DTLS-backed SCTP, media recovery during
+reconnect, meeting-grade audio, jitter buffering, packet-loss recovery,
+congestion control, adaptive quality, real-device iOS soak/performance tests,
+and end-to-end LiveKit compatibility testing.
 Publisher `AddTrackRequest` signaling is now wired for local audio/video
 publishes, publisher SDP offers are generated and sent after
 `TrackPublishedResponse`, and publisher answers and publisher-targeted trickle
 candidates are routed into the publisher peer connection adapter, but media
 sender transport is still open.
 Data-track publish/unpublish/update-subscription signaling is also wired at
-unit-test level; live SCTP transport remains open.
+unit-test level, including server/SFU data-track unpublish cleanup for local
+publication and reconnect state; live SCTP transport remains open.
+Server/SFU `TrackUnpublishedResponse` cleanup for local media publications also
+clears local publication state and cached publisher offer reconnect state so
+resume reconnects and later publisher offers do not replay removed media.
+Injected publisher media transports are now closed and cleared when the final
+local media track is unpublished, preventing stale SRTP transport use in the
+covered Room media startup path.
+Server-provided `JoinResponse.ice_servers` and
+`ReconnectResponse.ice_servers` are now retained in the subscriber and
+publisher peer connection configurations. In the injected bound-socket media
+startup path, supported `stun:` UDP URLs can be queried for server-reflexive
+candidate discovery while preserving socket reuse. TURN ICE server URLs are
+also parsed from `turn:` and `turns:` entries with UDP/TCP/TLS intent and
+credentials retained for future relay allocation, and TURN Allocate request
+message primitives now cover requested transport, lifetime, realm, nonce, and
+relayed-address decoding. Fresh join, reconnect, and disconnect paths now reset
+stale remote SDP, ICE candidate, and final-trickle state and regenerate local
+ICE credentials without replacing the rest of the local peer connection
+configuration. Resume reconnect `SyncState` now includes
+retained subscription preferences, disabled track SIDs, local media/data
+publications, and the latest negotiated subscriber answer / publisher offer SDP
+state at unit-test level, while publisher offer track state is preserved so
+later publishes after resume do not drop existing local media sections.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -108,6 +134,9 @@ The old binary WebRTC dependency path has been removed from the package model.
   participant and emit `trackUnpublished` plus `participantDisconnected` events.
 - `TrackUnpublishedResponse` removes the matching remote publication and emits a
   `trackUnpublished` event.
+- `TrackUnpublishedResponse` for a local media publication clears the matching
+  local publication and cached publisher offer reconnect state so resume
+  reconnects and later publisher offers do not replay removed media.
 - `refresh_token` messages emit a `RoomEvent.tokenRefreshed` event.
 - Refreshed signal tokens are retained and used by later resume/full reconnect
   attempts.
@@ -124,18 +153,26 @@ The old binary WebRTC dependency path has been removed from the package model.
 - `LocalParticipant.publish(videoTrack:)` and `publish(audioTrack:)` send
   LiveKit `AddTrackRequest` messages over the active signal connection, await
   the matching `TrackPublishedResponse` by local CID, and record local
-  publications from the server-returned `TrackInfo`.
+  publications from the server-returned `TrackInfo`. Matching
+  `RequestResponse` failures are mapped to typed SDK errors while waiting for
+  the publish response.
 - After media publish acknowledgement, publisher SDP offers are generated from
   local audio/video publish plans and sent as LiveKit `SignalRequest.offer`
   messages for the publisher negotiation path.
 - `LocalParticipant.setTrackMuted(publication:muted:)` sends LiveKit
-  `MuteTrackRequest` messages for local publications and updates local mute
-  state after the signal send succeeds.
+  `MuteTrackRequest` messages for local publications, waits for a matching
+  `RequestResponse` acknowledgement, maps failures to typed SDK errors, and
+  updates local mute state after acknowledgement succeeds.
 - `LocalParticipant.unpublish(publication:)`, `setCamera(enabled: false)`, and
   `setMicrophone(enabled: false)` send a muted `MuteTrackRequest` before
   removing local publications when the participant is attached to a connected
-  room. The normal media renegotiation work needed for full publisher unpublish
-  remains open.
+  room, and now wait for matching `RequestResponse` acknowledgements.
+  Multi-track unpublish also removes the unpublished track from publisher offer
+  state, sends a refreshed publisher offer for the remaining local media, and
+  updates reconnect `SyncState` to avoid replaying stale media sections. When
+  the last media track is unpublished, cached publisher offer state is cleared
+  so resume reconnect does not replay stale media, and the injected publisher
+  media transport is closed and cleared.
 - `Room.updateSubscription(trackSIDs:subscribe:)` sends LiveKit
   `UpdateSubscription` messages for media tracks, and
   `Room.updateTrackSettings(...)` sends `UpdateTrackSettings` messages for
@@ -145,7 +182,8 @@ The old binary WebRTC dependency path has been removed from the package model.
   to all local tracks or selected track SIDs.
 - `LocalParticipant.updateAudioTrack(...)` and `updateVideoTrack(...)` send
   LiveKit `UpdateLocalAudioTrack` / `UpdateLocalVideoTrack` messages for local
-  publisher track feature and dimension updates.
+  publisher track feature and dimension updates and wait for matching
+  `RequestResponse` acknowledgements.
 - `SignalResponse.trackPublished` messages are correlated by local CID for
   client-originated publish requests.
 - `SignalResponse.answer` messages are routed into the publisher peer
@@ -158,6 +196,20 @@ The old binary WebRTC dependency path has been removed from the package model.
 - `JoinResponse.alternative_url` is retried with a bounded redirect budget.
 - `LeaveRequest.resume` reconnects the signal socket with `reconnect=true` and
   accepts `ReconnectResponse`.
+- `JoinResponse.ice_servers` and `ReconnectResponse.ice_servers` are mapped
+  into both subscriber and publisher peer connection configurations.
+- Fresh joins, `ReconnectResponse`, and disconnect clear stale peer negotiation
+  state and regenerate local ICE credentials before a new signaling/media
+  negotiation can begin.
+- Resume reconnects send LiveKit `SyncState` for retained media subscription
+  preferences, disabled subscribed track SIDs, local media publications, and
+  local data-track publications at unit-test level.
+- Resume reconnects include the latest negotiated subscriber answer and
+  publisher offer SDP state in `SyncState` when those descriptions were sent
+  before reconnecting.
+- Resume reconnects preserve publisher offer track state so a later local media
+  publish generates a publisher offer that still includes pre-reconnect local
+  publications.
 - `LeaveRequest.reconnect` performs a fresh signal join with `reconnect=false`
   and replaces stale remote participant state with cleanup events.
 - `ConnectOptions` exposes reconnect attempt, retry delay, and alternative URL
@@ -186,6 +238,9 @@ The old binary WebRTC dependency path has been removed from the package model.
   `subscribed_audio_codec_update`, `publish_data_track_response`,
   `unpublish_data_track_response`, and `data_track_subscriber_handles` now
   emit public `RoomEvent` values with typed payloads.
+- Media section requirements and data-track subscriber handles are also retained
+  as latest-value Room snapshot state and cleared by public `Room.disconnect()`
+  and fresh joins.
 - `SignalResponse.room_moved` now updates local/remote participant state,
   refreshes the reconnect token, emits `RoomEvent.roomMoved`, and publishes
   cleanup/addition lifecycle events for participant changes.
@@ -235,6 +290,9 @@ The old binary WebRTC dependency path has been removed from the package model.
   - `MESSAGE-INTEGRITY` HMAC-SHA1 signing and validation with RFC 5769 vector
     coverage
   - `FINGERPRINT` CRC32 signing and validation with tamper detection tests
+  - TURN Allocate request/success/error message type support
+  - TURN `REQUESTED-TRANSPORT`, `LIFETIME`, `REALM`, `NONCE`, and IPv4
+    `XOR-RELAYED-ADDRESS` encode/decode primitives
 - ICE basics:
   - local ICE username fragment and password generation
   - host candidate construction from local interface addresses
@@ -267,6 +325,11 @@ The old binary WebRTC dependency path has been removed from the package model.
     `MESSAGE-INTEGRITY` before mapped-address handling
   - Binding success response handling for server-reflexive mapped address
     discovery
+  - signaling `ICEServer` URL parsing for supported `stun:` UDP endpoints
+  - unauthenticated STUN Binding mapped-address requests with optional
+    response fingerprint validation
+  - server-reflexive local candidate construction from STUN mapped-address
+    responses, with duplicate mapped endpoints ignored
 - DTLS/SRTP groundwork:
   - SHA-256 fingerprint formatting
   - ephemeral Security framework key material for SDP fingerprint generation
@@ -288,6 +351,17 @@ The old binary WebRTC dependency path has been removed from the package model.
   - `PeerConnectionCoordinator` can hand negotiated DTLS configuration and a
     nominated ICE pair into the handshaker-backed media session binder to build
     a protected RTP/RTCP transport
+  - `PeerConnectionCoordinator.startSecureMediaTransport(...)` runs ICE
+    connectivity checks, requires a selected candidate pair, then binds that
+    pair through the handshaker-backed secure media session path
+  - `Room` can trigger injected publisher and subscriber media startup after
+    negotiated SDP and final ICE trickle, so runtime signaling can now reach the
+    coordinator-run ICE + media binder path in tests
+  - publisher offer and subscriber answer signaling can send encoded local ICE
+    candidates and final trickle markers when media startup has supplied local
+    candidates
+  - `turn:` and `turns:` ICE server URL parsing retains host, port, UDP/TCP/TLS
+    transport intent, username, and credential for future relay allocation
   - RFC 3711 AES-CM session key derivation for SRTP/SRTCP encryption,
     authentication, and salting keys
   - client/server DTLS-SRTP packet-protection context that maps local/remote
@@ -323,8 +397,23 @@ The old binary WebRTC dependency path has been removed from the package model.
     protected media transport
   - UDP media datagram socket transport for IPv4 RTP-component candidate pairs,
     including loopback send/receive coverage
+  - bound local ICE UDP socket lifecycle that can gather host candidates from
+    local interface addresses, assign them the bound port, and reuse that
+    socket for STUN checks and selected-pair media datagrams
+  - `RoomMediaStartupConfiguration` can be built from bound local candidate
+    sockets, wiring the socket-backed ICE checker and media datagram factory
+    into the injected startup path
+  - signaling-provided ICE server lists can update peer connection
+    configuration without replacing local ICE credentials, DTLS fingerprints,
+    or media profile state
+  - peer connection coordinators can reset remote SDP, ICE candidate, remote
+    ICE credential, DTLS fingerprint/setup, and final-trickle state while
+    preserving local configuration
+  - injected bound-socket media startup can pass signaling-provided ICE servers
+    into local candidate gathering so supported `stun:` UDP endpoints add
+    server-reflexive candidates that still map back to the same local socket
   - explicit boundary before full DTLS `use_srtp` handshake implementation and
-    Room runtime subscriber/publisher startup integration
+    default live Room subscriber/publisher startup integration
 - RTP basics:
   - RTP v2 header encode/decode
   - marker bit, payload type, sequence number, timestamp, SSRC, and payload
@@ -394,17 +483,21 @@ The old binary WebRTC dependency path has been removed from the package model.
   - incoming user-packet decode helper for future WebRTC receive plumbing
   - `RoomEvent.dataReceived` mapping from decoded data packets to remote
     participants
-  - `LocalParticipant.publishDataTrack`, `unpublishDataTrack`, and
-    `updateDataSubscription` send newer data-track protocol messages
-  - `PublishDataTrackResponse` and `UnpublishDataTrackResponse` are correlated
-    by publisher handle for request completion
+- `LocalParticipant.publishDataTrack`, `unpublishDataTrack`, and
+  `updateDataSubscription` send newer data-track protocol messages
+- `PublishDataTrackResponse` and `UnpublishDataTrackResponse` are correlated
+  by publisher handle for request completion
+- server/SFU `UnpublishDataTrackResponse` clears matching local data-track
+  publication state so resume reconnect does not replay stale data tracks
+- matching `RequestResponse` failures for AddTrack and data-track
+  publish/unpublish requests are surfaced as typed SDK errors before timeout
 
 ## Verified
 
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 226 tests passed
+  - 268 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -417,7 +510,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,300,757 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,381,296 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -432,46 +525,79 @@ The following checks passed after the latest implementation pass:
 
 ### LiveKit Signaling
 
-- Stateful handling for data-track subscriber handle updates and media section
-  requirement updates beyond typed event emission.
 - Transceiver negotiation, RTP sender transport, and LiveKit integration
   coverage for AddTrack publishes beyond unit-level publisher offer signaling.
-- Production-hardened reconnect across ICE restart, media recovery, data
-  channel recovery, and server migration.
+- Production-hardened reconnect across live media recovery, data channel
+  recovery, and server migration beyond the current local ICE credential
+  restart plus signal `SyncState` unit coverage for state and SDP recovery.
 - Request-response coverage for remaining client-originated signaling commands
-  beyond participant metadata/name/attribute updates, AddTrack publishes, and
-  data-track publish/unpublish.
-- Wiring subscriber ICE candidates into real network connectivity.
+  beyond participant metadata/name/attribute updates, AddTrack publishes,
+  local mute/unpublish, local publisher track updates, and data-track
+  publish/unpublish.
+- Default Room creation and lifecycle management for subscriber/publisher local
+  ICE candidate sockets from public options.
 
 ### ICE and Networking
 
-- Binding the `ICEAgent` into subscriber/publisher peer connection startup
-  against a real LiveKit server.
-- Full connectivity-check pacing, timeout, triggered checks, and role-conflict
-  handling.
+- Binding the socket-backed `ICEAgent` path into default subscriber/publisher
+  peer connection startup against a real LiveKit server.
+- Consuming the stored signaling-provided STUN/TURN server list from public
+  Room options for default candidate gathering and TURN relay allocation.
+- Full ICE restart signaling against LiveKit, connectivity-check pacing,
+  timeout, triggered checks, and role-conflict handling.
 - Consent freshness.
-- TURN UDP, TCP, or TLS behavior.
+- TURN allocation client behavior, authentication challenge handling, refresh,
+  permissions, channels, and UDP/TCP/TLS relay behavior beyond current URL
+  parsing and STUN Allocate message primitives.
 
 ### DTLS, SRTP, RTP, and RTCP
 
 - DTLS 1.2 handshake.
 - Wiring `use_srtp` extension negotiation into the DTLS handshake.
 - Invoking the real DTLS exporter from a completed handshake.
-- Wiring the handshaker-backed secure RTP/RTCP media session binder into
-  subscriber/publisher peer connection startup.
+- Wiring the handshaker-backed secure RTP/RTCP media session binder as the
+  default live Room runtime path using the bound candidate socket lifecycle.
 - Wiring RTCP feedback/report packets into live media transport.
 - TWCC, REMB, or congestion control.
 - Jitter buffer.
+- Packet-loss recovery beyond basic RTP/RTCP packet primitives.
+- Adaptive quality control driven by estimated bandwidth, packet loss, CPU,
+  and subscriber preferences.
 - RTP timestamp and jitter tracking beyond packet encode/decode.
 
 ### Media
 
 - Full device camera permission UX and runtime capture integration.
-- Full VideoToolbox H.264 encoded sample extraction.
-- Full VideoToolbox H.264 decode/render path.
+- Full VideoToolbox H.264 encoded sample extraction using real
+  `VTCompressionSessionEncodeFrame` output.
+- Full VideoToolbox H.264 decode/render path using `VTDecompressionSession`.
+- Production H.264 hardware-acceleration verification where the OS exposes
+  `UsingHardwareAcceleratedVideoEncoder` / `UsingHardwareAcceleratedVideoDecoder`
+  signals, plus an explicit fallback policy for unsupported devices, profiles,
+  resolutions, or OS versions.
+- H.264 codec implementation must remain delegated to Apple-native media
+  frameworks for production; a pure Swift H.264 encoder/decoder is not the
+  intended path because it would increase validation, power, thermal, and
+  maintenance risk.
+- H.265/HEVC is a future optional Apple-focused codec profile, not a `1.0.0`
+  production-readiness requirement. It needs separate SDP/RTP handling,
+  VideoToolbox encode/decode integration, hardware/fallback policy, LiveKit
+  compatibility testing, and a cross-client support matrix before it can be
+  enabled.
+- VP9 and AV1 are future advanced codec profiles, not `1.0.0`
+  production-readiness requirements. They are mainly valuable for SVC and
+  bandwidth adaptation, and need an explicit hardware/software dependency
+  policy, SVC packetization/depacketization and negotiation work, battery and
+  thermal measurements, and cross-client compatibility coverage before they can
+  be enabled.
 - Full Swift VP8 pixel reconstruction and renderer handoff.
 - Full CELT/SILK Swift Opus encode/decode implementation.
-- Audio session management and production playout timing.
+- Meeting-grade iOS audio session management, capture/playout timing, echo
+  cancellation, noise suppression strategy, automatic gain behavior, route
+  changes, Bluetooth behavior, interruptions, and background/foreground
+  recovery.
+- Bounded capture, encode, decode, and render queues with explicit frame-drop
+  and backpressure policy for real-time calls.
 
 ### Data Channels
 
@@ -488,22 +614,44 @@ The following checks passed after the latest implementation pass:
 - Publish path.
 - Two-client media/data test.
 - Reconnect integration test.
+- Multi-participant meeting tests with simultaneous publish/subscribe.
+- Weak-network tests with packet loss, jitter, bandwidth changes, and recovery
+  assertions.
+- TURN-only tests across UDP, TCP, and TLS fallback.
+- Long-running real-device iOS soak tests with battery, thermal, CPU, memory,
+  FPS, audio drop, and reconnect metrics.
+- iOS lifecycle tests for background/foreground, audio interruptions, and
+  Bluetooth route changes.
 - Final size gate using a minimal release app, beyond the current compressed
   benchmark-binary proxy gate.
 
 ## Next Recommended Work
 
 1. Continue `1.0.0` hardening with a real DTLS handshake/exporter
-   implementation and Room runtime subscriber/publisher startup integration.
+   implementation and default Room runtime subscriber/publisher startup
+   integration.
 2. Connect queued local data publish plans to the publisher peer connection
    once data channels are open.
-3. Add ICE restart, media/data recovery after signal reconnect, TURN UDP/TCP/TLS
-   fallback, and automated local LiveKit integration tests.
+3. Add full LiveKit ICE restart signaling, media/data recovery after signal
+   reconnect, TURN UDP/TCP/TLS fallback, and automated local LiveKit
+   integration tests beyond current local ICE credential restart plus signal
+   `SyncState` state/SDP unit coverage.
 4. Add text streams, byte streams, RPC, and two-client data integration tests.
 5. Add adaptive video quality support with multi-layer simulcast/SVC publish
    presets, bandwidth-aware layer selection, Dynacast-style layer pausing, and
    manual subscriber quality controls for low/medium/high video reception.
-6. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
+6. Complete VideoToolbox-backed H.264 encode/decode, hardware-path detection,
+   and fallback policy before production readiness.
+7. Track H.265/HEVC as a post-`1.0.0` optional Apple-focused codec profile,
+   gated by hardware/fallback behavior, LiveKit negotiation, and cross-client
+   compatibility.
+8. Track VP9 and AV1 as future advanced SVC codec profiles, gated by
+   dependency policy, battery/thermal behavior, LiveKit negotiation, and
+   cross-client compatibility.
+9. Make meeting-grade audio, jitter buffering, packet-loss recovery,
+   congestion control, adaptive quality, TURN-only operation, reconnect media
+   recovery, and real-device iOS soak/performance testing production blockers.
+10. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
    publisher transceiver negotiation, RTP sender transport, and real DTLS
    handshake/exporter integration as the hardening path before a usable
    end-to-end release.
@@ -517,8 +665,11 @@ media SDK.
 
 Do not tag this as production-ready `1.0.0` until
 `LiveKitNative.productionReadiness.status == .productionReady`, blockers are
-empty, local LiveKit integration tests pass, and the release size/dependency
-guards pass on CI.
+empty, VideoToolbox-backed H.264 encode/decode and hardware/fallback behavior
+are validated on real devices, meeting-grade audio and network adaptation are
+validated, weak-network/TURN-only/multi-participant/soak tests pass, local
+LiveKit integration tests pass, and the release size/dependency guards pass on
+CI.
 
 For current CI hardening, use:
 
