@@ -52,9 +52,14 @@ deadlines without a wall-clock dependency, schedules due refresh actions in
 deadline order, executes due allocation/permission refreshes through injectable
 network closures, and advances deadlines only on successful refresh. TURN relay
 candidate planning can build relayed ICE candidates from relayed addresses and
-channel bindings. A ChannelData relay transport can encode outbound payloads
-and decode inbound packets over an abstract media datagram transport with
-partial stream remainder handling. Fresh join, reconnect, and disconnect paths now
+channel bindings. TURN relay session configuration can now select supported UDP
+relay endpoints from parsed ICE server URLs when credentials, realm, and nonce
+are available. A bounded TURN relay session now composes allocation, permission
+creation, channel binding, relay candidate planning, relay transport metadata,
+and deterministic maintenance execution over abstract transports. A ChannelData
+relay transport can encode outbound payloads and decode inbound packets over an
+abstract media datagram transport with partial stream remainder handling. Fresh
+join, reconnect, and disconnect paths now
 reset stale
 remote SDP, ICE candidate, and final-trickle state and regenerate local ICE
 credentials without replacing the rest of the local peer connection
@@ -69,8 +74,15 @@ keep packetizer sequence and timestamp state across packets/frames before that
 handoff. Room stores publisher audio/video RTP sender state by published SID
 and local CID after successful publish, removes only the unpublished sender
 after successful unpublish, preserves remaining local sender state for resume
-reconnect, and clears sender state on full publisher offer reset; the default
-capture/encode loop is still open.
+reconnect, and clears sender state on full publisher offer reset. Encoded Opus
+packets and H.264 frames can now be sent through the stored publisher senders
+by published SID, publisher RTCP packets can be handed to the injected secure
+media transport, inbound publisher RTCP can be decoded through a registered
+handler loop, subscriber RTCP packets can be handed to the injected secure
+media transport, and inbound subscriber RTCP can be decoded through a registered
+handler loop. A deterministic RTCP feedback policy primitive can now build
+Generic NACK and PLI packets from subscriber-side packet-loss/keyframe needs;
+the default capture/encode loop and live feedback integration remain open.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -350,6 +362,13 @@ The old binary WebRTC dependency path has been removed from the package model.
     refresh failure
   - TURN relay ICE candidate planning from relayed addresses and ChannelBind
     metadata, including relayed candidate priority/foundation selection
+  - TURN relay session configuration selection from parsed ICE server
+    endpoints, requiring supported UDP transport intent plus endpoint
+    credentials, realm, and nonce
+  - bounded TURN relay session orchestration that composes Allocate,
+    CreatePermission, ChannelBind, relayed ICE candidate planning, ChannelData
+    relay transport metadata, and deterministic maintenance execution over
+    abstract transports
   - TURN ChannelData relay transport over `MediaDatagramTransport` that
     encodes outbound payloads, decodes inbound channel-bound packets, keeps
     partial stream remainder, rejects unbound channels, and preserves peer
@@ -431,6 +450,20 @@ The old binary WebRTC dependency path has been removed from the package model.
     maps local CIDs to published SIDs, removes only the matching sender after
     unpublish, preserves remaining senders for resume reconnect, and clears
     the registry during full publisher offer resets
+  - `Room` can send encoded Opus packets and H.264 frames through the stored
+    publisher RTP sender registry by published SID
+  - `Room` can send publisher RTCP packets through the started injected secure
+    media transport
+  - `Room` can receive protected publisher RTCP packets from the injected
+    secure media transport, decode them, and deliver them to a registered
+    async handler loop with teardown coverage
+  - `Room` can send subscriber RTCP packets through the started injected
+    secure media transport
+  - `Room` can receive protected subscriber RTCP packets from the injected
+    secure media transport, decode them, and deliver them to a registered
+    async handler loop with disconnect cleanup coverage
+  - deterministic RTCP feedback policy that builds Generic NACK and PLI packets
+    from missing RTP sequence numbers and keyframe requests
   - publisher offer and subscriber answer signaling can send encoded local ICE
     candidates and final trickle markers when media startup has supplied local
     candidates
@@ -571,7 +604,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 340 tests passed
+  - 363 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -584,7 +617,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,463,749 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,517,672 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -623,9 +656,9 @@ The following checks passed after the latest implementation pass:
 - Consent freshness.
 - Full TURN relay client behavior beyond the current Allocate, Refresh,
   CreatePermission, ChannelBind, ChannelData framing, abstract relay transport,
-  deterministic maintenance scheduler/executor, and relayed candidate planning
-  primitives: binding the executor into real TURN client lifecycles, relay
-  allocation/socket integration, UDP/TCP/TLS fallback, and ICE relay candidate
+  deterministic maintenance scheduler/executor, relayed candidate planning, and
+  bounded relay session orchestration primitives: default relay allocation and
+  socket lifecycle integration, UDP/TCP/TLS fallback, and ICE relay candidate
   integration.
 
 ### DTLS, SRTP, RTP, and RTCP
@@ -638,7 +671,10 @@ The following checks passed after the latest implementation pass:
 - Connecting the tested Room publisher RTP bridge, sender registry, and
   stateful packetizer helpers to the default camera/audio capture and encode
   loops.
-- Wiring RTCP feedback/report packets into live media transport.
+- Live RTCP feedback/report integration, retransmission/keyframe-request
+  dispatch from subscriber pipelines, and policy wiring beyond the current
+  publisher/subscriber RTCP send/receive hooks plus deterministic NACK/PLI
+  packet builder.
 - TWCC, REMB, or congestion control.
 - Jitter buffer.
 - Packet-loss recovery beyond basic RTP/RTCP packet primitives.

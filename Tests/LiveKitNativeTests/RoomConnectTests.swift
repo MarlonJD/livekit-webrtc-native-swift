@@ -1307,6 +1307,505 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertGreaterThan(sentDatagram.count, packet.encoded().count)
     }
 
+    func testPublisherRTCPSendsThroughStartedSecureMediaTransport() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makePublisherAnswerResponse(),
+            makePublisherTrickleResponse(),
+            makePublisherTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let localCandidate = ICECandidate(
+            foundation: "local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.10",
+            port: 55000,
+            type: .host
+        )
+        let datagramTransport = RoomMediaStartupDatagramTransport()
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(transport: datagramTransport),
+            handshaker: RoomMediaStartupDTLSHandshaker(
+                result: try DTLSSRTPHandshakeResult(
+                    role: .server,
+                    exportedKeyingMaterial: Data(
+                        (0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init)
+                    ),
+                    remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+                )
+            )
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            publisherPeerConnection: PeerConnectionCoordinator(configuration: NativeWebRTCConfiguration(role: .publisher)),
+            publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 42,
+                checker: RoomMediaStartupICEChecker(),
+                binder: binder
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let startupResult = await waitForPublisherMediaStartupResult(room)
+        _ = try XCTUnwrap(startupResult)
+        let packet = RTCPPacket.pictureLossIndication(
+            RTCPPictureLossIndication(senderSSRC: 0x0102_0304, mediaSSRC: 0x0506_0708)
+        )
+
+        try await room.sendPublisherRTCP(packet)
+
+        let sentDatagram = try XCTUnwrap(datagramTransport.sentDatagrams.first)
+        XCTAssertEqual(datagramTransport.sentDatagrams.count, 1)
+        XCTAssertNotEqual(sentDatagram, try packet.encoded())
+        XCTAssertGreaterThan(sentDatagram.count, try packet.encoded().count)
+    }
+
+    func testPublisherRTCPReceiveHandlerReceivesDecodedPacket() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makePublisherAnswerResponse(),
+            makePublisherTrickleResponse(),
+            makePublisherTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let localCandidate = ICECandidate(
+            foundation: "local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.10",
+            port: 55000,
+            type: .host
+        )
+        let datagramTransport = RoomMediaStartupDatagramTransport()
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(transport: datagramTransport),
+            handshaker: RoomMediaStartupDTLSHandshaker(
+                result: try DTLSSRTPHandshakeResult(
+                    role: .server,
+                    exportedKeyingMaterial: roomMediaStartupExportedKeyingMaterial(),
+                    remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+                )
+            )
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            publisherPeerConnection: PeerConnectionCoordinator(configuration: NativeWebRTCConfiguration(role: .publisher)),
+            publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 42,
+                checker: RoomMediaStartupICEChecker(),
+                binder: binder
+            )
+        )
+        let recorder = PublisherRTCPRecorder()
+        room.setPublisherRTCPHandler { packet in
+            await recorder.record(packet)
+        }
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let startupResult = await waitForPublisherMediaStartupResult(room)
+        _ = try XCTUnwrap(startupResult)
+        XCTAssertTrue(room.isPublisherRTCPReceiveLoopActive)
+
+        let packet = RTCPPacket.pictureLossIndication(
+            RTCPPictureLossIndication(senderSSRC: 0x0102_0304, mediaSSRC: 0x0506_0708)
+        )
+        let protectedDatagram = try await protectedPublisherInboundRTCPDatagram(packet)
+
+        datagramTransport.enqueueIncomingDatagram(protectedDatagram)
+
+        let receivedPackets = await recorder.waitForPacketCount(1)
+        XCTAssertEqual(receivedPackets, [packet])
+    }
+
+    func testSubscriberRTCPSendsThroughStartedSecureMediaTransport() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeSubscriberOfferResponse(),
+            makeSubscriberTrickleResponse(),
+            makeSubscriberTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let localCandidate = ICECandidate(
+            foundation: "subscriber-local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.11",
+            port: 55001,
+            type: .host
+        )
+        let datagramTransport = RoomMediaStartupDatagramTransport()
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(transport: datagramTransport),
+            handshaker: RoomMediaStartupDTLSHandshaker(
+                result: try DTLSSRTPHandshakeResult(
+                    role: .client,
+                    exportedKeyingMaterial: roomMediaStartupExportedKeyingMaterial(),
+                    remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "DD:EE:FF")
+                )
+            )
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            subscriberPeerConnection: PeerConnectionCoordinator(configuration: NativeWebRTCConfiguration(role: .subscriber)),
+            subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 43,
+                checker: RoomMediaStartupICEChecker(),
+                binder: binder
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let startupResult = await waitForSubscriberMediaStartupResult(room)
+        _ = try XCTUnwrap(startupResult)
+        let packet = RTCPPacket.pictureLossIndication(
+            RTCPPictureLossIndication(senderSSRC: 0x0102_0304, mediaSSRC: 0x0506_0708)
+        )
+
+        try await room.sendSubscriberRTCP(packet)
+
+        let sentDatagram = try XCTUnwrap(datagramTransport.sentDatagrams.first)
+        XCTAssertEqual(datagramTransport.sentDatagrams.count, 1)
+        XCTAssertNotEqual(sentDatagram, try packet.encoded())
+        XCTAssertGreaterThan(sentDatagram.count, try packet.encoded().count)
+    }
+
+    func testSubscriberRTCPReceiveHandlerReceivesDecodedPacket() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeSubscriberOfferResponse(),
+            makeSubscriberTrickleResponse(),
+            makeSubscriberTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let localCandidate = ICECandidate(
+            foundation: "subscriber-local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.11",
+            port: 55001,
+            type: .host
+        )
+        let datagramTransport = RoomMediaStartupDatagramTransport()
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(transport: datagramTransport),
+            handshaker: RoomMediaStartupDTLSHandshaker(
+                result: try DTLSSRTPHandshakeResult(
+                    role: .client,
+                    exportedKeyingMaterial: roomMediaStartupExportedKeyingMaterial(),
+                    remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "DD:EE:FF")
+                )
+            )
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            subscriberPeerConnection: PeerConnectionCoordinator(configuration: NativeWebRTCConfiguration(role: .subscriber)),
+            subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 43,
+                checker: RoomMediaStartupICEChecker(),
+                binder: binder
+            )
+        )
+        let recorder = SubscriberRTCPRecorder()
+        room.setSubscriberRTCPHandler { packet in
+            await recorder.record(packet)
+        }
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let startupResult = await waitForSubscriberMediaStartupResult(room)
+        _ = try XCTUnwrap(startupResult)
+        XCTAssertTrue(room.isSubscriberRTCPReceiveLoopActive)
+
+        let packet = RTCPPacket.pictureLossIndication(
+            RTCPPictureLossIndication(senderSSRC: 0x0102_0304, mediaSSRC: 0x0506_0708)
+        )
+        let protectedDatagram = try await protectedSubscriberInboundRTCPDatagram(packet)
+
+        datagramTransport.enqueueIncomingDatagram(protectedDatagram)
+
+        let receivedPackets = await recorder.waitForPacketCount(1)
+        XCTAssertEqual(receivedPackets, [packet])
+    }
+
+    func testDisconnectClearsSubscriberRTCPReceiveLoop() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeSubscriberOfferResponse(),
+            makeSubscriberTrickleResponse(),
+            makeSubscriberTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let localCandidate = ICECandidate(
+            foundation: "subscriber-local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.11",
+            port: 55001,
+            type: .host
+        )
+        let datagramTransport = RoomMediaStartupDatagramTransport()
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(transport: datagramTransport),
+            handshaker: RoomMediaStartupDTLSHandshaker(
+                result: try DTLSSRTPHandshakeResult(
+                    role: .client,
+                    exportedKeyingMaterial: roomMediaStartupExportedKeyingMaterial(),
+                    remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "DD:EE:FF")
+                )
+            )
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            subscriberPeerConnection: PeerConnectionCoordinator(configuration: NativeWebRTCConfiguration(role: .subscriber)),
+            subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 43,
+                checker: RoomMediaStartupICEChecker(),
+                binder: binder
+            )
+        )
+        let recorder = SubscriberRTCPRecorder()
+        room.setSubscriberRTCPHandler { packet in
+            await recorder.record(packet)
+        }
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let startupResult = await waitForSubscriberMediaStartupResult(room)
+        _ = try XCTUnwrap(startupResult)
+        XCTAssertTrue(room.isSubscriberRTCPReceiveLoopActive)
+
+        await room.disconnect()
+        XCTAssertNil(room.lastSubscriberMediaStartupResult)
+        XCTAssertFalse(room.isSubscriberRTCPReceiveLoopActive)
+
+        let packet = RTCPPacket.pictureLossIndication(
+            RTCPPictureLossIndication(senderSSRC: 0x0102_0304, mediaSSRC: 0x0506_0708)
+        )
+        datagramTransport.enqueueIncomingDatagram(try await protectedSubscriberInboundRTCPDatagram(packet))
+
+        let receivedPacketsAfterCleanup = await recorder.waitForPacketCount(1, attempts: 10)
+        XCTAssertEqual(receivedPacketsAfterCleanup, [])
+    }
+
+    func testPublisherSendingHooksUseStoredSendersForPublishedSIDs() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makePublisherAnswerResponse(),
+            makePublisherTrickleResponse(),
+            makePublisherTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let localCandidate = ICECandidate(
+            foundation: "local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.10",
+            port: 55000,
+            type: .host
+        )
+        let datagramTransport = RoomMediaStartupDatagramTransport()
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(transport: datagramTransport),
+            handshaker: RoomMediaStartupDTLSHandshaker(
+                result: try DTLSSRTPHandshakeResult(
+                    role: .server,
+                    exportedKeyingMaterial: Data(
+                        (0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init)
+                    ),
+                    remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+                )
+            )
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            publisherPeerConnection: PeerConnectionCoordinator(configuration: NativeWebRTCConfiguration(role: .publisher)),
+            publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 42,
+                checker: RoomMediaStartupICEChecker(),
+                binder: binder
+            )
+        )
+        let videoTrack = LocalVideoTrack(id: "camera-cid", name: "camera", source: .camera)
+        let audioTrack = LocalAudioTrack(id: "mic-cid", name: "microphone", source: .microphone)
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let startupResult = await waitForPublisherMediaStartupResult(room)
+        _ = try XCTUnwrap(startupResult)
+
+        let videoPublishTask = Task {
+            try await room.localParticipant.publish(
+                videoTrack: videoTrack,
+                options: TrackPublishOptions(name: "main-camera", source: .camera)
+            )
+        }
+        let addVideoFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(addVideoData) = try XCTUnwrap(addVideoFrames.first) else {
+            return XCTFail("Expected binary video AddTrack request.")
+        }
+        let addVideoRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: addVideoData)
+        guard case let .addTrack(addVideoTrack)? = addVideoRequest.message else {
+            return XCTFail("Expected SignalRequest.addTrack.")
+        }
+        try await transport.enqueueIncomingFrame(
+            .binary(
+                SignalFrameCodec().encode(
+                    makeTrackPublishedResponse(
+                        cid: addVideoTrack.cid,
+                        sid: "TR_local_camera",
+                        name: "main-camera",
+                        type: .video,
+                        source: .camera
+                    )
+                )
+            )
+        )
+        _ = await waitForSentFrameCount(4, transport: transport)
+        let videoPublication = try await videoPublishTask.value
+        XCTAssertNotNil(room.publisherVideoRTPSender(sid: videoPublication.sid))
+
+        let videoPackets = try await room.sendPublisherVideo(
+            H264EncodedFrame(nalUnits: [Data([0x65, 0x01, 0x02])], rtpTimestamp: 90_000, isKeyFrame: true),
+            sid: videoPublication.sid
+        )
+
+        XCTAssertEqual(videoPackets.count, 1)
+        XCTAssertEqual(datagramTransport.sentDatagrams.count, 1)
+        XCTAssertNotEqual(datagramTransport.sentDatagrams[0], videoPackets[0].encoded())
+
+        let audioPublishTask = Task {
+            try await room.localParticipant.publish(
+                audioTrack: audioTrack,
+                options: TrackPublishOptions(name: "main-mic", source: .microphone)
+            )
+        }
+        let addAudioFrames = await waitForSentFrameCount(5, transport: transport)
+        guard case let .binary(addAudioData) = addAudioFrames[4] else {
+            return XCTFail("Expected binary audio AddTrack request.")
+        }
+        let addAudioRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: addAudioData)
+        guard case let .addTrack(addAudioTrack)? = addAudioRequest.message else {
+            return XCTFail("Expected SignalRequest.addTrack.")
+        }
+        try await transport.enqueueIncomingFrame(
+            .binary(
+                SignalFrameCodec().encode(
+                    makeTrackPublishedResponse(
+                        cid: addAudioTrack.cid,
+                        sid: "TR_local_microphone",
+                        name: "main-mic",
+                        type: .audio,
+                        source: .microphone
+                    )
+                )
+            )
+        )
+        _ = await waitForSentFrameCount(8, transport: transport)
+        let audioPublication = try await audioPublishTask.value
+        XCTAssertNotNil(room.publisherAudioRTPSender(sid: audioPublication.sid))
+
+        let audioPacket = try await room.sendPublisherAudio(
+            try OpusPacket(payload: Data([0x08, 0xAA])),
+            sid: audioPublication.sid
+        )
+
+        XCTAssertEqual(datagramTransport.sentDatagrams.count, 2)
+        XCTAssertNotEqual(datagramTransport.sentDatagrams[1], audioPacket.encoded())
+    }
+
+    func testPublisherSendingHooksRejectMissingSID() async throws {
+        let room = Room()
+
+        do {
+            try await room.sendPublisherAudio(try OpusPacket(payload: Data([0x08, 0xAA])), sid: "TR_missing_audio")
+            XCTFail("Expected missing publisher audio RTP sender failure.")
+        } catch {
+            XCTAssertEqual(
+                error as? LiveKitNativeError,
+                .requestFailed(
+                    action: "send publisher audio",
+                    reason: "publisherAudioRTPSenderUnavailable",
+                    message: "No publisher audio RTP sender is registered for SID TR_missing_audio."
+                )
+            )
+        }
+
+        do {
+            try await room.sendPublisherVideo(
+                H264EncodedFrame(nalUnits: [Data([0x65, 0x01])], rtpTimestamp: 90_000, isKeyFrame: true),
+                sid: "TR_missing_video"
+            )
+            XCTFail("Expected missing publisher video RTP sender failure.")
+        } catch {
+            XCTAssertEqual(
+                error as? LiveKitNativeError,
+                .requestFailed(
+                    action: "send publisher video",
+                    reason: "publisherVideoRTPSenderUnavailable",
+                    message: "No publisher video RTP sender is registered for SID TR_missing_video."
+                )
+            )
+        }
+    }
+
+    func testSubscriberRTCPRejectsMissingSecureMediaTransport() async {
+        let room = Room()
+        let packet = RTCPPacket.pictureLossIndication(
+            RTCPPictureLossIndication(senderSSRC: 0x0102_0304, mediaSSRC: 0x0506_0708)
+        )
+
+        do {
+            try await room.sendSubscriberRTCP(packet)
+            XCTFail("Expected missing subscriber media transport failure.")
+        } catch {
+            XCTAssertEqual(
+                error as? LiveKitNativeError,
+                .requestFailed(
+                    action: "send RTCP",
+                    reason: "subscriberMediaTransportUnavailable",
+                    message: "Subscriber secure media transport is not started."
+                )
+            )
+        }
+    }
+
+    func testPublisherRTCPRejectsMissingSecureMediaTransport() async {
+        let room = Room()
+        let packet = RTCPPacket.pictureLossIndication(
+            RTCPPictureLossIndication(senderSSRC: 0x0102_0304, mediaSSRC: 0x0506_0708)
+        )
+
+        do {
+            try await room.sendPublisherRTCP(packet)
+            XCTFail("Expected missing publisher media transport failure.")
+        } catch {
+            XCTAssertEqual(
+                error as? LiveKitNativeError,
+                .requestFailed(
+                    action: "send RTCP",
+                    reason: "publisherMediaTransportUnavailable",
+                    message: "Publisher secure media transport is not started."
+                )
+            )
+        }
+    }
+
     func testPublisherRTPBridgeRejectsMissingSecureMediaTransport() async {
         let room = Room()
         let packet = RTPPacket(
@@ -1354,6 +1853,7 @@ final class RoomConnectTests: XCTestCase {
         let publisherPeerConnection = PeerConnectionCoordinator(
             configuration: NativeWebRTCConfiguration(role: .publisher)
         )
+        let datagramTransport = RoomMediaStartupDatagramTransport()
         let room = Room(
             signalConnection: SignalConnection(transport: transport),
             publisherPeerConnection: publisherPeerConnection,
@@ -1363,7 +1863,7 @@ final class RoomConnectTests: XCTestCase {
                 checker: RoomMediaStartupICEChecker(),
                 binder: DTLSSRTPMediaSessionBinder(
                     datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(
-                        transport: RoomMediaStartupDatagramTransport()
+                        transport: datagramTransport
                     ),
                     handshaker: RoomMediaStartupDTLSHandshaker(
                         result: try DTLSSRTPHandshakeResult(
@@ -1378,10 +1878,15 @@ final class RoomConnectTests: XCTestCase {
             )
         )
         let track = LocalVideoTrack(id: "camera-cid", name: "camera", source: .camera)
+        let recorder = PublisherRTCPRecorder()
+        room.setPublisherRTCPHandler { packet in
+            await recorder.record(packet)
+        }
 
         try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
         let startupResult = await waitForPublisherMediaStartupResult(room)
         let startup = try XCTUnwrap(startupResult)
+        XCTAssertTrue(room.isPublisherRTCPReceiveLoopActive)
 
         let publishTask = Task {
             try await room.localParticipant.publish(
@@ -1436,8 +1941,16 @@ final class RoomConnectTests: XCTestCase {
 
         try await unpublishTask.value
         XCTAssertNil(room.lastPublisherMediaStartupResult)
+        XCTAssertFalse(room.isPublisherRTCPReceiveLoopActive)
         XCTAssertNil(room.publisherVideoRTPSender(sid: "TR_local_camera"))
         XCTAssertNil(room.publisherRTPSenderSID(forCID: track.id))
+
+        let packet = RTCPPacket.pictureLossIndication(
+            RTCPPictureLossIndication(senderSSRC: 0x0102_0304, mediaSSRC: 0x0506_0708)
+        )
+        datagramTransport.enqueueIncomingDatagram(try await protectedPublisherInboundRTCPDatagram(packet))
+        let receivedPacketsAfterCleanup = await recorder.waitForPacketCount(1, attempts: 10)
+        XCTAssertEqual(receivedPacketsAfterCleanup, [])
 
         do {
             try await startup.transport.sendRTP(
@@ -4004,6 +4517,78 @@ private func waitForSubscriberMediaStartupResult(_ room: Room) async -> PeerConn
     return room.lastSubscriberMediaStartupResult
 }
 
+private func protectedPublisherInboundRTCPDatagram(_ packet: RTCPPacket) async throws -> Data {
+    let datagramTransport = RoomMediaStartupDatagramTransport()
+    let peerTransport = try DTLSSRTPMediaTransport(
+        packetProtectionContext: DTLSSRTPPacketProtectionContext(
+            keyMaterial: DTLSSRTPKeyMaterial(exportedKeyingMaterial: roomMediaStartupExportedKeyingMaterial()),
+            role: .client
+        ),
+        datagramTransport: datagramTransport
+    )
+
+    try await peerTransport.sendRTCP(packet)
+    return try XCTUnwrap(datagramTransport.sentDatagrams.first)
+}
+
+private func protectedSubscriberInboundRTCPDatagram(_ packet: RTCPPacket) async throws -> Data {
+    let datagramTransport = RoomMediaStartupDatagramTransport()
+    let peerTransport = try DTLSSRTPMediaTransport(
+        packetProtectionContext: DTLSSRTPPacketProtectionContext(
+            keyMaterial: DTLSSRTPKeyMaterial(exportedKeyingMaterial: roomMediaStartupExportedKeyingMaterial()),
+            role: .server
+        ),
+        datagramTransport: datagramTransport
+    )
+
+    try await peerTransport.sendRTCP(packet)
+    return try XCTUnwrap(datagramTransport.sentDatagrams.first)
+}
+
+private func roomMediaStartupExportedKeyingMaterial() -> Data {
+    Data((0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init))
+}
+
+private actor PublisherRTCPRecorder {
+    private var packets: [RTCPPacket] = []
+
+    func record(_ packet: RTCPPacket) {
+        packets.append(packet)
+    }
+
+    func waitForPacketCount(_ expectedCount: Int, attempts: Int = 100) async -> [RTCPPacket] {
+        for _ in 0..<attempts {
+            if packets.count >= expectedCount {
+                return packets
+            }
+
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        return packets
+    }
+}
+
+private actor SubscriberRTCPRecorder {
+    private var packets: [RTCPPacket] = []
+
+    func record(_ packet: RTCPPacket) {
+        packets.append(packet)
+    }
+
+    func waitForPacketCount(_ expectedCount: Int, attempts: Int = 100) async -> [RTCPPacket] {
+        for _ in 0..<attempts {
+            if packets.count >= expectedCount {
+                return packets
+            }
+
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        return packets
+    }
+}
+
 private final class RoomMediaStartupICEChecker: ICEConnectivityChecking, @unchecked Sendable {
     private let lock = NSLock()
     private var mutableCapturedConfiguration: ICEAgentConfiguration?
@@ -4033,6 +4618,8 @@ private final class RoomMediaStartupICEChecker: ICEConnectivityChecking, @unchec
 private final class RoomMediaStartupDatagramTransport: MediaDatagramTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var mutableSentDatagrams: [Data] = []
+    private var mutableIncomingDatagrams: [Data] = []
+    private var mutableReceiveContinuations: [UUID: CheckedContinuation<Data, Error>] = [:]
 
     var sentDatagrams: [Data] {
         lock.withLock {
@@ -4046,8 +4633,47 @@ private final class RoomMediaStartupDatagramTransport: MediaDatagramTransport, @
         }
     }
 
+    func enqueueIncomingDatagram(_ datagram: Data) {
+        let continuation: CheckedContinuation<Data, Error>? = lock.withLock {
+            if let id = mutableReceiveContinuations.keys.first,
+               let continuation = mutableReceiveContinuations.removeValue(forKey: id) {
+                return continuation
+            }
+
+            mutableIncomingDatagrams.append(datagram)
+            return nil
+        }
+
+        continuation?.resume(returning: datagram)
+    }
+
     func receive() async throws -> Data {
-        throw LiveKitNativeError.notImplemented("mock media datagram receive")
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let immediateResult: Result<Data, Error>? = lock.withLock {
+                    if Task.isCancelled {
+                        return Result<Data, Error>.failure(CancellationError())
+                    }
+
+                    guard !mutableIncomingDatagrams.isEmpty else {
+                        mutableReceiveContinuations[id] = continuation
+                        return nil
+                    }
+
+                    return .success(mutableIncomingDatagrams.removeFirst())
+                }
+
+                if let immediateResult {
+                    continuation.resume(with: immediateResult)
+                }
+            }
+        } onCancel: {
+            let continuation = lock.withLock {
+                mutableReceiveContinuations.removeValue(forKey: id)
+            }
+            continuation?.resume(throwing: CancellationError())
+        }
     }
 }
 

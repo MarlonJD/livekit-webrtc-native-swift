@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import LiveKitNativeProtocol
 import LiveKitNativeWebRTC
@@ -133,12 +134,18 @@ public final class Room: @unchecked Sendable {
     private var subscriberMediaStartupTask: Task<Void, Never>?
     private var subscriberMediaStartupResult: PeerConnectionMediaStartupResult?
     private var subscriberMediaStartupError: (any Error)?
+    private var subscriberRTCPHandler: (@Sendable (RTCPPacket) async -> Void)?
+    private var subscriberRTCPReceiveTask: Task<Void, Never>?
+    private var subscriberRTCPReceiveLoopID: UInt64 = 0
     private var subscriberLocalCandidatesGathered = false
     private var subscriberLocalCandidates: [ICECandidate] = []
     private var publisherMediaStartupStarted = false
     private var publisherMediaStartupTask: Task<Void, Never>?
     private var publisherMediaStartupResult: PeerConnectionMediaStartupResult?
     private var publisherMediaStartupError: (any Error)?
+    private var publisherRTCPHandler: (@Sendable (RTCPPacket) async -> Void)?
+    private var publisherRTCPReceiveTask: Task<Void, Never>?
+    private var publisherRTCPReceiveLoopID: UInt64 = 0
     private var publisherLocalCandidatesGathered = false
     private var publisherLocalCandidates: [ICECandidate] = []
     private var reconnectSubscribedTrackSIDs: Set<String> = []
@@ -215,11 +222,61 @@ public final class Room: @unchecked Sendable {
         await task?.value
     }
 
+    var isPublisherRTCPReceiveLoopActive: Bool {
+        publisherMediaStartupLock.withLock {
+            publisherRTCPReceiveTask != nil
+        }
+    }
+
+    func setPublisherRTCPHandler(_ handler: (@Sendable (RTCPPacket) async -> Void)?) {
+        let taskToCancel = publisherMediaStartupLock.withLock {
+            publisherRTCPHandler = handler
+            guard handler == nil else {
+                return nil as Task<Void, Never>?
+            }
+
+            let task = publisherRTCPReceiveTask
+            publisherRTCPReceiveTask = nil
+            return task
+        }
+
+        taskToCancel?.cancel()
+
+        if handler != nil {
+            startPublisherRTCPReceiveLoopIfReady()
+        }
+    }
+
     func waitForSubscriberMediaStartup() async {
         let task = subscriberMediaStartupLock.withLock {
             subscriberMediaStartupTask
         }
         await task?.value
+    }
+
+    var isSubscriberRTCPReceiveLoopActive: Bool {
+        subscriberMediaStartupLock.withLock {
+            subscriberRTCPReceiveTask != nil
+        }
+    }
+
+    func setSubscriberRTCPHandler(_ handler: (@Sendable (RTCPPacket) async -> Void)?) {
+        let taskToCancel = subscriberMediaStartupLock.withLock {
+            subscriberRTCPHandler = handler
+            guard handler == nil else {
+                return nil as Task<Void, Never>?
+            }
+
+            let task = subscriberRTCPReceiveTask
+            subscriberRTCPReceiveTask = nil
+            return task
+        }
+
+        taskToCancel?.cancel()
+
+        if handler != nil {
+            startSubscriberRTCPReceiveLoopIfReady()
+        }
     }
 
     func sendPublisherRTP(_ packet: RTPPacket) async throws {
@@ -236,6 +293,64 @@ public final class Room: @unchecked Sendable {
         }
 
         try await transport.sendRTP(packet)
+    }
+
+    func sendPublisherRTCP(_ packet: RTCPPacket) async throws {
+        let transport = publisherMediaStartupLock.withLock {
+            publisherMediaStartupResult?.transport
+        }
+
+        guard let transport else {
+            throw LiveKitNativeError.requestFailed(
+                action: "send RTCP",
+                reason: "publisherMediaTransportUnavailable",
+                message: "Publisher secure media transport is not started."
+            )
+        }
+
+        try await transport.sendRTCP(packet)
+    }
+
+    func sendSubscriberRTCP(_ packet: RTCPPacket) async throws {
+        let transport = subscriberMediaStartupLock.withLock {
+            subscriberMediaStartupResult?.transport
+        }
+
+        guard let transport else {
+            throw LiveKitNativeError.requestFailed(
+                action: "send RTCP",
+                reason: "subscriberMediaTransportUnavailable",
+                message: "Subscriber secure media transport is not started."
+            )
+        }
+
+        try await transport.sendRTCP(packet)
+    }
+
+    @discardableResult
+    func sendPublisherAudio(_ packet: OpusPacket, sid: String) async throws -> RTPPacket {
+        guard let sender = publisherAudioRTPSender(sid: sid) else {
+            throw LiveKitNativeError.requestFailed(
+                action: "send publisher audio",
+                reason: "publisherAudioRTPSenderUnavailable",
+                message: "No publisher audio RTP sender is registered for SID \(sid)."
+            )
+        }
+
+        return try await sender.send(packet)
+    }
+
+    @discardableResult
+    func sendPublisherVideo(_ frame: H264EncodedFrame, sid: String) async throws -> [RTPPacket] {
+        guard let sender = publisherVideoRTPSender(sid: sid) else {
+            throw LiveKitNativeError.requestFailed(
+                action: "send publisher video",
+                reason: "publisherVideoRTPSenderUnavailable",
+                message: "No publisher video RTP sender is registered for SID \(sid)."
+            )
+        }
+
+        return try await sender.send(frame)
     }
 
     public convenience init(options: RoomOptions = .init()) {
@@ -1556,6 +1671,7 @@ public final class Room: @unchecked Sendable {
             publisherMediaStartupResult = result
             publisherMediaStartupError = nil
         }
+        startPublisherRTCPReceiveLoopIfReady()
     }
 
     private func storeSubscriberMediaStartupResult(_ result: PeerConnectionMediaStartupResult) {
@@ -1563,6 +1679,7 @@ public final class Room: @unchecked Sendable {
             subscriberMediaStartupResult = result
             subscriberMediaStartupError = nil
         }
+        startSubscriberRTCPReceiveLoopIfReady()
     }
 
     private func storePublisherMediaStartupError(_ error: any Error) {
@@ -1582,16 +1699,19 @@ public final class Room: @unchecked Sendable {
         let cleared = subscriberMediaStartupLock.withLock {
             let task = subscriberMediaStartupTask
             let result = subscriberMediaStartupResult
+            let rtcpReceiveTask = subscriberRTCPReceiveTask
             subscriberMediaStartupStarted = false
             subscriberMediaStartupTask = nil
             subscriberMediaStartupResult = nil
             subscriberMediaStartupError = nil
+            subscriberRTCPReceiveTask = nil
             subscriberLocalCandidatesGathered = false
             subscriberLocalCandidates = []
-            return (task, result)
+            return (task, result, rtcpReceiveTask)
         }
 
         cleared.0?.cancel()
+        cleared.2?.cancel()
         return cleared.1
     }
 
@@ -1600,17 +1720,176 @@ public final class Room: @unchecked Sendable {
         let cleared = publisherMediaStartupLock.withLock {
             let task = publisherMediaStartupTask
             let result = publisherMediaStartupResult
+            let rtcpReceiveTask = publisherRTCPReceiveTask
             publisherMediaStartupStarted = false
             publisherMediaStartupTask = nil
             publisherMediaStartupResult = nil
             publisherMediaStartupError = nil
+            publisherRTCPReceiveTask = nil
             publisherLocalCandidatesGathered = false
             publisherLocalCandidates = []
-            return (task, result)
+            return (task, result, rtcpReceiveTask)
         }
 
         cleared.0?.cancel()
+        cleared.2?.cancel()
         return cleared.1
+    }
+
+    private func startPublisherRTCPReceiveLoopIfReady() {
+        publisherMediaStartupLock.withLock {
+            guard publisherRTCPHandler != nil,
+                  publisherRTCPReceiveTask == nil,
+                  let transport = publisherMediaStartupResult?.transport
+            else {
+                return
+            }
+
+            publisherRTCPReceiveLoopID &+= 1
+            let loopID = publisherRTCPReceiveLoopID
+            publisherRTCPReceiveTask = Task { [weak self, transport] in
+                await self?.runPublisherRTCPReceiveLoop(transport: transport, loopID: loopID)
+            }
+        }
+    }
+
+    private func startSubscriberRTCPReceiveLoopIfReady() {
+        subscriberMediaStartupLock.withLock {
+            guard subscriberRTCPHandler != nil,
+                  subscriberRTCPReceiveTask == nil,
+                  let transport = subscriberMediaStartupResult?.transport
+            else {
+                return
+            }
+
+            subscriberRTCPReceiveLoopID &+= 1
+            let loopID = subscriberRTCPReceiveLoopID
+            subscriberRTCPReceiveTask = Task { [weak self, transport] in
+                await self?.runSubscriberRTCPReceiveLoop(transport: transport, loopID: loopID)
+            }
+        }
+    }
+
+    private func runPublisherRTCPReceiveLoop(
+        transport: DTLSSRTPMediaTransport,
+        loopID: UInt64
+    ) async {
+        defer {
+            clearPublisherRTCPReceiveTask(loopID: loopID)
+        }
+
+        while !Task.isCancelled {
+            do {
+                let packet = try await transport.receive()
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                switch packet {
+                case .rtp:
+                    continue
+                case let .rtcp(packet):
+                    guard let handler = publisherRTCPHandlerSnapshot() else {
+                        return
+                    }
+                    await handler(packet)
+                }
+            } catch {
+                if isRecoverablePublisherRTCPReceiveError(error) {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                    continue
+                }
+
+                if !Task.isCancelled {
+                    LiveKitNativeLogging.log(.error, "Publisher RTCP receive loop stopped: \(error.localizedDescription)")
+                }
+                return
+            }
+        }
+    }
+
+    private func runSubscriberRTCPReceiveLoop(
+        transport: DTLSSRTPMediaTransport,
+        loopID: UInt64
+    ) async {
+        defer {
+            clearSubscriberRTCPReceiveTask(loopID: loopID)
+        }
+
+        while !Task.isCancelled {
+            do {
+                let packet = try await transport.receive()
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                switch packet {
+                case .rtp:
+                    continue
+                case let .rtcp(packet):
+                    guard let handler = subscriberRTCPHandlerSnapshot() else {
+                        return
+                    }
+                    await handler(packet)
+                }
+            } catch {
+                if isRecoverableSubscriberRTCPReceiveError(error) {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                    continue
+                }
+
+                if !Task.isCancelled {
+                    LiveKitNativeLogging.log(.error, "Subscriber RTCP receive loop stopped: \(error.localizedDescription)")
+                }
+                return
+            }
+        }
+    }
+
+    private func isRecoverablePublisherRTCPReceiveError(_ error: any Error) -> Bool {
+        guard case let SecureMediaTransportError.socketReceiveFailed(code) = error else {
+            return false
+        }
+
+        return code == EAGAIN || code == EWOULDBLOCK
+    }
+
+    private func isRecoverableSubscriberRTCPReceiveError(_ error: any Error) -> Bool {
+        guard case let SecureMediaTransportError.socketReceiveFailed(code) = error else {
+            return false
+        }
+
+        return code == EAGAIN || code == EWOULDBLOCK
+    }
+
+    private func publisherRTCPHandlerSnapshot() -> (@Sendable (RTCPPacket) async -> Void)? {
+        publisherMediaStartupLock.withLock {
+            publisherRTCPHandler
+        }
+    }
+
+    private func subscriberRTCPHandlerSnapshot() -> (@Sendable (RTCPPacket) async -> Void)? {
+        subscriberMediaStartupLock.withLock {
+            subscriberRTCPHandler
+        }
+    }
+
+    private func clearPublisherRTCPReceiveTask(loopID: UInt64) {
+        publisherMediaStartupLock.withLock {
+            guard publisherRTCPReceiveLoopID == loopID else {
+                return
+            }
+            publisherRTCPReceiveTask = nil
+        }
+    }
+
+    private func clearSubscriberRTCPReceiveTask(loopID: UInt64) {
+        subscriberMediaStartupLock.withLock {
+            guard subscriberRTCPReceiveLoopID == loopID else {
+                return
+            }
+            subscriberRTCPReceiveTask = nil
+        }
     }
 
     private func closeMediaStartupTransport(_ result: PeerConnectionMediaStartupResult?) async {

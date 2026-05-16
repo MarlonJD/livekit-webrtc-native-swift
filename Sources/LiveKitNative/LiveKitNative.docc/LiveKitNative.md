@@ -82,7 +82,12 @@ sequence/timestamp state across packets and frames before handing RTP packets
 to that sink. Room also stores publisher audio/video RTP sender state by
 published SID and local CID after successful publish, removes only the matching
 sender after unpublish, and preserves remaining sender state for resume
-reconnect.
+reconnect. Encoded Opus packets, H.264 frames, publisher RTCP packets, and
+subscriber RTCP packets can now be handed through the tested Room-level media
+hooks, registered publisher/subscriber RTCP handlers can receive decoded
+inbound RTCP from the injected secure media transport, and a deterministic
+feedback policy can build NACK/PLI RTCP packets for future subscriber
+packet-loss and keyframe-request handling.
 `Room.updateSubscription` and `Room.updateTrackSettings` expose media
 subscription and subscribed track settings signaling.
 `LocalParticipant.setTrackSubscriptionPermissions` exposes publisher-controlled
@@ -120,7 +125,12 @@ deadlines, due actions, expiry flags, and next deadlines without a wall-clock
 dependency. A TURN maintenance executor now drives injectable allocation and
 permission refresh closures and advances scheduler deadlines only on success,
 and relay candidate planning can build relayed ICE candidates from TURN
-relayed addresses and ChannelBind metadata. A ChannelData relay transport can
+relayed addresses and ChannelBind metadata. TURN relay session configuration
+can now select supported UDP relay endpoints from parsed ICE server URLs when
+credentials, realm, and nonce are available. A bounded TURN relay session
+composes allocation, permission creation, channel binding, relayed candidate
+planning, relay transport metadata, and deterministic maintenance execution
+over abstract transports. A ChannelData relay transport can
 encode outbound payloads and decode inbound packets over an abstract media
 datagram transport while
 preserving partial stream remainder and peer endpoint metadata. Fresh join,
@@ -131,10 +141,10 @@ Resume reconnects now send LiveKit `SyncState` for retained media subscription
 preferences, disabled subscribed tracks, local media/data publications, and
 the latest negotiated subscriber answer / publisher offer SDP state at
 unit-test level, and keep publisher offer track state so a later local publish
-after resume still includes existing local media sections. Real DTLS handshake/exporter
-implementation, default Room media transport wiring, default RTP sender
-capture/encode startup, and reconnect media recovery remain part of production
-hardening.
+after resume still includes existing local media sections. Real DTLS
+handshake/exporter implementation, default Room media transport wiring, default
+RTP sender capture/encode startup, live RTCP feedback integration, and
+reconnect media recovery remain part of production hardening.
 
 Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the
