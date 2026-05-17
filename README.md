@@ -169,11 +169,15 @@ host candidates and reuse the candidate port for STUN checks and media
 datagrams, server-provided `JoinResponse` and `ReconnectResponse` ICE server
 configuration mapping onto subscriber and publisher peer connections, STUN UDP
 server-reflexive candidate discovery from supported `stun:` ICE server URLs
-for injected bound-socket startup, deterministic ICE consent freshness planning
-for selected candidate pairs, TURN endpoint parsing from `turn:`/`turns:`
-ICE server URLs with UDP/TCP/TLS intent and credentials retained for future
-relay allocation, TURN Allocate request primitives for requested transport,
-lifetime, realm, nonce, `ERROR-CODE`, and relayed-address decoding, TURN
+for injected bound-socket startup, deterministic ICE consent freshness planning,
+injectable executor primitive, and Room-level consent loop for selected pairs in
+the injected secure-media startup path, bounded RTP
+jitter buffering with gap skip, duplicate/old packet drops, missing-sequence
+accounting, and sequence-wrap ordering, TURN endpoint parsing from
+`turn:`/`turns:` ICE server URLs with UDP/TCP/TLS intent and credentials
+retained for future relay allocation, TURN Allocate request primitives for
+requested transport, lifetime, realm, nonce, `ERROR-CODE`, and relayed-address
+decoding, TURN
 allocation client request/response validation with one long-term credential
 401 challenge retry over the STUN datagram transport abstraction, TURN Refresh
 request/response validation and deallocation lifetime support, CreatePermission
@@ -287,9 +291,12 @@ SDP offer and send it as `SignalRequest.offer` for the publisher negotiation
 path.
 Publisher answer routing, data-track control event mapping, data-track
 publish/unpublish request flows, and server/SFU media/data-track unpublish cleanup
-for reconnect state, injected publisher transport teardown, and matching
+for reconnect state, injected publisher transport teardown, consent-freshness
+execution primitives plus the injected media-startup consent loop, RTP
+jitter-buffer primitives, and matching
 `RequestResponse` failure mapping are unit-tested, while default live media
-transport wiring, capture/encode loop startup, media recovery, and end-to-end
+transport wiring, default live consent execution, subscriber jitter-buffer
+integration, capture/encode loop startup, media recovery, and end-to-end
 reconnect hardening are still open.
 
 ## Benchmarks

@@ -63,7 +63,12 @@ relay transport can encode outbound payloads and decode inbound packets over an
 abstract media datagram transport with partial stream remainder handling.
 Deterministic ICE consent freshness planning now models selected-pair consent
 check deadlines, timeout expiry, bounded failure expiry, disabled policy, and
-clamped jitter without a wall-clock dependency. Fresh
+clamped jitter without a wall-clock dependency, and an injectable consent
+freshness executor can advance success/failure/expiry state in unit tests.
+Injected Room media startup now starts a selected-pair consent freshness loop
+after secure transport binding and closes the protected transport when consent
+expires.
+Fresh
 join, reconnect, and disconnect paths now
 reset stale
 remote SDP, ICE candidate, and final-trickle state and regenerate local ICE
@@ -89,8 +94,12 @@ handler loop. A deterministic RTCP feedback policy primitive can now build
 Generic NACK and PLI packets from subscriber-side packet-loss/keyframe needs,
 and a subscriber feedback planner maps H.264/VP8 RTP sequence gaps plus
 explicit keyframe requests into bounded RTCP feedback packets that Room can
-dispatch through the injected subscriber RTCP transport; the default
-capture/encode loop and subscriber-pipeline feedback dispatch remain open.
+dispatch through the injected subscriber RTCP transport. A bounded RTP jitter
+buffer primitive can release contiguous packets, skip bounded gaps, report
+missing sequence numbers, drop duplicate/old packets, flush in sequence order,
+and preserve ordering across sequence-number wrap; the default capture/encode
+loop, default subscriber jitter-buffer integration, and subscriber-pipeline
+feedback dispatch remain open.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -371,6 +380,13 @@ The old binary WebRTC dependency path has been removed from the package model.
   - deterministic ICE consent freshness policy/session planning for selected
     candidate pairs, including check deadlines, timeout expiry, consecutive
     failure expiry, disabled policy, and clamped jitter
+  - injectable ICE consent freshness executor primitive that records
+    success/failure state and reports timeout/failure expiry
+  - injected Room publisher/subscriber media startup can run a selected-pair
+    consent freshness loop and close the protected transport on expiry
+  - bounded RTP jitter buffer primitive for contiguous release, duplicate/old
+    packet drops, bounded gap skip, missing-sequence reporting, flush ordering,
+    and 16-bit sequence-number wrap
   - TURN relay ICE candidate planning from relayed addresses and ChannelBind
     metadata, including relayed candidate priority/foundation selection
   - TURN relay session configuration selection from parsed ICE server
@@ -695,7 +711,8 @@ The following checks passed after the latest implementation pass:
   RTCP send/receive hooks plus deterministic bounded NACK/PLI packet builder,
   subscriber feedback planner, and Room subscriber feedback send helper.
 - TWCC, REMB, or congestion control.
-- Jitter buffer.
+- Default subscriber jitter-buffer integration beyond the current bounded RTP
+  jitter buffer primitive.
 - Packet-loss recovery beyond basic RTP/RTCP packet primitives.
 - Adaptive quality control driven by estimated bandwidth, packet loss, CPU,
   and subscriber preferences.
@@ -765,7 +782,7 @@ The following checks passed after the latest implementation pass:
 
 1. Continue `1.0.0` hardening with a real DTLS handshake/exporter
    implementation and default Room runtime subscriber/publisher startup
-   integration.
+   integration beyond the injected startup path.
 2. Connect queued local data publish plans to the publisher peer connection
    once data channels are open.
 3. Add full LiveKit ICE restart signaling, media/data recovery after signal

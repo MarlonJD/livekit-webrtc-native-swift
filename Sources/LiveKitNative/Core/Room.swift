@@ -10,6 +10,8 @@ struct RoomMediaStartupConfiguration: Sendable {
     var nominationPolicy: ICEPairNominationPolicy
     var checker: any ICEConnectivityChecking
     var binder: DTLSSRTPMediaSessionBinder
+    var consentFreshnessPolicy: ICEConsentFreshnessPolicy
+    var consentFreshnessRetryPolicy: STUNBindingRetryPolicy
 
     init(
         localCandidates: @escaping @Sendable () -> [ICECandidate],
@@ -17,7 +19,9 @@ struct RoomMediaStartupConfiguration: Sendable {
         tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
         checker: any ICEConnectivityChecking = STUNICEConnectivityChecker(),
-        binder: DTLSSRTPMediaSessionBinder
+        binder: DTLSSRTPMediaSessionBinder,
+        consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
+        consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
     ) {
         self.init(
             localCandidatesProvider: { _ in localCandidates() },
@@ -25,7 +29,9 @@ struct RoomMediaStartupConfiguration: Sendable {
             tieBreaker: tieBreaker,
             nominationPolicy: nominationPolicy,
             checker: checker,
-            binder: binder
+            binder: binder,
+            consentFreshnessPolicy: consentFreshnessPolicy,
+            consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
         )
     }
 
@@ -35,7 +41,9 @@ struct RoomMediaStartupConfiguration: Sendable {
         tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
         checker: any ICEConnectivityChecking = STUNICEConnectivityChecker(),
-        binder: DTLSSRTPMediaSessionBinder
+        binder: DTLSSRTPMediaSessionBinder,
+        consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
+        consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
     ) {
         self.localCandidates = localCandidatesProvider
         self.iceRole = iceRole
@@ -43,6 +51,8 @@ struct RoomMediaStartupConfiguration: Sendable {
         self.nominationPolicy = nominationPolicy
         self.checker = checker
         self.binder = binder
+        self.consentFreshnessPolicy = consentFreshnessPolicy
+        self.consentFreshnessRetryPolicy = consentFreshnessRetryPolicy
     }
 
     init(
@@ -50,7 +60,9 @@ struct RoomMediaStartupConfiguration: Sendable {
         iceRole: ICEAgentRole = .controlling,
         tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
-        handshaker: any DTLSSRTPHandshaking
+        handshaker: any DTLSSRTPHandshaking,
+        consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
+        consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
     ) {
         let candidateStore = LocalICEUDPSocketCandidateStore(candidates: localCandidateSockets)
         self.init(
@@ -71,7 +83,9 @@ struct RoomMediaStartupConfiguration: Sendable {
                     candidateStore: candidateStore
                 ),
                 handshaker: handshaker
-            )
+            ),
+            consentFreshnessPolicy: consentFreshnessPolicy,
+            consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
         )
     }
 
@@ -82,7 +96,9 @@ struct RoomMediaStartupConfiguration: Sendable {
         iceRole: ICEAgentRole = .controlling,
         tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
-        handshaker: any DTLSSRTPHandshaking
+        handshaker: any DTLSSRTPHandshaking,
+        consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
+        consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
     ) throws {
         self.init(
             localCandidateSockets: try LocalICEUDPSocketCandidate.hostCandidates(
@@ -93,7 +109,9 @@ struct RoomMediaStartupConfiguration: Sendable {
             iceRole: iceRole,
             tieBreaker: tieBreaker,
             nominationPolicy: nominationPolicy,
-            handshaker: handshaker
+            handshaker: handshaker,
+            consentFreshnessPolicy: consentFreshnessPolicy,
+            consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
         )
     }
 }
@@ -134,6 +152,7 @@ public final class Room: @unchecked Sendable {
     private var subscriberMediaStartupTask: Task<Void, Never>?
     private var subscriberMediaStartupResult: PeerConnectionMediaStartupResult?
     private var subscriberMediaStartupError: (any Error)?
+    private var subscriberICEConsentFreshnessTask: Task<Void, Never>?
     private var subscriberRTCPHandler: (@Sendable (RTCPPacket) async -> Void)?
     private var subscriberRTCPReceiveTask: Task<Void, Never>?
     private var subscriberRTCPReceiveLoopID: UInt64 = 0
@@ -143,6 +162,7 @@ public final class Room: @unchecked Sendable {
     private var publisherMediaStartupTask: Task<Void, Never>?
     private var publisherMediaStartupResult: PeerConnectionMediaStartupResult?
     private var publisherMediaStartupError: (any Error)?
+    private var publisherICEConsentFreshnessTask: Task<Void, Never>?
     private var publisherRTCPHandler: (@Sendable (RTCPPacket) async -> Void)?
     private var publisherRTCPReceiveTask: Task<Void, Never>?
     private var publisherRTCPReceiveLoopID: UInt64 = 0
@@ -1711,6 +1731,7 @@ public final class Room: @unchecked Sendable {
             publisherMediaStartupResult = result
             publisherMediaStartupError = nil
         }
+        startPublisherICEConsentFreshnessLoopIfReady(result: result)
         startPublisherRTCPReceiveLoopIfReady()
     }
 
@@ -1719,6 +1740,7 @@ public final class Room: @unchecked Sendable {
             subscriberMediaStartupResult = result
             subscriberMediaStartupError = nil
         }
+        startSubscriberICEConsentFreshnessLoopIfReady(result: result)
         startSubscriberRTCPReceiveLoopIfReady()
     }
 
@@ -1740,18 +1762,21 @@ public final class Room: @unchecked Sendable {
             let task = subscriberMediaStartupTask
             let result = subscriberMediaStartupResult
             let rtcpReceiveTask = subscriberRTCPReceiveTask
+            let consentFreshnessTask = subscriberICEConsentFreshnessTask
             subscriberMediaStartupStarted = false
             subscriberMediaStartupTask = nil
             subscriberMediaStartupResult = nil
             subscriberMediaStartupError = nil
+            subscriberICEConsentFreshnessTask = nil
             subscriberRTCPReceiveTask = nil
             subscriberLocalCandidatesGathered = false
             subscriberLocalCandidates = []
-            return (task, result, rtcpReceiveTask)
+            return (task, result, rtcpReceiveTask, consentFreshnessTask)
         }
 
         cleared.0?.cancel()
         cleared.2?.cancel()
+        cleared.3?.cancel()
         return cleared.1
     }
 
@@ -1761,19 +1786,172 @@ public final class Room: @unchecked Sendable {
             let task = publisherMediaStartupTask
             let result = publisherMediaStartupResult
             let rtcpReceiveTask = publisherRTCPReceiveTask
+            let consentFreshnessTask = publisherICEConsentFreshnessTask
             publisherMediaStartupStarted = false
             publisherMediaStartupTask = nil
             publisherMediaStartupResult = nil
             publisherMediaStartupError = nil
+            publisherICEConsentFreshnessTask = nil
             publisherRTCPReceiveTask = nil
             publisherLocalCandidatesGathered = false
             publisherLocalCandidates = []
-            return (task, result, rtcpReceiveTask)
+            return (task, result, rtcpReceiveTask, consentFreshnessTask)
         }
 
         cleared.0?.cancel()
         cleared.2?.cancel()
+        cleared.3?.cancel()
         return cleared.1
+    }
+
+    private func startPublisherICEConsentFreshnessLoopIfReady(result: PeerConnectionMediaStartupResult) {
+        guard let publisherMediaStartupConfiguration,
+              publisherMediaStartupConfiguration.consentFreshnessPolicy.isEnabled
+        else {
+            return
+        }
+
+        guard let remoteCredentials = publisherPeerConnection.remoteICECredentials else {
+            storePublisherMediaStartupError(PeerConnectionNegotiationError.missingRemoteICECredentials)
+            return
+        }
+
+        let iceConfiguration = ICEAgentConfiguration(
+            localCredentials: publisherPeerConnection.configuration.iceCredentials,
+            remoteCredentials: remoteCredentials,
+            role: publisherMediaStartupConfiguration.iceRole,
+            tieBreaker: publisherMediaStartupConfiguration.tieBreaker,
+            nominationPolicy: publisherMediaStartupConfiguration.nominationPolicy,
+            retryPolicy: publisherMediaStartupConfiguration.consentFreshnessRetryPolicy
+        )
+        let task = Task { [weak self, publisherMediaStartupConfiguration, result, iceConfiguration] in
+            guard let self else {
+                return
+            }
+
+            await self.runICEConsentFreshnessLoop(
+                label: "Publisher",
+                selectedPair: result.selectedCandidatePair,
+                transport: result.transport,
+                policy: publisherMediaStartupConfiguration.consentFreshnessPolicy,
+                checker: publisherMediaStartupConfiguration.checker,
+                iceConfiguration: iceConfiguration
+            ) { [weak self] action in
+                self?.storePublisherMediaStartupError(ICEConsentFreshnessError.expired(action))
+            }
+        }
+
+        publisherMediaStartupLock.withLock {
+            publisherICEConsentFreshnessTask?.cancel()
+            publisherICEConsentFreshnessTask = task
+        }
+    }
+
+    private func startSubscriberICEConsentFreshnessLoopIfReady(result: PeerConnectionMediaStartupResult) {
+        guard let subscriberMediaStartupConfiguration,
+              subscriberMediaStartupConfiguration.consentFreshnessPolicy.isEnabled
+        else {
+            return
+        }
+
+        guard let remoteCredentials = subscriberPeerConnection.remoteICECredentials else {
+            storeSubscriberMediaStartupError(PeerConnectionNegotiationError.missingRemoteICECredentials)
+            return
+        }
+
+        let iceConfiguration = ICEAgentConfiguration(
+            localCredentials: subscriberPeerConnection.configuration.iceCredentials,
+            remoteCredentials: remoteCredentials,
+            role: subscriberMediaStartupConfiguration.iceRole,
+            tieBreaker: subscriberMediaStartupConfiguration.tieBreaker,
+            nominationPolicy: subscriberMediaStartupConfiguration.nominationPolicy,
+            retryPolicy: subscriberMediaStartupConfiguration.consentFreshnessRetryPolicy
+        )
+        let task = Task { [weak self, subscriberMediaStartupConfiguration, result, iceConfiguration] in
+            guard let self else {
+                return
+            }
+
+            await self.runICEConsentFreshnessLoop(
+                label: "Subscriber",
+                selectedPair: result.selectedCandidatePair,
+                transport: result.transport,
+                policy: subscriberMediaStartupConfiguration.consentFreshnessPolicy,
+                checker: subscriberMediaStartupConfiguration.checker,
+                iceConfiguration: iceConfiguration
+            ) { [weak self] action in
+                self?.storeSubscriberMediaStartupError(ICEConsentFreshnessError.expired(action))
+            }
+        }
+
+        subscriberMediaStartupLock.withLock {
+            subscriberICEConsentFreshnessTask?.cancel()
+            subscriberICEConsentFreshnessTask = task
+        }
+    }
+
+    private func runICEConsentFreshnessLoop(
+        label: String,
+        selectedPair: ICECandidatePair,
+        transport: DTLSSRTPMediaTransport,
+        policy: ICEConsentFreshnessPolicy,
+        checker: any ICEConnectivityChecking,
+        iceConfiguration: ICEAgentConfiguration,
+        onExpired: @escaping @Sendable (ICEConsentFreshnessDueAction) -> Void
+    ) async {
+        var session = ICEConsentFreshnessSession(
+            selectedPair: selectedPair,
+            startedAt: Date().timeIntervalSince1970
+        )
+        let executor = ICEConsentFreshnessExecutor(policy: policy) { pair in
+            do {
+                _ = try checker.checkCandidatePair(
+                    pair,
+                    configuration: iceConfiguration,
+                    nominate: false
+                )
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        while !Task.isCancelled {
+            let now = Date().timeIntervalSince1970
+            switch executor.execute(session: &session, at: now) {
+            case .noAction, .success, .failure:
+                break
+            case let .expired(action):
+                onExpired(action)
+                await transport.close()
+                LiveKitNativeLogging.log(.error, "\(label) ICE consent freshness expired.")
+                return
+            }
+
+            let sleepNanoseconds = Self.iceConsentFreshnessSleepNanoseconds(
+                session: session,
+                policy: policy,
+                now: Date().timeIntervalSince1970
+            )
+            do {
+                try await Task.sleep(nanoseconds: sleepNanoseconds)
+            } catch {
+                return
+            }
+        }
+    }
+
+    private static func iceConsentFreshnessSleepNanoseconds(
+        session: ICEConsentFreshnessSession,
+        policy: ICEConsentFreshnessPolicy,
+        now: TimeInterval
+    ) -> UInt64 {
+        let nextDeadline = min(
+            session.nextCheckDeadline(policy: policy),
+            session.timeoutDeadline(policy: policy)
+        )
+        let seconds = max(0.010, nextDeadline - now)
+        return UInt64(min(seconds * 1_000_000_000, Double(UInt64.max)))
     }
 
     private func startPublisherRTCPReceiveLoopIfReady() {

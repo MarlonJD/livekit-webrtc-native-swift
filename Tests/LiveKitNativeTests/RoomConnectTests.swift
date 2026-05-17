@@ -1245,6 +1245,123 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(datagramFactory.capturedPair?.remote.foundation, "2")
     }
 
+    func testSubscriberMediaTransportRunsICEConsentFreshnessAfterStartup() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeSubscriberOfferResponse(),
+            makeSubscriberTrickleResponse(),
+            makeSubscriberTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let localCandidate = ICECandidate(
+            foundation: "subscriber-local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.11",
+            port: 55001,
+            type: .host
+        )
+        let checker = RoomMediaStartupCountingICEChecker(consentChecksSucceed: true)
+        let handshaker = RoomMediaStartupDTLSHandshaker(
+            result: try DTLSSRTPHandshakeResult(
+                role: .client,
+                exportedKeyingMaterial: roomMediaStartupExportedKeyingMaterial(),
+                remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "DD:EE:FF")
+            )
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 43,
+                checker: checker,
+                binder: DTLSSRTPMediaSessionBinder(
+                    datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(
+                        transport: RoomMediaStartupDatagramTransport()
+                    ),
+                    handshaker: handshaker
+                ),
+                consentFreshnessPolicy: ICEConsentFreshnessPolicy(
+                    intervalSeconds: 0.010,
+                    timeoutSeconds: 0.250,
+                    maxConsecutiveFailures: 2
+                )
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let startupResult = await waitForSubscriberMediaStartupResult(room)
+        _ = try XCTUnwrap(startupResult)
+
+        let consentCheckCount = await checker.waitForConsentCheckCount(1)
+        XCTAssertGreaterThanOrEqual(consentCheckCount, 1)
+        XCTAssertNil(room.lastSubscriberMediaStartupError)
+    }
+
+    func testSubscriberMediaTransportClosesWhenICEConsentFreshnessExpires() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeSubscriberOfferResponse(),
+            makeSubscriberTrickleResponse(),
+            makeSubscriberTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let datagramTransport = RoomMediaStartupDatagramTransport()
+        let localCandidate = ICECandidate(
+            foundation: "subscriber-local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.11",
+            port: 55001,
+            type: .host
+        )
+        let checker = RoomMediaStartupCountingICEChecker(consentChecksSucceed: false)
+        let handshaker = RoomMediaStartupDTLSHandshaker(
+            result: try DTLSSRTPHandshakeResult(
+                role: .client,
+                exportedKeyingMaterial: roomMediaStartupExportedKeyingMaterial(),
+                remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "DD:EE:FF")
+            )
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 43,
+                checker: checker,
+                binder: DTLSSRTPMediaSessionBinder(
+                    datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(
+                        transport: datagramTransport
+                    ),
+                    handshaker: handshaker
+                ),
+                consentFreshnessPolicy: ICEConsentFreshnessPolicy(
+                    intervalSeconds: 0.010,
+                    timeoutSeconds: 0.250,
+                    maxConsecutiveFailures: 2
+                )
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let startupResult = await waitForSubscriberMediaStartupResult(room)
+        _ = try XCTUnwrap(startupResult)
+
+        let error = await waitForSubscriberMediaStartupError(room)
+        XCTAssertNotNil(error as? ICEConsentFreshnessError)
+
+        do {
+            try await room.sendSubscriberRTCP(.receiverReport(RTCPReceiverReport(senderSSRC: 42)))
+            XCTFail("Expected subscriber RTCP send to fail after consent expiration.")
+        } catch {
+            XCTAssertEqual(error as? SecureMediaTransportError, .transportClosed)
+        }
+    }
+
     func testPublisherRTPBridgeSendsThroughStartedSecureMediaTransport() async throws {
         let frames = try [
             makeJoinResponse(),
@@ -4608,6 +4725,18 @@ private func waitForSubscriberMediaStartupResult(_ room: Room) async -> PeerConn
     return room.lastSubscriberMediaStartupResult
 }
 
+private func waitForSubscriberMediaStartupError(_ room: Room) async -> (any Error)? {
+    for _ in 0..<100 {
+        if let error = room.lastSubscriberMediaStartupError {
+            return error
+        }
+
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+
+    return room.lastSubscriberMediaStartupError
+}
+
 private func makeStartedSubscriberRTCPFeedbackRoom() async throws -> (Room, RoomMediaStartupDatagramTransport) {
     let frames = try [
         makeJoinResponse(),
@@ -4770,6 +4899,59 @@ private final class RoomMediaStartupICEChecker: ICEConnectivityChecking, @unchec
     ) throws -> ICEConnectivityCheckResult {
         lock.withLock {
             mutableCapturedConfiguration = configuration
+        }
+
+        return ICEConnectivityCheckResult(
+            mappedAddress: STUNMappedAddress(address: pair.local.address, port: pair.local.port),
+            response: STUNMessage(type: .bindingSuccessResponse)
+        )
+    }
+}
+
+private final class RoomMediaStartupCountingICEChecker: ICEConnectivityChecking, @unchecked Sendable {
+    private let lock = NSLock()
+    private let consentChecksSucceed: Bool
+    private var mutableConnectivityCheckCount = 0
+    private var mutableConsentCheckCount = 0
+
+    init(consentChecksSucceed: Bool) {
+        self.consentChecksSucceed = consentChecksSucceed
+    }
+
+    func waitForConsentCheckCount(_ expectedCount: Int, attempts: Int = 100) async -> Int {
+        for _ in 0..<attempts {
+            let count = lock.withLock {
+                mutableConsentCheckCount
+            }
+            if count >= expectedCount {
+                return count
+            }
+
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        return lock.withLock {
+            mutableConsentCheckCount
+        }
+    }
+
+    func checkCandidatePair(
+        _ pair: ICECandidatePair,
+        configuration: ICEAgentConfiguration,
+        nominate: Bool
+    ) throws -> ICEConnectivityCheckResult {
+        if nominate {
+            lock.withLock {
+                mutableConnectivityCheckCount += 1
+            }
+        } else {
+            lock.withLock {
+                mutableConsentCheckCount += 1
+            }
+
+            guard consentChecksSucceed else {
+                throw ICEConnectivityCheckError.missingMappedAddress
+            }
         }
 
         return ICEConnectivityCheckResult(

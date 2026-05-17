@@ -110,8 +110,14 @@ peer connection configurations, and injected bound-socket startup can use
 supported `stun:` UDP URLs to add server-reflexive candidates while preserving
 socket reuse. Deterministic ICE consent freshness planning can now schedule
 selected-pair checks, timeout expiry, failure expiry, disabled policy behavior,
-and clamped jitter without a wall-clock dependency. `turn:` and `turns:` ICE
-server URLs are parsed with UDP/TCP/TLS intent and credentials retained for
+and clamped jitter without a wall-clock dependency, and an injectable executor
+primitive records consent success/failure/expiry state in unit tests. Injected
+Room media startup now runs a selected-pair consent loop after secure transport
+binding and closes the protected transport on consent expiry. A bounded
+RTP jitter buffer primitive can release contiguous packets, skip bounded gaps,
+report missing sequence numbers, drop duplicate/old packets, flush in sequence
+order, and preserve ordering across sequence-number wrap. `turn:` and `turns:`
+ICE server URLs are parsed with UDP/TCP/TLS intent and credentials retained for
 future relay allocation, and TURN Allocate
 request primitives cover requested transport, lifetime, realm, nonce,
 `ERROR-CODE`, and relayed-address decoding. TURN allocation client groundwork
@@ -148,8 +154,9 @@ the latest negotiated subscriber answer / publisher offer SDP state at
 unit-test level, and keep publisher offer track state so a later local publish
 after resume still includes existing local media sections. Real DTLS
 handshake/exporter implementation, default Room media transport wiring, default
-RTP sender capture/encode startup, subscriber-pipeline RTCP feedback dispatch,
-and reconnect media recovery remain part of production hardening.
+live consent execution, default subscriber jitter-buffer integration, RTP sender
+capture/encode startup, subscriber-pipeline RTCP feedback dispatch, and
+reconnect media recovery remain part of production hardening.
 
 Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the

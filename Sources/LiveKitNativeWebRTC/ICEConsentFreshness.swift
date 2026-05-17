@@ -146,3 +146,7 @@ package struct ICEConsentFreshnessSession: Equatable, Sendable {
         consecutiveFailures += 1
     }
 }
+
+package enum ICEConsentFreshnessError: Error, Equatable, Sendable {
+    case expired(ICEConsentFreshnessDueAction)
+}
