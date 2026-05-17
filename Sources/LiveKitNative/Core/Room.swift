@@ -114,10 +114,103 @@ struct RoomMediaStartupConfiguration: Sendable {
             consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
         )
     }
+
+    static func defaultLive(
+        hostCandidateAddresses: @escaping @Sendable () -> [ICEInterfaceAddress] = {
+            ICEHostCandidateGatherer.localInterfaceAddresses()
+        },
+        bindAddress: String = "0.0.0.0",
+        receiveTimeoutMilliseconds: Int = 1_000,
+        iceRole: ICEAgentRole = .controlling,
+        tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
+        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        handshaker: any DTLSSRTPHandshaking = UnavailableAppleDTLSSRTPHandshaker(),
+        consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
+        consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
+    ) -> Self {
+        let candidateStore = LocalICEUDPSocketCandidateStore(candidates: [])
+        let candidateProvider = DefaultRoomMediaStartupLocalCandidateProvider(
+            candidateStore: candidateStore,
+            hostCandidateAddresses: hostCandidateAddresses,
+            bindAddress: bindAddress,
+            receiveTimeoutMilliseconds: receiveTimeoutMilliseconds
+        )
+
+        return Self(
+            localCandidatesProvider: { iceServers in
+                candidateProvider.localCandidates(iceServers: iceServers)
+            },
+            iceRole: iceRole,
+            tieBreaker: tieBreaker,
+            nominationPolicy: nominationPolicy,
+            checker: LocalICEUDPSocketConnectivityChecker(candidateStore: candidateStore),
+            binder: DTLSSRTPMediaSessionBinder(
+                datagramTransportFactory: LocalICEUDPSocketMediaDatagramTransportFactory(
+                    candidateStore: candidateStore
+                ),
+                handshaker: handshaker
+            ),
+            consentFreshnessPolicy: consentFreshnessPolicy,
+            consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
+        )
+    }
 }
 
 typealias RoomPublisherMediaStartupConfiguration = RoomMediaStartupConfiguration
 typealias RoomSubscriberMediaStartupConfiguration = RoomMediaStartupConfiguration
+
+private final class DefaultRoomMediaStartupLocalCandidateProvider: @unchecked Sendable {
+    private let candidateStore: LocalICEUDPSocketCandidateStore
+    private let hostCandidateAddresses: @Sendable () -> [ICEInterfaceAddress]
+    private let bindAddress: String
+    private let receiveTimeoutMilliseconds: Int
+    private let lock = NSLock()
+    private var hostCandidates: [LocalICEUDPSocketCandidate]?
+
+    init(
+        candidateStore: LocalICEUDPSocketCandidateStore,
+        hostCandidateAddresses: @escaping @Sendable () -> [ICEInterfaceAddress],
+        bindAddress: String,
+        receiveTimeoutMilliseconds: Int
+    ) {
+        self.candidateStore = candidateStore
+        self.hostCandidateAddresses = hostCandidateAddresses
+        self.bindAddress = bindAddress
+        self.receiveTimeoutMilliseconds = receiveTimeoutMilliseconds
+    }
+
+    func localCandidates(iceServers: [ICEServer]) -> [ICECandidate] {
+        lock.withLock {
+            let hostCandidates = gatherHostCandidatesIfNeeded()
+            let serverReflexiveCandidates = hostCandidates.flatMap {
+                $0.serverReflexiveCandidates(iceServers: iceServers)
+            }
+            let candidates = hostCandidates + serverReflexiveCandidates
+            candidateStore.replace(with: candidates)
+            return candidates.map(\.candidate)
+        }
+    }
+
+    private func gatherHostCandidatesIfNeeded() -> [LocalICEUDPSocketCandidate] {
+        if let hostCandidates {
+            return hostCandidates
+        }
+
+        do {
+            let gathered = try LocalICEUDPSocketCandidate.hostCandidates(
+                from: hostCandidateAddresses(),
+                bindAddress: bindAddress,
+                receiveTimeoutMilliseconds: receiveTimeoutMilliseconds
+            )
+            hostCandidates = gathered
+            return gathered
+        } catch {
+            LiveKitNativeLogging.log(.error, "Default ICE host candidate gathering failed: \(error.localizedDescription)")
+            hostCandidates = []
+            return []
+        }
+    }
+}
 
 public final class Room: @unchecked Sendable {
     public weak var delegate: (any RoomDelegate)?
@@ -414,7 +507,12 @@ public final class Room: @unchecked Sendable {
     }
 
     public convenience init(options: RoomOptions = .init()) {
-        self.init(options: options, signalConnection: SignalConnection())
+        self.init(
+            options: options,
+            signalConnection: SignalConnection(),
+            subscriberMediaStartupConfiguration: .defaultLive(),
+            publisherMediaStartupConfiguration: .defaultLive()
+        )
     }
 
     init(

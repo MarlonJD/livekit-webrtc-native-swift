@@ -99,16 +99,19 @@ publish acknowledgements now trigger send-only SDP offer signaling for the
 publisher negotiation path. Peer connection coordinators can
 now hand negotiated DTLS configuration and nominated ICE pairs into the
 handshaker-backed media session binder, and can run ICE checks to select a pair
-before binding secure media. Room can now trigger injected publisher and
-subscriber media startup after negotiated SDP and final ICE trickle, and can
-send local ICE candidate and final-trickle signaling for both peer connection
-targets when media startup is configured. Injected media startup can now be
-backed by bound local ICE UDP sockets so host candidate gathering, STUN checks,
-and media datagrams share the same local port. `JoinResponse` and
-`ReconnectResponse` ICE server lists now update both subscriber and publisher
-peer connection configurations, and injected bound-socket startup can use
-supported `stun:` UDP URLs to add server-reflexive candidates while preserving
-socket reuse. Deterministic ICE consent freshness planning can now schedule
+before binding secure media. Room can now trigger publisher and subscriber media
+startup after negotiated SDP and final ICE trickle, and can send local ICE
+candidate and final-trickle signaling for both peer connection targets when
+media startup is configured. Media startup can now be backed by bound local ICE
+UDP sockets so host candidate gathering, STUN checks, and media datagrams share
+the same local port. `JoinResponse` and `ReconnectResponse` ICE server lists now
+update both subscriber and publisher peer connection configurations, and
+bound-socket startup can use supported `stun:` UDP URLs to add server-reflexive
+candidates while preserving socket reuse. Public `Room` initialization now
+installs default socket-backed subscriber and publisher media startup
+configurations, so live signaling can gather and trickle local ICE candidates
+before reaching the explicit unavailable Apple DTLS-SRTP handshaker boundary.
+Deterministic ICE consent freshness planning can now schedule
 selected-pair checks, timeout expiry, failure expiry, disabled policy behavior,
 and clamped jitter without a wall-clock dependency, and an injectable executor
 primitive records consent success/failure/expiry state in unit tests. Injected

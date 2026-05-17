@@ -123,6 +123,24 @@ final class DTLSSRTPTests: XCTestCase {
         }
     }
 
+    func testUnavailableAppleDTLSSRTPHandshakerFailsExplicitly() async throws {
+        let handshaker = UnavailableAppleDTLSSRTPHandshaker()
+        let configuration = try DTLSSRTPHandshakeConfiguration(
+            role: .client,
+            remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+        )
+
+        do {
+            _ = try await handshaker.performHandshake(
+                configuration: configuration,
+                transport: NoopDTLSDatagramTransport()
+            )
+            XCTFail("Expected unavailable Apple DTLS-SRTP handshaker failure.")
+        } catch {
+            XCTAssertEqual(error as? DTLSSRTPError, .webRTCUseSRTPNegotiationUnavailable)
+        }
+    }
+
     func testShortAuthenticationTagProfileUsesSameExporterByteCount() throws {
         let profile = try SRTPProtectionProfile(identifier: 0x0002)
         let exported = Data((0..<60).map(UInt8.init))
@@ -268,4 +286,12 @@ private extension Data {
 private enum HexError: Error {
     case invalidLength
     case invalidByte
+}
+
+private struct NoopDTLSDatagramTransport: MediaDatagramTransport {
+    func send(_ datagram: Data) async throws {}
+
+    func receive() async throws -> Data {
+        Data()
+    }
 }

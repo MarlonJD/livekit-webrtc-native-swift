@@ -11,6 +11,7 @@ package enum DTLSSRTPError: Error, Equatable, Sendable {
     case invalidUseSRTExtensionLength
     case missingUseSRTPProtectionProfiles
     case invalidUseSRTPMKIByteCount(Int)
+    case webRTCUseSRTPNegotiationUnavailable
 }
 
 package enum DTLSSRTPRole: Equatable, Sendable {

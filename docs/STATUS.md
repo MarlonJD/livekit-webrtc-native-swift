@@ -1,6 +1,6 @@
 # LiveKitNative Status
 
-Last updated: 2026-05-16
+Last updated: 2026-05-17
 
 ## Current State
 
@@ -11,9 +11,9 @@ client.
 Production readiness is intentionally represented in code through
 `LiveKitNative.productionReadiness` and `LiveKitNative.assertProductionReady()`.
 The current status is `developerPreview`, with explicit blockers for the real
-DTLS handshake/exporter implementation, TURN/ICE hardening, default live media
-startup integration, VideoToolbox-backed production H.264 encode/decode with
-hardware path verification and fallback policy, DTLS-backed SCTP, media
+DTLS-SRTP `use_srtp` handshake/exporter implementation, TURN/ICE hardening,
+default live secure media completion, VideoToolbox-backed production H.264
+encode/decode with hardware path verification and fallback policy, DTLS-backed SCTP, media
 recovery during reconnect, meeting-grade audio, jitter buffering, packet-loss
 recovery, congestion control, adaptive quality, real-device iOS
 soak/performance tests, and end-to-end LiveKit compatibility testing.
@@ -67,7 +67,12 @@ clamped jitter without a wall-clock dependency, and an injectable consent
 freshness executor can advance success/failure/expiry state in unit tests.
 Injected Room media startup now starts a selected-pair consent freshness loop
 after secure transport binding and closes the protected transport when consent
-expires.
+expires. Public `Room` initialization now installs default socket-backed
+subscriber and publisher media startup configurations, so the live path can
+gather host candidates lazily, add supported STUN server-reflexive candidates,
+send local trickle/final-trickle signaling, reuse the bound ICE socket for
+checks/media datagrams, and then fail explicitly at the unavailable Apple
+DTLS-SRTP handshaker boundary instead of silently skipping media startup.
 Fresh
 join, reconnect, and disconnect paths now
 reset stale
@@ -468,8 +473,8 @@ The old binary WebRTC dependency path has been removed from the package model.
   - `PeerConnectionCoordinator.startSecureMediaTransport(...)` runs ICE
     connectivity checks, requires a selected candidate pair, then binds that
     pair through the handshaker-backed secure media session path
-  - `Room` can trigger injected publisher and subscriber media startup after
-    negotiated SDP and final ICE trickle, so runtime signaling can now reach the
+  - `Room` can trigger publisher and subscriber media startup after negotiated
+    SDP and final ICE trickle, so runtime signaling can now reach the
     coordinator-run ICE + media binder path in tests
   - `Room` can send publisher RTP packets through a started injected secure
     media transport, giving the future capture/encode loop a tested bridge
@@ -544,18 +549,21 @@ The old binary WebRTC dependency path has been removed from the package model.
     socket for STUN checks and selected-pair media datagrams
   - `RoomMediaStartupConfiguration` can be built from bound local candidate
     sockets, wiring the socket-backed ICE checker and media datagram factory
-    into the injected startup path
+    into startup paths
   - signaling-provided ICE server lists can update peer connection
     configuration without replacing local ICE credentials, DTLS fingerprints,
     or media profile state
   - peer connection coordinators can reset remote SDP, ICE candidate, remote
     ICE credential, DTLS fingerprint/setup, and final-trickle state while
     preserving local configuration
-  - injected bound-socket media startup can pass signaling-provided ICE servers
-    into local candidate gathering so supported `stun:` UDP endpoints add
+  - bound-socket media startup can pass signaling-provided ICE servers into
+    local candidate gathering so supported `stun:` UDP endpoints add
     server-reflexive candidates that still map back to the same local socket
-  - explicit boundary before full DTLS `use_srtp` handshake implementation and
-    default live Room subscriber/publisher startup integration
+  - public default `Room` startup installs socket-backed subscriber/publisher
+    media startup configurations and an explicit unavailable Apple DTLS-SRTP
+    handshaker boundary
+  - explicit boundary before full DTLS `use_srtp` handshake implementation can
+    complete default live secure RTP/RTCP transport
 - RTP basics:
   - RTP v2 header encode/decode
   - marker bit, payload type, sequence number, timestamp, SSRC, and payload
@@ -698,11 +706,14 @@ The following checks passed after the latest implementation pass:
 
 ### DTLS, SRTP, RTP, and RTCP
 
-- DTLS 1.2 handshake.
-- Wiring `use_srtp` extension negotiation into the DTLS handshake.
-- Invoking the real DTLS exporter from a completed handshake.
-- Wiring the handshaker-backed secure RTP/RTCP media session binder as the
-  default live Room runtime path using the bound candidate socket lifecycle.
+- DTLS 1.2 handshake with WebRTC `use_srtp` extension negotiation. The current
+  Apple public API surface exposes DTLS and exporter primitives, but not
+  `use_srtp` extension injection or selected SRTP profile reporting for this
+  package's selected datagram transport model.
+- Invoking the real DTLS exporter from a completed WebRTC-compatible handshake.
+- Completing the handshaker-backed secure RTP/RTCP media session binder in the
+  default live Room runtime after the explicit unavailable Apple DTLS-SRTP
+  boundary is replaced.
 - Connecting the tested Room publisher RTP bridge, sender registry, and
   stateful packetizer helpers to the default camera/audio capture and encode
   loops.
@@ -780,9 +791,10 @@ The following checks passed after the latest implementation pass:
 
 ## Next Recommended Work
 
-1. Continue `1.0.0` hardening with a real DTLS handshake/exporter
-   implementation and default Room runtime subscriber/publisher startup
-   integration beyond the injected startup path.
+1. Continue `1.0.0` hardening by resolving the DTLS-SRTP dependency/API
+   boundary: implement a real WebRTC `use_srtp` handshake/exporter or revise the
+   no-external-DTLS-stack constraint, then let the now-default Room
+   subscriber/publisher startup complete secure RTP/RTCP transport.
 2. Connect queued local data publish plans to the publisher peer connection
    once data channels are open.
 3. Add full LiveKit ICE restart signaling, media/data recovery after signal

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import LiveKitNativeProtocol
 import LiveKitNativeWebRTC
 import XCTest
@@ -1036,6 +1037,90 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(candidateInit.usernameFragment, subscriberPeerConnection.configuration.iceCredentials.usernameFragment)
     }
 
+    func testDefaultLiveMediaStartupConfigurationSendsSocketBackedSubscriberLocalICETrickle() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeSubscriberOfferResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let subscriberPeerConnection = PeerConnectionCoordinator(
+            configuration: NativeWebRTCConfiguration(role: .subscriber)
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            subscriberPeerConnection: subscriberPeerConnection,
+            subscriberMediaStartupConfiguration: .defaultLive(
+                hostCandidateAddresses: {
+                    [ICEInterfaceAddress(name: "lo0", address: "127.0.0.1", localPreference: 101)]
+                },
+                bindAddress: "127.0.0.1",
+                receiveTimeoutMilliseconds: 250
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let sentFrames = await waitForSentFrameCount(3, transport: transport)
+        XCTAssertEqual(sentFrames.count, 3)
+
+        guard case let .binary(candidateData) = sentFrames[1] else {
+            return XCTFail("Expected binary subscriber trickle request.")
+        }
+        let candidateRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: candidateData)
+        guard case let .trickle(candidateTrickle)? = candidateRequest.message else {
+            return XCTFail("Expected SignalRequest.trickle.")
+        }
+        let candidateInit = try RTCIceCandidateInit(jsonString: candidateTrickle.candidateInit)
+        let localCandidate = try ICECandidate(sdpAttributeValue: candidateInit.candidate)
+
+        XCTAssertEqual(candidateTrickle.target, .subscriber)
+        XCTAssertFalse(candidateTrickle.final)
+        XCTAssertEqual(localCandidate.foundation, "1")
+        XCTAssertEqual(localCandidate.address, "127.0.0.1")
+        XCTAssertGreaterThan(localCandidate.port, 0)
+        XCTAssertEqual(localCandidate.priority, ICECandidatePriority(
+            type: .host,
+            localPreference: 101
+        ).value)
+        XCTAssertEqual(candidateInit.usernameFragment, subscriberPeerConnection.configuration.iceCredentials.usernameFragment)
+    }
+
+    func testDefaultLiveSubscriberMediaStartupFailsAtUnavailableDTLSSRTPBoundaryAfterSelectedICEPair() async throws {
+        let stunResponder = try RoomSTUNResponderSocket()
+        stunResponder.start()
+        let frames = try [
+            makeJoinResponse(),
+            makeSubscriberOfferResponse(),
+            makeSubscriberTrickleResponse(address: "127.0.0.1", port: stunResponder.port),
+            makeSubscriberTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let subscriberPeerConnection = PeerConnectionCoordinator(
+            configuration: NativeWebRTCConfiguration(role: .subscriber)
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            subscriberPeerConnection: subscriberPeerConnection,
+            subscriberMediaStartupConfiguration: .defaultLive(
+                hostCandidateAddresses: {
+                    [ICEInterfaceAddress(name: "lo0", address: "127.0.0.1", localPreference: 101)]
+                },
+                bindAddress: "127.0.0.1",
+                receiveTimeoutMilliseconds: 250,
+                consentFreshnessPolicy: .disabled
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let error = await waitForSubscriberMediaStartupError(room)
+        XCTAssertEqual(error as? DTLSSRTPError, .webRTCUseSRTPNegotiationUnavailable)
+        XCTAssertNil(room.lastSubscriberMediaStartupResult)
+        XCTAssertNotNil(stunResponder.waitForSourcePort())
+    }
+
     func testSignalLoopAppliesPublisherAnswer() async throws {
         let frames = try [
             makeJoinResponse(),
@@ -1243,6 +1328,41 @@ final class RoomConnectTests: XCTestCase {
             value: "AA:BB:CC"
         ))
         XCTAssertEqual(datagramFactory.capturedPair?.remote.foundation, "2")
+    }
+
+    func testDefaultLivePublisherMediaStartupFailsAtUnavailableDTLSSRTPBoundaryAfterSelectedICEPair() async throws {
+        let stunResponder = try RoomSTUNResponderSocket()
+        stunResponder.start()
+        let frames = try [
+            makeJoinResponse(),
+            makePublisherAnswerResponse(),
+            makePublisherTrickleResponse(address: "127.0.0.1", port: stunResponder.port),
+            makePublisherTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let publisherPeerConnection = PeerConnectionCoordinator(
+            configuration: NativeWebRTCConfiguration(role: .publisher)
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            publisherPeerConnection: publisherPeerConnection,
+            publisherMediaStartupConfiguration: .defaultLive(
+                hostCandidateAddresses: {
+                    [ICEInterfaceAddress(name: "lo0", address: "127.0.0.1", localPreference: 101)]
+                },
+                bindAddress: "127.0.0.1",
+                receiveTimeoutMilliseconds: 250,
+                consentFreshnessPolicy: .disabled
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let error = await waitForPublisherMediaStartupError(room)
+        XCTAssertEqual(error as? DTLSSRTPError, .webRTCUseSRTPNegotiationUnavailable)
+        XCTAssertNil(room.lastPublisherMediaStartupResult)
+        XCTAssertNotNil(stunResponder.waitForSourcePort())
     }
 
     func testSubscriberMediaTransportRunsICEConsentFreshnessAfterStartup() async throws {
@@ -4203,11 +4323,14 @@ private func makePublisherAnswerResponse() -> Livekit_SignalResponse {
     return response
 }
 
-private func makeSubscriberTrickleResponse() -> Livekit_SignalResponse {
+private func makeSubscriberTrickleResponse(
+    address: String = "192.0.2.1",
+    port: UInt16 = 54_545
+) -> Livekit_SignalResponse {
     var trickle = Livekit_TrickleRequest()
     trickle.target = .subscriber
     trickle.candidateInit = """
-    {"candidate":"candidate:1 1 UDP 2122260223 192.0.2.1 54545 typ host","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"remote-ufrag"}
+    {"candidate":"candidate:1 1 UDP 2122260223 \(address) \(port) typ host","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"remote-ufrag"}
     """
 
     var response = Livekit_SignalResponse()
@@ -4225,11 +4348,14 @@ private func makeSubscriberTrickleCompleteResponse() -> Livekit_SignalResponse {
     return response
 }
 
-private func makePublisherTrickleResponse() -> Livekit_SignalResponse {
+private func makePublisherTrickleResponse(
+    address: String = "192.0.2.2",
+    port: UInt16 = 54_546
+) -> Livekit_SignalResponse {
     var trickle = Livekit_TrickleRequest()
     trickle.target = .publisher
     trickle.candidateInit = """
-    {"candidate":"candidate:2 1 UDP 2122260223 192.0.2.2 54546 typ host","sdpMid":"1","sdpMLineIndex":1,"usernameFragment":"publisher-ufrag"}
+    {"candidate":"candidate:2 1 UDP 2122260223 \(address) \(port) typ host","sdpMid":"1","sdpMLineIndex":1,"usernameFragment":"publisher-ufrag"}
     """
 
     var response = Livekit_SignalResponse()
@@ -4737,6 +4863,18 @@ private func waitForSubscriberMediaStartupError(_ room: Room) async -> (any Erro
     return room.lastSubscriberMediaStartupError
 }
 
+private func waitForPublisherMediaStartupError(_ room: Room) async -> (any Error)? {
+    for _ in 0..<100 {
+        if let error = room.lastPublisherMediaStartupError {
+            return error
+        }
+
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+
+    return room.lastPublisherMediaStartupError
+}
+
 private func makeStartedSubscriberRTCPFeedbackRoom() async throws -> (Room, RoomMediaStartupDatagramTransport) {
     let frames = try [
         makeJoinResponse(),
@@ -5069,6 +5207,178 @@ private final class RoomMediaStartupDTLSHandshaker: DTLSSRTPHandshaking, @unchec
             mutableCapturedConfiguration = configuration
         }
         return result
+    }
+}
+
+private final class RoomSTUNResponderSocket: @unchecked Sendable {
+    let port: UInt16
+
+    private let socketDescriptor: Int32
+    private let lock = NSLock()
+    private var mutableSourcePort: UInt16?
+
+    init() throws {
+        let descriptor = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        guard descriptor >= 0 else {
+            throw SecureMediaTransportError.socketCreationFailed(errno)
+        }
+
+        do {
+            var timeout = timeval(tv_sec: 1, tv_usec: 0)
+            guard setsockopt(
+                descriptor,
+                SOL_SOCKET,
+                SO_RCVTIMEO,
+                &timeout,
+                socklen_t(MemoryLayout<timeval>.size)
+            ) == 0 else {
+                throw SecureMediaTransportError.socketOptionFailed(errno)
+            }
+
+            var address = sockaddr_in(
+                sin_len: UInt8(MemoryLayout<sockaddr_in>.size),
+                sin_family: sa_family_t(AF_INET),
+                sin_port: 0,
+                sin_addr: in_addr(s_addr: inet_addr("127.0.0.1")),
+                sin_zero: (0, 0, 0, 0, 0, 0, 0, 0)
+            )
+            let bindResult = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                    Darwin.bind(descriptor, socketAddress, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            guard bindResult == 0 else {
+                throw SecureMediaTransportError.socketBindFailed(errno)
+            }
+
+            self.port = try Self.boundPort(socketDescriptor: descriptor)
+            self.socketDescriptor = descriptor
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+    }
+
+    deinit {
+        Darwin.close(socketDescriptor)
+    }
+
+    func start() {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            try? respondOnce()
+        }
+    }
+
+    func waitForSourcePort(timeout: TimeInterval = 1) -> UInt16? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let sourcePort {
+                return sourcePort
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+
+        return sourcePort
+    }
+
+    private var sourcePort: UInt16? {
+        lock.withLock {
+            mutableSourcePort
+        }
+    }
+
+    private func respondOnce() throws {
+        var buffer = [UInt8](repeating: 0, count: 1_500)
+        var sourceStorage = sockaddr_storage()
+        var sourceLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let receivedCount = withUnsafeMutablePointer(to: &sourceStorage) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sourceAddress in
+                Darwin.recvfrom(
+                    socketDescriptor,
+                    &buffer,
+                    buffer.count,
+                    0,
+                    sourceAddress,
+                    &sourceLength
+                )
+            }
+        }
+        guard receivedCount > 0 else {
+            throw SecureMediaTransportError.socketReceiveFailed(errno)
+        }
+
+        let source = Self.ipv4SocketAddress(from: sourceStorage)
+        let sourcePort = UInt16(bigEndian: source.sin_port)
+        let sourceAddress = try Self.ipv4String(from: source.sin_addr)
+        lock.withLock {
+            mutableSourcePort = sourcePort
+        }
+
+        let request = try STUNMessage(decoding: Data(buffer.prefix(receivedCount)))
+        let response = STUNMessage(
+            type: .bindingSuccessResponse,
+            transactionID: request.transactionID,
+            attributes: [
+                try .xorMappedAddressIPv4(
+                    address: sourceAddress,
+                    port: sourcePort,
+                    transactionID: request.transactionID
+                ),
+            ]
+        )
+        let responseData = try response.encoded(includeFingerprint: true)
+        var responseAddress = source
+        let sentCount = responseData.withUnsafeBytes { responseBuffer in
+            withUnsafePointer(to: &responseAddress) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                    Darwin.sendto(
+                        socketDescriptor,
+                        responseBuffer.baseAddress,
+                        responseData.count,
+                        0,
+                        socketAddress,
+                        socklen_t(MemoryLayout<sockaddr_in>.size)
+                    )
+                }
+            }
+        }
+        guard sentCount == responseData.count else {
+            throw SecureMediaTransportError.socketSendFailed(errno)
+        }
+    }
+
+    private static func boundPort(socketDescriptor: Int32) throws -> UInt16 {
+        var address = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let result = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.getsockname(socketDescriptor, socketAddress, &length)
+            }
+        }
+        guard result == 0 else {
+            throw SecureMediaTransportError.socketBindFailed(errno)
+        }
+
+        return UInt16(bigEndian: address.sin_port)
+    }
+
+    private static func ipv4SocketAddress(from storage: sockaddr_storage) -> sockaddr_in {
+        var storage = storage
+        return withUnsafePointer(to: &storage) { pointer in
+            pointer.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+        }
+    }
+
+    private static func ipv4String(from address: in_addr) throws -> String {
+        var address = address
+        var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        guard inet_ntop(AF_INET, &address, &buffer, socklen_t(buffer.count)) != nil else {
+            throw SecureMediaTransportError.unsupportedCandidateAddress("")
+        }
+
+        let endIndex = buffer.firstIndex(of: 0) ?? buffer.endIndex
+        let bytes = buffer[..<endIndex].map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
     }
 }
 

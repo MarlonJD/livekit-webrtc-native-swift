@@ -169,9 +169,11 @@ host candidates and reuse the candidate port for STUN checks and media
 datagrams, server-provided `JoinResponse` and `ReconnectResponse` ICE server
 configuration mapping onto subscriber and publisher peer connections, STUN UDP
 server-reflexive candidate discovery from supported `stun:` ICE server URLs
-for injected bound-socket startup, deterministic ICE consent freshness planning,
-injectable executor primitive, and Room-level consent loop for selected pairs in
-the injected secure-media startup path, bounded RTP
+for bound-socket startup, default public `Room` subscriber/publisher media
+startup configurations that gather and trickle socket-backed local ICE
+candidates, deterministic ICE consent freshness planning, injectable executor
+primitive, and Room-level consent loop for selected pairs after secure-media
+startup succeeds, bounded RTP
 jitter buffering with gap skip, duplicate/old packet drops, missing-sequence
 accounting, and sequence-wrap ordering, TURN endpoint parsing from
 `turn:`/`turns:` ICE server URLs with UDP/TCP/TLS intent and credentials
@@ -221,11 +223,12 @@ request/response signaling, data subscription update signaling, and
 Media section requirements and data-track subscriber handles are retained as
 latest-value Room state and emitted as typed room events.
 
-The active implementation focus is now `1.0.0` hardening: implementing the
-real DTLS handshake/exporter, wiring coordinator-backed secure media transport
-startup into the default live Room runtime, reconnect, TURN, quality controls,
-default capture/encode startup into the tested RTP sender bridge, DTLS-SCTP
-network transport, integration apps, and size gates.
+The active implementation focus is now `1.0.0` hardening: replacing the
+explicit unavailable Apple DTLS-SRTP handshaker boundary with a production
+`use_srtp` handshake/exporter, completing default live secure media transport,
+reconnect, TURN, quality controls, default capture/encode startup into the
+tested RTP sender bridge, DTLS-SCTP network transport, integration apps, and
+size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -292,12 +295,12 @@ path.
 Publisher answer routing, data-track control event mapping, data-track
 publish/unpublish request flows, and server/SFU media/data-track unpublish cleanup
 for reconnect state, injected publisher transport teardown, consent-freshness
-execution primitives plus the injected media-startup consent loop, RTP
-jitter-buffer primitives, and matching
-`RequestResponse` failure mapping are unit-tested, while default live media
-transport wiring, default live consent execution, subscriber jitter-buffer
-integration, capture/encode loop startup, media recovery, and end-to-end
-reconnect hardening are still open.
+execution primitives plus the media-startup consent loop, RTP jitter-buffer
+primitives, default socket-backed Room ICE trickle startup, and matching
+`RequestResponse` failure mapping are unit-tested, while real default secure
+media transport completion, default live consent execution after DTLS,
+subscriber jitter-buffer integration, capture/encode loop startup, media
+recovery, and end-to-end reconnect hardening are still open.
 
 ## Benchmarks
 

@@ -45,6 +45,17 @@ package protocol DTLSSRTPHandshaking: Sendable {
     ) async throws -> DTLSSRTPHandshakeResult
 }
 
+package struct UnavailableAppleDTLSSRTPHandshaker: DTLSSRTPHandshaking {
+    package init() {}
+
+    package func performHandshake(
+        configuration: DTLSSRTPHandshakeConfiguration,
+        transport: any MediaDatagramTransport
+    ) async throws -> DTLSSRTPHandshakeResult {
+        throw DTLSSRTPError.webRTCUseSRTPNegotiationUnavailable
+    }
+}
+
 package struct LocalICEUDPSocketCandidate: Sendable {
     package var candidate: ICECandidate
     package var socket: LocalICEUDPSocket
