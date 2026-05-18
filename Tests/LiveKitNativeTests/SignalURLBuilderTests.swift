@@ -27,6 +27,29 @@ final class SignalURLBuilderTests: XCTestCase {
         XCTAssertEqual(query["protocol"], "9")
     }
 
+    func testBuildsConnectionSettingQueryParametersWhenPresent() throws {
+        let builder = SignalURLBuilder(
+            serverURL: try XCTUnwrap(URL(string: "https://example.livekit.cloud?region=eu&adaptive_stream=false"))
+        )
+
+        let url = try builder.build(
+            token: "abc123",
+            connectOptions: ConnectOptions(
+                adaptiveStream: true,
+                subscriberAllowPause: true,
+                autoSubscribeDataTrack: false
+            )
+        )
+
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+
+        XCTAssertEqual(query["region"], "eu")
+        XCTAssertEqual(query["adaptive_stream"], "true")
+        XCTAssertEqual(query["subscriber_allow_pause"], "true")
+        XCTAssertEqual(query["auto_subscribe_data_track"], "false")
+    }
+
     func testPreservesBasePathAndExistingQueryItems() throws {
         let builder = SignalURLBuilder(serverURL: try XCTUnwrap(URL(string: "https://example.com/livekit?region=eu")))
 

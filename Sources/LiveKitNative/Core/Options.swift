@@ -10,6 +10,9 @@ public struct RoomOptions: Equatable, Sendable {
 
 public struct ConnectOptions: Equatable, Sendable {
     public var autoSubscribe: Bool?
+    public var adaptiveStream: Bool?
+    public var subscriberAllowPause: Bool?
+    public var autoSubscribeDataTrack: Bool?
     public var reconnect: Bool
     public var sdk: String
     public var version: String
@@ -20,6 +23,9 @@ public struct ConnectOptions: Equatable, Sendable {
 
     public init(
         autoSubscribe: Bool? = nil,
+        adaptiveStream: Bool? = nil,
+        subscriberAllowPause: Bool? = nil,
+        autoSubscribeDataTrack: Bool? = nil,
         reconnect: Bool = false,
         sdk: String = LiveKitNative.sdkName,
         version: String = LiveKitNative.version,
@@ -29,6 +35,9 @@ public struct ConnectOptions: Equatable, Sendable {
         maxAlternativeURLRedirects: Int = 1
     ) {
         self.autoSubscribe = autoSubscribe
+        self.adaptiveStream = adaptiveStream
+        self.subscriberAllowPause = subscriberAllowPause
+        self.autoSubscribeDataTrack = autoSubscribeDataTrack
         self.reconnect = reconnect
         self.sdk = sdk
         self.version = version

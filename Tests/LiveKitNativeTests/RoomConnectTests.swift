@@ -60,6 +60,32 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(participant.sid, "PA_alice")
     }
 
+    func testConnectIncludesConnectionSettingsInSignalURL() async throws {
+        let response = makeJoinResponse()
+        let encodedResponse = try SignalFrameCodec().encode(response)
+        let transport = MockSignalTransport(incomingFrames: [.binary(encodedResponse)])
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+
+        try await room.connect(
+            url: URL(string: "https://example.test?region=eu&adaptive_stream=false")!,
+            token: "token",
+            connectOptions: ConnectOptions(
+                adaptiveStream: true,
+                subscriberAllowPause: true,
+                autoSubscribeDataTrack: false
+            )
+        )
+
+        let connectedURLs = await transport.connectedURLs
+        let connectedURL = try XCTUnwrap(connectedURLs.first)
+        let queryItems = URLComponents(url: connectedURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+
+        XCTAssertEqual(queryItems.first(where: { $0.name == "region" })?.value, "eu")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "adaptive_stream" })?.value, "true")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "subscriber_allow_pause" })?.value, "true")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "auto_subscribe_data_track" })?.value, "false")
+    }
+
     func testConnectReturnsToDisconnectedWhenInitialFrameIsNotJoin() async throws {
         var pong = Livekit_Pong()
         pong.timestamp = 42

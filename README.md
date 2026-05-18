@@ -113,7 +113,9 @@ bitrate/FPS caps to VideoToolbox. Subscriber-side recommendations can also be
 planned and sent as LiveKit `UpdateTrackSettings` requests, while observed
 subscriber RTP/Sender Report state can generate scheduled RTCP Receiver
 Reports with DLSR timing and REMB bitrate feedback over the secure subscriber
-RTCP transport.
+RTCP transport. `ConnectOptions` can also opt into LiveKit
+`adaptive_stream`, subscriber pause, and data-track auto-subscribe signaling
+query parameters.
 Those are still only building blocks until they are expanded into complete
 congestion control, automatic subscriber policy, weak-network recovery, and
 end-to-end LiveKit validation.
@@ -328,7 +330,9 @@ queued. Subscriber-side recommendations can be turned into LiveKit
 `UpdateTrackSettings` requests for low/medium/high/off reception, and the
 subscriber RTP receive pipeline now tracks RTP/Sender Report state to emit
 cadenced RTCP Receiver Reports with DLSR timing and REMB bitrate feedback
-through the subscriber secure RTCP path.
+through the subscriber secure RTCP path. Connection setup can now advertise
+LiveKit adaptive stream, subscriber pause, and data-track auto-subscribe
+preferences through `ConnectOptions`.
 Server-initiated mute messages update local/remote track publication state and emit
 `RoomEvent.trackMuteChanged`. Room-level media subscription and subscribed
 track settings requests are available through `Room.updateSubscription` and
