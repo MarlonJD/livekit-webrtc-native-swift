@@ -6,6 +6,7 @@ package struct SubscriberMediaReceiveResult: Equatable, Sendable {
     package var droppedSequenceNumbers: [UInt16]
     package var h264AccessUnits: [H264AccessUnit]
     package var decodedVideoFrameCount: Int
+    package var renderedVideoFrameCount: Int
     package var videoDecodeErrorCount: Int
     package var opusPackets: [OpusPacket]
     package var decodedAudioBufferCount: Int
@@ -18,6 +19,7 @@ package struct SubscriberMediaReceiveResult: Equatable, Sendable {
         droppedSequenceNumbers: [UInt16] = [],
         h264AccessUnits: [H264AccessUnit] = [],
         decodedVideoFrameCount: Int = 0,
+        renderedVideoFrameCount: Int = 0,
         videoDecodeErrorCount: Int = 0,
         opusPackets: [OpusPacket] = [],
         decodedAudioBufferCount: Int = 0,
@@ -29,6 +31,7 @@ package struct SubscriberMediaReceiveResult: Equatable, Sendable {
         self.droppedSequenceNumbers = droppedSequenceNumbers
         self.h264AccessUnits = h264AccessUnits
         self.decodedVideoFrameCount = decodedVideoFrameCount
+        self.renderedVideoFrameCount = renderedVideoFrameCount
         self.videoDecodeErrorCount = videoDecodeErrorCount
         self.opusPackets = opusPackets
         self.decodedAudioBufferCount = decodedAudioBufferCount
@@ -48,6 +51,8 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
     private var h264PipelinesBySSRC: [UInt32: H264SubscribePipeline] = [:]
     private var h264DecodersBySSRC: [UInt32: H264VideoToolboxSubscribeDecoder] = [:]
     private var opusPipelinesBySSRC: [UInt32: OpusSubscribePipeline] = [:]
+    private var videoRenderer: (any H264DecodedFrameRenderer)?
+    private var mutableRenderedVideoFrameCount = 0
     private let audioPlayoutPipeline: OpusAudioPlayoutPipeline?
     private let receiverReportStore = RTCPReceiverReportStore()
 
@@ -57,6 +62,7 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
         feedbackSenderSSRC: UInt32 = 0,
         maxBufferedPackets: Int = 64,
         videoDecodeEnabled: Bool = false,
+        videoRenderer: (any H264DecodedFrameRenderer)? = nil,
         audioPlayoutPipeline: OpusAudioPlayoutPipeline? = nil
     ) {
         self.audioPayloadType = audioPayloadType
@@ -64,13 +70,18 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
         self.feedbackSenderSSRC = feedbackSenderSSRC
         self.maxBufferedPackets = maxBufferedPackets
         self.isVideoDecodeEnabled = videoDecodeEnabled
+        self.videoRenderer = videoRenderer
         self.audioPlayoutPipeline = audioPlayoutPipeline
     }
 
     package func append(_ packet: RTPPacket) -> SubscriberMediaReceiveResult {
-        lock.withLock {
+        let appendOutput = lock.withLock {
             appendLocked(packet)
         }
+        for pendingRender in appendOutput.pendingVideoRenders {
+            pendingRender.renderer.render(pendingRender.frame)
+        }
+        return appendOutput.result
     }
 
     package func observeRTCP(_ packet: RTCPPacket, receivedAt: TimeInterval = Date().timeIntervalSince1970) {
@@ -94,8 +105,15 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
             h264PipelinesBySSRC.removeAll()
             h264DecodersBySSRC.removeAll()
             opusPipelinesBySSRC.removeAll()
+            mutableRenderedVideoFrameCount = 0
             audioPlayoutPipeline?.reset()
             receiverReportStore.reset()
+        }
+    }
+
+    package func setVideoRenderer(_ renderer: (any H264DecodedFrameRenderer)?) {
+        lock.withLock {
+            videoRenderer = renderer
         }
     }
 
@@ -109,7 +127,13 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
         }
     }
 
-    private func appendLocked(_ packet: RTPPacket) -> SubscriberMediaReceiveResult {
+    package var renderedVideoFrameCount: Int {
+        lock.withLock {
+            mutableRenderedVideoFrameCount
+        }
+    }
+
+    private func appendLocked(_ packet: RTPPacket) -> SubscriberMediaReceiveAppendOutput {
         receiverReportStore.observe(packet)
 
         var jitterBuffer = jitterBuffersBySSRC[packet.ssrc] ?? RTPJitterBuffer(maxBufferedPackets: maxBufferedPackets)
@@ -121,6 +145,7 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
             missingSequenceNumbers: jitterResult.missingSequenceNumbers,
             droppedSequenceNumbers: jitterResult.droppedSequenceNumbers
         )
+        var pendingVideoRenders: [PendingVideoRender] = []
 
         var feedbackSignals = jitterResult.missingSequenceNumbers.isEmpty
             ? []
@@ -129,7 +154,13 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
         for releasedPacket in jitterResult.releasedPackets {
             switch releasedPacket.payloadType {
             case videoPayloadType:
-                feedbackSignals.append(contentsOf: appendH264Packet(releasedPacket, result: &result))
+                feedbackSignals.append(
+                    contentsOf: appendH264Packet(
+                        releasedPacket,
+                        result: &result,
+                        pendingVideoRenders: &pendingVideoRenders
+                    )
+                )
             case audioPayloadType:
                 appendOpusPacket(releasedPacket, result: &result)
             default:
@@ -142,12 +173,16 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
             mediaSSRC: packet.ssrc,
             signals: feedbackSignals
         )
-        return result
+        return SubscriberMediaReceiveAppendOutput(
+            result: result,
+            pendingVideoRenders: pendingVideoRenders
+        )
     }
 
     private func appendH264Packet(
         _ packet: RTPPacket,
-        result: inout SubscriberMediaReceiveResult
+        result: inout SubscriberMediaReceiveResult,
+        pendingVideoRenders: inout [PendingVideoRender]
     ) -> [SubscribeRTCPFeedbackSignal] {
         let pipeline = h264PipelinesBySSRC[packet.ssrc] ?? H264SubscribePipeline()
         h264PipelinesBySSRC[packet.ssrc] = pipeline
@@ -167,12 +202,20 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
                     continue
                 }
 
-                guard isVideoDecodeEnabled else {
+                guard isVideoDecodeEnabled || videoRenderer != nil else {
                     continue
                 }
 
                 do {
-                    result.decodedVideoFrameCount += try decoder.decode(accessUnit).count
+                    let decodedFrames = try decoder.decode(accessUnit)
+                    result.decodedVideoFrameCount += decodedFrames.count
+                    if let videoRenderer {
+                        for frame in decodedFrames {
+                            pendingVideoRenders.append(PendingVideoRender(renderer: videoRenderer, frame: frame))
+                            result.renderedVideoFrameCount += 1
+                            mutableRenderedVideoFrameCount += 1
+                        }
+                    }
                 } catch {
                     result.videoDecodeErrorCount += 1
                     signals.append(.keyFrameRequest)
@@ -208,4 +251,14 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
             result.droppedSequenceNumbers.append(packet.sequenceNumber)
         }
     }
+}
+
+private struct SubscriberMediaReceiveAppendOutput {
+    var result: SubscriberMediaReceiveResult
+    var pendingVideoRenders: [PendingVideoRender]
+}
+
+private struct PendingVideoRender {
+    let renderer: any H264DecodedFrameRenderer
+    let frame: H264DecodedFrame
 }

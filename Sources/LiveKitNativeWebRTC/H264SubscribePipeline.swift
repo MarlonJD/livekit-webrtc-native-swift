@@ -378,6 +378,10 @@ package struct H264DecodedFrame: @unchecked Sendable {
     }
 }
 
+package protocol H264DecodedFrameRenderer: AnyObject, Sendable {
+    func render(_ frame: H264DecodedFrame)
+}
+
 package enum H264VideoToolboxSubscribeDecoderError: Error, Equatable, Sendable {
     case missingFormatDescription
     case invalidNALUnitLength

@@ -298,6 +298,7 @@ public final class Room: @unchecked Sendable {
     private let publisherRTCPBandwidthEstimates = RTCPBandwidthEstimateStore()
     private let subscriberRTCPBandwidthEstimates = RTCPBandwidthEstimateStore()
     private let subscriberMediaReceivePipeline: SubscriberMediaReceivePipeline
+    private let subscriberVideoRendererBridge = SubscriberVideoFrameRendererBridge()
     private let snapshots: RoomSnapshotStore
     private let signalLoopLock = NSLock()
     private let connectionContextLock = NSLock()
@@ -425,6 +426,10 @@ public final class Room: @unchecked Sendable {
 
     var subscriberDecodedVideoFrameCount: Int {
         subscriberMediaReceivePipeline.decodedVideoFrameCount
+    }
+
+    var subscriberRenderedVideoFrameCount: Int {
+        subscriberMediaReceivePipeline.renderedVideoFrameCount
     }
 
     var lastSubscriberMediaStartupResult: PeerConnectionMediaStartupResult? {
@@ -748,6 +753,11 @@ public final class Room: @unchecked Sendable {
             LiveKitNativeLogging.log(.error, "Room connect failed: \(error.localizedDescription)")
             throw error
         }
+    }
+
+    public func setSubscriberVideoRenderer(_ renderer: (any SubscriberVideoFrameRenderer)?) {
+        subscriberVideoRendererBridge.setRenderer(renderer)
+        subscriberMediaReceivePipeline.setVideoRenderer(renderer == nil ? nil : subscriberVideoRendererBridge)
     }
 
     public func disconnect() async {

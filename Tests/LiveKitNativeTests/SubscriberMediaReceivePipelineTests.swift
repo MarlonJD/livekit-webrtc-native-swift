@@ -143,6 +143,39 @@ final class SubscriberMediaReceivePipelineTests: XCTestCase {
         XCTAssertEqual(pipeline.decodedVideoFrameCount, 0)
     }
 
+    func testH264ReceivePipelineRendersDecodedVideoWhenRendererIsConfigured() throws {
+        let encodedFrame = try makeEncodedH264Frame()
+        let packetizer = H264PublishRTPPacketizer(payloadType: 102, mtu: 1_200, ssrc: 0x1111_2222)
+        let packets = try packetizer.packetize(encodedFrame)
+        let renderer = RecordingH264DecodedFrameRenderer()
+        let pipeline = SubscriberMediaReceivePipeline(maxBufferedPackets: 0, videoRenderer: renderer)
+        var decodedVideoFrameCount = 0
+        var renderedVideoFrameCount = 0
+        var videoDecodeErrorCount = 0
+
+        for packet in packets {
+            let result = pipeline.append(packet)
+            decodedVideoFrameCount += result.decodedVideoFrameCount
+            renderedVideoFrameCount += result.renderedVideoFrameCount
+            videoDecodeErrorCount += result.videoDecodeErrorCount
+        }
+
+        guard videoDecodeErrorCount == 0 else {
+            throw XCTSkip("VideoToolbox H.264 decoder unavailable in this environment.")
+        }
+        let renderedFrame = try XCTUnwrap(renderer.frames.first)
+        XCTAssertEqual(decodedVideoFrameCount, 1)
+        XCTAssertEqual(renderedVideoFrameCount, 1)
+        XCTAssertEqual(pipeline.renderedVideoFrameCount, 1)
+        XCTAssertEqual(CVPixelBufferGetWidth(renderedFrame.pixelBuffer), 16)
+        XCTAssertEqual(CVPixelBufferGetHeight(renderedFrame.pixelBuffer), 16)
+
+        pipeline.setVideoRenderer(nil)
+        pipeline.reset()
+
+        XCTAssertEqual(pipeline.renderedVideoFrameCount, 0)
+    }
+
     func testReceiverReportTracksObservedRTPAndSenderReports() throws {
         let pipeline = SubscriberMediaReceivePipeline()
         let mediaSSRC: UInt32 = 0x1111_2222
@@ -281,6 +314,23 @@ private final class SubscriberH264EncodedFrameRecorder: @unchecked Sendable {
     }
 
     func record(_ frame: H264EncodedFrame) {
+        lock.withLock {
+            mutableFrames.append(frame)
+        }
+    }
+}
+
+private final class RecordingH264DecodedFrameRenderer: H264DecodedFrameRenderer, @unchecked Sendable {
+    private let lock = NSLock()
+    private var mutableFrames: [H264DecodedFrame] = []
+
+    var frames: [H264DecodedFrame] {
+        lock.withLock {
+            mutableFrames
+        }
+    }
+
+    func render(_ frame: H264DecodedFrame) {
         lock.withLock {
             mutableFrames.append(frame)
         }

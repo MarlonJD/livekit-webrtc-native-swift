@@ -2206,6 +2206,39 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(decodedFrameCount, 1)
     }
 
+    func testSubscriberReceiveLoopRendersDecodedVideoWhenRendererAttached() async throws {
+        let mediaSSRC: UInt32 = 0x0506_0708
+        let encodedFrame = try makeEncodedH264Frame()
+        let packets = try H264PublishRTPPacketizer(
+            payloadType: 102,
+            mtu: 1_200,
+            ssrc: mediaSSRC
+        ).packetize(encodedFrame)
+
+        do {
+            _ = try H264VideoToolboxSubscribeDecoder().decode(
+                H264AccessUnit(timestamp: encodedFrame.rtpTimestamp, nalUnits: encodedFrame.nalUnits)
+            )
+        } catch let error as H264VideoToolboxSubscribeDecoderError {
+            throw XCTSkip("VideoToolbox H.264 decoder unavailable in this environment: \(error)")
+        }
+
+        let renderer = RecordingSubscriberVideoFrameRenderer()
+        let (room, datagramTransport, _) = try await makeStartedSubscriberRTCPFeedbackRoomWithSignalTransport()
+        room.setSubscriberVideoRenderer(renderer)
+
+        for packet in packets {
+            datagramTransport.enqueueIncomingDatagram(try await protectedSubscriberInboundRTPDatagram(packet))
+        }
+
+        let renderedFrameCount = await waitForSubscriberRenderedVideoFrameCount(room, count: 1)
+        let renderedFrames = await waitForRenderedVideoFrames(renderer, count: 1)
+        let renderedFrame = try XCTUnwrap(renderedFrames.first)
+        XCTAssertEqual(renderedFrameCount, 1)
+        XCTAssertEqual(renderedFrame.width, 16)
+        XCTAssertEqual(renderedFrame.height, 16)
+    }
+
     func testSubscriberReceiverReportLoopSendsCadencedReportsAfterObservedRTP() async throws {
         let (room, datagramTransport) = try await makeStartedSubscriberRTCPFeedbackRoom(
             receiverReportPolicy: RTCPReceiverReportSchedulePolicy(intervalSeconds: 0.01)
@@ -5603,6 +5636,35 @@ private func waitForSubscriberDecodedVideoFrameCount(_ room: Room, count: Int) a
     return room.subscriberDecodedVideoFrameCount
 }
 
+private func waitForSubscriberRenderedVideoFrameCount(_ room: Room, count: Int) async -> Int {
+    for _ in 0..<100 {
+        let renderedFrameCount = room.subscriberRenderedVideoFrameCount
+        if renderedFrameCount >= count {
+            return renderedFrameCount
+        }
+
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+
+    return room.subscriberRenderedVideoFrameCount
+}
+
+private func waitForRenderedVideoFrames(
+    _ renderer: RecordingSubscriberVideoFrameRenderer,
+    count: Int
+) async -> [SubscriberVideoFrame] {
+    for _ in 0..<100 {
+        let frames = await renderer.frames
+        if frames.count >= count {
+            return frames
+        }
+
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+
+    return await renderer.frames
+}
+
 private func waitForSubscriberMediaStartupError(_ room: Room) async -> (any Error)? {
     for _ in 0..<100 {
         if let error = room.lastSubscriberMediaStartupError {
@@ -5858,6 +5920,24 @@ private final class RoomH264EncodedFrameRecorder: @unchecked Sendable {
 
 private enum RoomH264TestError: Error {
     case pixelBufferCreationFailed(CVReturn)
+}
+
+private actor RecordingSubscriberVideoFrameRenderer: SubscriberVideoFrameRenderer {
+    private var mutableFrames: [SubscriberVideoFrame] = []
+
+    var frames: [SubscriberVideoFrame] {
+        mutableFrames
+    }
+
+    nonisolated func render(_ frame: SubscriberVideoFrame) {
+        Task { [weak self] in
+            await self?.record(frame)
+        }
+    }
+
+    private func record(_ frame: SubscriberVideoFrame) {
+        mutableFrames.append(frame)
+    }
 }
 
 private actor PublisherRTCPRecorder {
