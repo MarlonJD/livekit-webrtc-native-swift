@@ -403,6 +403,7 @@ package enum H264VideoToolboxEncoderError: Error, Equatable, Sendable {
 package final class H264CameraPublishPipeline: NativeCameraVideoFrameSink, @unchecked Sendable {
     package let source: NativeCameraVideoSource
     package let encoder: H264VideoToolboxEncoder
+    package let backpressureController: VideoFrameBackpressureController
     private let sendFrame: @Sendable (H264EncodedFrame) async throws -> Void
     private let lock = NSLock()
     private var mutableIsRunning = false
@@ -411,10 +412,12 @@ package final class H264CameraPublishPipeline: NativeCameraVideoFrameSink, @unch
     package init(
         source: NativeCameraVideoSource,
         encoder: H264VideoToolboxEncoder,
+        backpressureController: VideoFrameBackpressureController = VideoFrameBackpressureController(),
         sendFrame: @escaping @Sendable (H264EncodedFrame) async throws -> Void
     ) {
         self.source = source
         self.encoder = encoder
+        self.backpressureController = backpressureController
         self.sendFrame = sendFrame
     }
 
@@ -428,6 +431,10 @@ package final class H264CameraPublishPipeline: NativeCameraVideoFrameSink, @unch
         lock.withLock {
             mutableLastError
         }
+    }
+
+    package var backpressureSnapshot: MediaFrameBackpressureSnapshot {
+        backpressureController.snapshot
     }
 
     package func start() throws {
@@ -482,7 +489,14 @@ package final class H264CameraPublishPipeline: NativeCameraVideoFrameSink, @unch
     }
 
     private func dispatch(_ frame: H264EncodedFrame) {
-        Task { [sendFrame] in
+        guard backpressureController.beginFrame(isKeyFrame: frame.isKeyFrame).shouldSend else {
+            return
+        }
+
+        Task { [sendFrame, backpressureController] in
+            defer {
+                backpressureController.endFrame()
+            }
             do {
                 try await sendFrame(frame)
             } catch {
