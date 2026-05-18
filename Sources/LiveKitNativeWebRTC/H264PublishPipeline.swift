@@ -421,6 +421,10 @@ package final class H264VideoToolboxEncoder: @unchecked Sendable {
     }
 
     private func updateHardwareAccelerationState(_ session: VTCompressionSession) {
+        guard #available(iOS 17.4, tvOS 17.4, visionOS 1.1, *) else {
+            return
+        }
+
         var property: CFTypeRef?
         let status = withUnsafeMutablePointer(to: &property) { propertyPointer in
             VTSessionCopyProperty(
