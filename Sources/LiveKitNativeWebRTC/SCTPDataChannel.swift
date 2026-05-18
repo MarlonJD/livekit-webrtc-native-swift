@@ -10,6 +10,12 @@ package enum SCTPDataChannelError: Error, Equatable, Sendable {
     case invalidSCTPDataChunkLength(Int)
     case invalidSCTPInitChunkType(UInt8)
     case invalidSCTPInitChunkLength(Int)
+    case invalidSCTPSACKChunkType(UInt8)
+    case invalidSCTPSACKChunkLength(Int)
+    case invalidSCTPDataChunkFragmentPayloadSize(Int)
+    case missingSCTPStateCookie
+    case missingSCTPPeerVerificationTag
+    case invalidSCTPVerificationTag(expected: UInt32, actual: UInt32)
     case truncatedControlMessage
     case truncatedPacketEnvelope
     case invalidControlMessageType(UInt8)
@@ -114,6 +120,11 @@ package enum SCTPChunkType: UInt8, Equatable, Sendable {
     case error = 9
     case cookieEcho = 10
     case cookieAck = 11
+}
+
+package enum SCTPParameterType {
+    package static let stateCookie: UInt16 = 0x0007
+    package static let supportedAddressTypes: UInt16 = 0x000c
 }
 
 package struct SCTPParameter: Equatable, Sendable {
@@ -223,6 +234,83 @@ package struct SCTPDataChunk: Equatable, Sendable {
     }
 }
 
+package struct SCTPSACKGapAckBlock: Equatable, Sendable {
+    package var start: UInt16
+    package var end: UInt16
+
+    package init(start: UInt16, end: UInt16) {
+        self.start = start
+        self.end = end
+    }
+}
+
+package struct SCTPSACKChunk: Equatable, Sendable {
+    package var cumulativeTSNAck: UInt32
+    package var advertisedReceiverWindowCredit: UInt32
+    package var gapAckBlocks: [SCTPSACKGapAckBlock]
+    package var duplicateTSNs: [UInt32]
+
+    package init(
+        cumulativeTSNAck: UInt32,
+        advertisedReceiverWindowCredit: UInt32,
+        gapAckBlocks: [SCTPSACKGapAckBlock] = [],
+        duplicateTSNs: [UInt32] = []
+    ) {
+        self.cumulativeTSNAck = cumulativeTSNAck
+        self.advertisedReceiverWindowCredit = advertisedReceiverWindowCredit
+        self.gapAckBlocks = gapAckBlocks
+        self.duplicateTSNs = duplicateTSNs
+    }
+
+    package init(chunk: SCTPChunk) throws {
+        guard chunk.rawType == SCTPChunkType.sack.rawValue else {
+            throw SCTPDataChannelError.invalidSCTPSACKChunkType(chunk.rawType)
+        }
+        guard chunk.value.count >= 12 else {
+            throw SCTPDataChannelError.invalidSCTPSACKChunkLength(chunk.value.count)
+        }
+
+        let gapAckBlockCount = Int(chunk.value.uint16(at: 8))
+        let duplicateTSNCount = Int(chunk.value.uint16(at: 10))
+        let expectedLength = 12 + (gapAckBlockCount * 4) + (duplicateTSNCount * 4)
+        guard chunk.value.count == expectedLength else {
+            throw SCTPDataChannelError.invalidSCTPSACKChunkLength(chunk.value.count)
+        }
+
+        self.cumulativeTSNAck = chunk.value.uint32(at: 0)
+        self.advertisedReceiverWindowCredit = chunk.value.uint32(at: 4)
+
+        var offset = 12
+        self.gapAckBlocks = (0..<gapAckBlockCount).map { _ in
+            defer { offset += 4 }
+            return SCTPSACKGapAckBlock(
+                start: chunk.value.uint16(at: offset),
+                end: chunk.value.uint16(at: offset + 2)
+            )
+        }
+        self.duplicateTSNs = (0..<duplicateTSNCount).map { _ in
+            defer { offset += 4 }
+            return chunk.value.uint32(at: offset)
+        }
+    }
+
+    fileprivate func chunk() -> SCTPChunk {
+        var value = Data()
+        value.append(cumulativeTSNAck.bigEndianBytes)
+        value.append(advertisedReceiverWindowCredit.bigEndianBytes)
+        value.append(UInt16(gapAckBlocks.count).bigEndianBytes)
+        value.append(UInt16(duplicateTSNs.count).bigEndianBytes)
+        for block in gapAckBlocks {
+            value.append(block.start.bigEndianBytes)
+            value.append(block.end.bigEndianBytes)
+        }
+        for tsn in duplicateTSNs {
+            value.append(tsn.bigEndianBytes)
+        }
+        return SCTPChunk(type: .sack, value: value)
+    }
+}
+
 package struct SCTPInitChunk: Equatable, Sendable {
     package var type: SCTPChunkType
     package var initiateTag: UInt32
@@ -309,6 +397,10 @@ package struct SCTPChunk: Equatable, Sendable {
     }
 
     package static func initChunk(_ chunk: SCTPInitChunk) -> SCTPChunk {
+        chunk.chunk()
+    }
+
+    package static func sack(_ chunk: SCTPSACKChunk) -> SCTPChunk {
         chunk.chunk()
     }
 
@@ -1198,6 +1290,473 @@ package actor DTLSSCTPDataChannelPacketTransport: SCTPDataChannelPacketTransceiv
 
     package func markMessageAcknowledged(messageID: UInt32) {
         retransmissionQueue.markMessageAcknowledged(messageID: messageID)
+    }
+}
+
+package struct SCTPAssociationConfiguration: Equatable, Sendable {
+    package static let webRTCDataChannelPort: UInt16 = 5_000
+
+    package var localPort: UInt16
+    package var remotePort: UInt16
+    package var localInitiateTag: UInt32
+    package var initialTSN: UInt32
+    package var advertisedReceiverWindowCredit: UInt32
+    package var outboundStreams: UInt16
+    package var inboundStreams: UInt16
+    package var stateCookie: Data
+    package var maxDataChunkPayloadSize: Int?
+
+    package init(
+        localPort: UInt16 = Self.webRTCDataChannelPort,
+        remotePort: UInt16 = Self.webRTCDataChannelPort,
+        localInitiateTag: UInt32 = UInt32.random(in: 1...UInt32.max),
+        initialTSN: UInt32 = UInt32.random(in: 0...UInt32.max),
+        advertisedReceiverWindowCredit: UInt32 = 1_048_576,
+        outboundStreams: UInt16 = 1_024,
+        inboundStreams: UInt16 = 1_024,
+        stateCookie: Data = Data([0x4c, 0x4b, 0x4e, 0x53, 0x43, 0x54, 0x50]),
+        maxDataChunkPayloadSize: Int? = nil
+    ) {
+        self.localPort = localPort
+        self.remotePort = remotePort
+        self.localInitiateTag = localInitiateTag == 0 ? 1 : localInitiateTag
+        self.initialTSN = initialTSN
+        self.advertisedReceiverWindowCredit = advertisedReceiverWindowCredit
+        self.outboundStreams = outboundStreams
+        self.inboundStreams = inboundStreams
+        self.stateCookie = stateCookie
+        self.maxDataChunkPayloadSize = maxDataChunkPayloadSize
+    }
+}
+
+private struct SCTPDataChunkFragmentReassembler {
+    private struct FragmentKey: Hashable {
+        var streamID: UInt16
+        var streamSequenceNumber: UInt16
+        var payloadProtocolIdentifier: UInt32
+    }
+
+    private struct PendingFragments {
+        var chunksByTSN: [UInt32: SCTPDataChunk] = [:]
+        var beginningTSN: UInt32?
+        var endingTSN: UInt32?
+    }
+
+    private var pendingFragmentsByKey: [FragmentKey: PendingFragments] = [:]
+
+    mutating func append(_ chunk: SCTPDataChunk) throws -> SCTPDataChannelPacket? {
+        guard !(chunk.beginning && chunk.ending) else {
+            return try SCTPDataChannelPacket(dataChunk: chunk)
+        }
+
+        let key = FragmentKey(
+            streamID: chunk.streamID,
+            streamSequenceNumber: chunk.streamSequenceNumber,
+            payloadProtocolIdentifier: chunk.payloadProtocolIdentifier
+        )
+        var pending = pendingFragmentsByKey[key] ?? PendingFragments()
+        pending.chunksByTSN[chunk.tsn] = chunk
+
+        if chunk.beginning {
+            pending.beginningTSN = chunk.tsn
+        }
+        if chunk.ending {
+            pending.endingTSN = chunk.tsn
+        }
+
+        guard let beginningTSN = pending.beginningTSN,
+              let endingTSN = pending.endingTSN
+        else {
+            pendingFragmentsByKey[key] = pending
+            return nil
+        }
+
+        let fragmentDistance = endingTSN &- beginningTSN
+        let fragmentCount = Int(fragmentDistance) + 1
+        guard pending.chunksByTSN.count >= fragmentCount else {
+            pendingFragmentsByKey[key] = pending
+            return nil
+        }
+
+        var userData = Data()
+        for offset in 0..<fragmentCount {
+            let tsn = beginningTSN &+ UInt32(offset)
+            guard let fragment = pending.chunksByTSN[tsn] else {
+                pendingFragmentsByKey[key] = pending
+                return nil
+            }
+            userData.append(fragment.userData)
+        }
+
+        pendingFragmentsByKey.removeValue(forKey: key)
+        return try SCTPDataChannelPacket(dataChunk: SCTPDataChunk(
+            unordered: chunk.unordered,
+            beginning: true,
+            ending: true,
+            tsn: beginningTSN,
+            streamID: key.streamID,
+            streamSequenceNumber: key.streamSequenceNumber,
+            payloadProtocolIdentifier: key.payloadProtocolIdentifier,
+            userData: userData
+        ))
+    }
+}
+
+package actor DTLSSCTPAssociationDataChannelPacketTransport: SCTPDataChannelPacketTransceiver {
+    private enum AssociationState: Equatable {
+        case new
+        case initSent
+        case initAckSent
+        case cookieEchoSent
+        case established
+    }
+
+    private let dtlsTransport: OpenSSLDTLSApplicationDataTransport
+    private let configuration: SCTPAssociationConfiguration
+    private var state: AssociationState = .new
+    private var peerVerificationTag: UInt32?
+    private var nextTSN: UInt32
+    private var expectedPeerTSN: UInt32?
+    private var nextStreamSequenceNumbers: [UInt16: UInt16] = [:]
+    private var pendingReceivedPackets: [SCTPDataChannelPacket] = []
+    private var receivePumpTask: Task<Void, Never>?
+    private var receivePumpError: (any Error)?
+    private var associationWaiters: [CheckedContinuation<Void, any Error>] = []
+    private var packetWaiters: [CheckedContinuation<SCTPDataChannelPacket, any Error>] = []
+    private var fragmentReassembler = SCTPDataChunkFragmentReassembler()
+
+    package init(
+        dtlsTransport: OpenSSLDTLSApplicationDataTransport,
+        configuration: SCTPAssociationConfiguration = SCTPAssociationConfiguration()
+    ) {
+        self.dtlsTransport = dtlsTransport
+        self.configuration = configuration
+        self.nextTSN = configuration.initialTSN
+    }
+
+    package var isEstablished: Bool {
+        state == .established
+    }
+
+    package func startAssociation() async throws {
+        try await ensureAssociation()
+    }
+
+    package func send(_ packet: SCTPDataChannelPacket) async throws {
+        try await ensureAssociation()
+        let streamSequenceNumber = nextStreamSequenceNumber(for: packet.streamID)
+        let dataChunks = try dataChunks(
+            for: packet,
+            firstTSN: nextTSN,
+            streamSequenceNumber: streamSequenceNumber
+        )
+        nextTSN &+= UInt32(dataChunks.count)
+        try await sendPacket(
+            verificationTag: try requirePeerVerificationTag(),
+            chunks: dataChunks.map { .data($0) }
+        )
+    }
+
+    package func receive() async throws -> SCTPDataChannelPacket {
+        if !pendingReceivedPackets.isEmpty {
+            return pendingReceivedPackets.removeFirst()
+        }
+
+        try await ensureAssociation()
+        if !pendingReceivedPackets.isEmpty {
+            return pendingReceivedPackets.removeFirst()
+        }
+
+        return try await waitForPacket()
+    }
+
+    private func ensureAssociation() async throws {
+        guard state != .established else {
+            return
+        }
+        if let receivePumpError {
+            throw receivePumpError
+        }
+
+        startReceivePumpIfNeeded()
+
+        if state == .new {
+            state = .initSent
+            try await sendInit()
+        }
+
+        try await waitForAssociation()
+    }
+
+    private func sendInit() async throws {
+        let initChunk = SCTPInitChunk(
+            type: .initChunk,
+            initiateTag: configuration.localInitiateTag,
+            advertisedReceiverWindowCredit: configuration.advertisedReceiverWindowCredit,
+            outboundStreams: configuration.outboundStreams,
+            inboundStreams: configuration.inboundStreams,
+            initialTSN: configuration.initialTSN,
+            parameters: [
+                SCTPParameter(
+                    type: SCTPParameterType.supportedAddressTypes,
+                    value: Data([0x00, 0x05, 0x00, 0x06])
+                ),
+            ]
+        )
+        try await sendPacket(verificationTag: 0, chunks: [.initChunk(initChunk)])
+    }
+
+    private func processInbound(_ data: Data) async throws {
+        let packet = try SCTPPacket(decoding: data)
+        for chunk in packet.chunks {
+            switch chunk.type {
+            case .initChunk:
+                try await acceptInit(chunk, packet: packet)
+            case .initAck:
+                try await acceptInitAck(chunk, packet: packet)
+            case .cookieEcho:
+                try await acceptCookieEcho(packet: packet)
+            case .cookieAck:
+                try acceptCookieAck(packet: packet)
+            case .data:
+                try await acceptData(chunk, packet: packet)
+            case .sack:
+                _ = try SCTPSACKChunk(chunk: chunk)
+            default:
+                continue
+            }
+        }
+        resumeWaitersIfReady()
+    }
+
+    private func startReceivePumpIfNeeded() {
+        guard receivePumpTask == nil else {
+            return
+        }
+
+        let dtlsTransport = self.dtlsTransport
+        receivePumpTask = Task { [weak self, dtlsTransport] in
+            do {
+                while !Task.isCancelled {
+                    let data = try await dtlsTransport.receive()
+                    try await self?.processPumpedInbound(data)
+                }
+            } catch {
+                await self?.failReceivePump(error)
+            }
+        }
+    }
+
+    private func processPumpedInbound(_ data: Data) async throws {
+        try await processInbound(data)
+    }
+
+    private func waitForAssociation() async throws {
+        if state == .established {
+            return
+        }
+        if let receivePumpError {
+            throw receivePumpError
+        }
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            associationWaiters.append(continuation)
+            resumeWaitersIfReady()
+        }
+    }
+
+    private func waitForPacket() async throws -> SCTPDataChannelPacket {
+        if !pendingReceivedPackets.isEmpty {
+            return pendingReceivedPackets.removeFirst()
+        }
+        if let receivePumpError {
+            throw receivePumpError
+        }
+
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SCTPDataChannelPacket, any Error>) in
+            packetWaiters.append(continuation)
+            resumeWaitersIfReady()
+        }
+    }
+
+    private func resumeWaitersIfReady() {
+        if state == .established {
+            let waiters = associationWaiters
+            associationWaiters.removeAll()
+            for waiter in waiters {
+                waiter.resume()
+            }
+        }
+
+        while !pendingReceivedPackets.isEmpty, !packetWaiters.isEmpty {
+            let packet = pendingReceivedPackets.removeFirst()
+            let waiter = packetWaiters.removeFirst()
+            waiter.resume(returning: packet)
+        }
+    }
+
+    private func failReceivePump(_ error: any Error) {
+        receivePumpError = error
+        let associationWaiters = associationWaiters
+        let packetWaiters = packetWaiters
+        self.associationWaiters.removeAll()
+        self.packetWaiters.removeAll()
+        for waiter in associationWaiters {
+            waiter.resume(throwing: error)
+        }
+        for waiter in packetWaiters {
+            waiter.resume(throwing: error)
+        }
+    }
+
+    private func acceptInit(_ chunk: SCTPChunk, packet: SCTPPacket) async throws {
+        try validateVerificationTag(packet.verificationTag, expected: 0)
+        let initChunk = try SCTPInitChunk(chunk: chunk)
+        peerVerificationTag = initChunk.initiateTag
+        expectedPeerTSN = initChunk.initialTSN
+
+        let initAck = SCTPInitChunk(
+            type: .initAck,
+            initiateTag: configuration.localInitiateTag,
+            advertisedReceiverWindowCredit: configuration.advertisedReceiverWindowCredit,
+            outboundStreams: configuration.outboundStreams,
+            inboundStreams: configuration.inboundStreams,
+            initialTSN: configuration.initialTSN,
+            parameters: [
+                SCTPParameter(type: SCTPParameterType.stateCookie, value: configuration.stateCookie),
+            ]
+        )
+        try await sendPacket(
+            verificationTag: initChunk.initiateTag,
+            chunks: [.initChunk(initAck)]
+        )
+        if state == .new {
+            state = .initAckSent
+        }
+    }
+
+    private func acceptInitAck(_ chunk: SCTPChunk, packet: SCTPPacket) async throws {
+        try validateVerificationTag(packet.verificationTag, expected: configuration.localInitiateTag)
+        let initAck = try SCTPInitChunk(chunk: chunk)
+        peerVerificationTag = initAck.initiateTag
+        expectedPeerTSN = initAck.initialTSN
+        guard let stateCookie = initAck.parameters.first(where: { $0.type == SCTPParameterType.stateCookie })?.value else {
+            throw SCTPDataChannelError.missingSCTPStateCookie
+        }
+
+        try await sendPacket(
+            verificationTag: initAck.initiateTag,
+            chunks: [.cookieEcho(stateCookie)]
+        )
+        state = .cookieEchoSent
+    }
+
+    private func acceptCookieEcho(packet: SCTPPacket) async throws {
+        try validateVerificationTag(packet.verificationTag, expected: configuration.localInitiateTag)
+        try await sendPacket(
+            verificationTag: try requirePeerVerificationTag(),
+            chunks: [.cookieAck]
+        )
+        state = .established
+    }
+
+    private func acceptCookieAck(packet: SCTPPacket) throws {
+        try validateVerificationTag(packet.verificationTag, expected: configuration.localInitiateTag)
+        state = .established
+    }
+
+    private func acceptData(_ chunk: SCTPChunk, packet: SCTPPacket) async throws {
+        try validateVerificationTag(packet.verificationTag, expected: configuration.localInitiateTag)
+        let dataChunk = try SCTPDataChunk(chunk: chunk)
+        expectedPeerTSN = dataChunk.tsn &+ 1
+
+        try await sendPacket(
+            verificationTag: try requirePeerVerificationTag(),
+            chunks: [
+                .sack(SCTPSACKChunk(
+                    cumulativeTSNAck: dataChunk.tsn,
+                    advertisedReceiverWindowCredit: configuration.advertisedReceiverWindowCredit
+                )),
+            ]
+        )
+        if let packet = try fragmentReassembler.append(dataChunk) {
+            pendingReceivedPackets.append(packet)
+        }
+    }
+
+    private func dataChunks(
+        for packet: SCTPDataChannelPacket,
+        firstTSN: UInt32,
+        streamSequenceNumber: UInt16
+    ) throws -> [SCTPDataChunk] {
+        guard let maxDataChunkPayloadSize = configuration.maxDataChunkPayloadSize,
+              packet.payload.count > maxDataChunkPayloadSize else {
+            return [
+                packet.dataChunk(
+                    tsn: firstTSN,
+                    streamSequenceNumber: streamSequenceNumber,
+                    unordered: false
+                ),
+            ]
+        }
+        guard maxDataChunkPayloadSize > 0 else {
+            throw SCTPDataChannelError.invalidSCTPDataChunkFragmentPayloadSize(maxDataChunkPayloadSize)
+        }
+
+        var chunks: [SCTPDataChunk] = []
+        var offset = 0
+        while offset < packet.payload.count {
+            let end = min(packet.payload.count, offset + maxDataChunkPayloadSize)
+            let chunkIndex = chunks.count
+            chunks.append(SCTPDataChunk(
+                unordered: false,
+                beginning: offset == 0,
+                ending: end == packet.payload.count,
+                tsn: firstTSN &+ UInt32(chunkIndex),
+                streamID: packet.streamID,
+                streamSequenceNumber: streamSequenceNumber,
+                payloadProtocolIdentifier: packet.ppid.rawValue,
+                userData: Data(packet.payload[offset..<end])
+            ))
+            offset = end
+        }
+
+        return chunks
+    }
+
+    private func sendPacket(
+        verificationTag: UInt32,
+        chunks: [SCTPChunk]
+    ) async throws {
+        let packet = SCTPPacket(
+            sourcePort: configuration.localPort,
+            destinationPort: configuration.remotePort,
+            verificationTag: verificationTag,
+            chunks: chunks
+        )
+        try await dtlsTransport.send(packet.encoded())
+    }
+
+    private func nextStreamSequenceNumber(for streamID: UInt16) -> UInt16 {
+        let sequenceNumber = nextStreamSequenceNumbers[streamID] ?? 0
+        nextStreamSequenceNumbers[streamID] = sequenceNumber &+ 1
+        return sequenceNumber
+    }
+
+    private func requirePeerVerificationTag() throws -> UInt32 {
+        guard let peerVerificationTag else {
+            throw SCTPDataChannelError.missingSCTPPeerVerificationTag
+        }
+        return peerVerificationTag
+    }
+
+    private func validateVerificationTag(_ actual: UInt32, expected: UInt32) throws {
+        guard actual == expected else {
+            throw SCTPDataChannelError.invalidSCTPVerificationTag(
+                expected: expected,
+                actual: actual
+            )
+        }
     }
 }
 

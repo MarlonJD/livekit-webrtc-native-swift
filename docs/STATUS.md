@@ -54,7 +54,16 @@ open messages, decode inbound LiveKit `DataPacket` payloads into
 persistent OpenSSL DTLS application-data transport in unit tests. The DTLS
 packet-envelope transport can now optionally fragment large data-channel
 payloads, reassemble them on receive, and schedule fragmented-packet
-retransmissions on the DTLS-backed packet transport in unit tests. SCTP
+retransmissions on the DTLS-backed packet transport in unit tests. Standards-shaped
+SCTP packet/chunk coverage now includes INIT, INIT_ACK, COOKIE_ECHO,
+COOKIE_ACK, DATA, SACK, parameter padding, and CRC32C checksum validation, with
+a separate unit-tested OpenSSL DTLS application-data association bootstrap that
+can exchange SCTP DATA chunks, SACK responses, and fragmented SCTP DATA
+messages without replacing the default Room data-channel path yet. The shared
+media/data session binder and package-internal Room live-media startup helper
+can now select that association transport in opt-in unit tests while the public
+default Room path remains on the existing packet-envelope transport until
+LiveKit interop is complete. SCTP
 data-channel recovery can now reset
 LiveKit channels after association restart, reopen DCEP on the next publish,
 and Room reconnect responses reset injected publisher data channels and receive
@@ -63,8 +72,8 @@ session binder can now keep persistent OpenSSL DTLS application data and SRTP
 media on one selected ICE datagram path in unit tests, and public default
 `Room` initialization now selects that combined startup binder for live
 media/data transport construction. Full standards-compliant SCTP association
-state, congestion control, LiveKit-validated data-channel recovery, and E2E
-hardening remain open.
+receive-pump integration, congestion control, LiveKit-validated data-channel
+recovery, and E2E hardening remain open.
 Server/SFU `TrackUnpublishedResponse` cleanup for local media publications also
 clears local publication state and cached publisher offer reconnect state so
 resume reconnects and later publisher offers do not replay removed media.
@@ -824,6 +833,17 @@ The old binary WebRTC dependency path has been removed from the package model.
   - deterministic SCTP data-channel retransmission scheduling on the
     DTLS-backed packet transport with per-fragment acknowledgement and bounded
     retry attempts
+  - standards-shaped SCTP packet/chunk encode/decode for INIT, INIT_ACK,
+    COOKIE_ECHO, COOKIE_ACK, DATA, SACK, parameters, padding, and CRC32C
+    checksum validation
+  - separate OpenSSL DTLS application-data SCTP association bootstrap coverage
+    that completes INIT/COOKIE startup, exchanges DATA/SACK between paired
+    local endpoints, and reassembles fragmented SCTP DATA messages without
+    replacing the default Room path yet
+  - opt-in media/data session binder mode that selects the standards-shaped
+    SCTP association transport over the shared DTLS/SRTP demux, plus a
+    package-internal Room live-media startup passthrough, while preserving the
+    existing packet-envelope transport as the default
   - SCTP data-channel recovery reset that moves LiveKit channels back to
     connecting state, clears sent DCEP-open tracking, and sends a fresh DCEP
     open before the next post-recovery publish
@@ -981,11 +1001,12 @@ The following checks passed after the latest implementation pass:
 
 ### Data Channels
 
-- Standards-compliant DTLS-backed SCTP association beyond the current
-  deterministic DTLS data-channel packet envelope and fragmentation/reassembly
-  primitive plus shared DTLS/SRTP media-data demux.
-- SCTP association state and congestion control beyond the current
-  deterministic fragmented-packet retransmission scheduling.
+- Default-path DTLS-backed SCTP association integration beyond the current
+  unit-tested SCTP packet/chunk codec and paired-endpoint OpenSSL DTLS
+  application-data association bootstrap with fragmented DATA reassembly.
+- SCTP receive-pump serialization, association state coverage, and congestion
+  control beyond the current deterministic fragmented-packet retransmission
+  scheduling and bootstrap DATA/SACK exchange.
 - LiveKit-validated data-channel recovery over the default shared media/data
   startup path.
 - Text streams, byte streams, and RPC APIs.

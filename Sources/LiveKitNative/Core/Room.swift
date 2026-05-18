@@ -204,6 +204,7 @@ struct RoomMediaStartupConfiguration: Sendable {
         identity: DTLSSRTPIdentity = .generated(),
         receiveAttemptLimit: Int = 64,
         maxDataChannelFragmentPayloadSize: Int? = nil,
+        dataChannelTransportMode: DTLSSCTPDataChannelTransportMode? = nil,
         consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
         consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
     ) -> Self {
@@ -235,7 +236,8 @@ struct RoomMediaStartupConfiguration: Sendable {
                 datagramTransportFactory: datagramFactory,
                 identity: identity,
                 receiveAttemptLimit: receiveAttemptLimit,
-                maxDataChannelFragmentPayloadSize: maxDataChannelFragmentPayloadSize
+                maxDataChannelFragmentPayloadSize: maxDataChannelFragmentPayloadSize,
+                dataChannelTransportMode: dataChannelTransportMode
             ),
             consentFreshnessPolicy: consentFreshnessPolicy,
             consentFreshnessRetryPolicy: consentFreshnessRetryPolicy

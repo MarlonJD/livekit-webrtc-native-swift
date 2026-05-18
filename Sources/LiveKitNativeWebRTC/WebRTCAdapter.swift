@@ -294,7 +294,7 @@ package struct PeerConnectionMediaStartupResult: Sendable {
     package var mediaDataSession: DTLSSRTPMediaDataSession?
     package var iceSummary: ICEAgentCheckSummary
     package var selectedCandidatePair: ICECandidatePair
-    package var dataChannelTransport: DTLSSCTPDataChannelPacketTransport? {
+    package var dataChannelTransport: (any SCTPDataChannelPacketTransceiver)? {
         mediaDataSession?.dataChannelTransport
     }
 

@@ -251,7 +251,15 @@ reliable/lossy DCEP acknowledgement, inbound remote DCEP acknowledgement,
 inbound `DataPacket` decode to `RoomEvent.dataReceived`, and OpenSSL DTLS
 application-data packet transport coverage with deterministic packet
 fragmentation/reassembly and DTLS-backed fragmented-packet retransmission
-scheduling. Data channel recovery now resets LiveKit channels after association restart, reopens
+scheduling. Standards-shaped SCTP packet/chunk coverage now includes INIT,
+INIT_ACK, COOKIE_ECHO, COOKIE_ACK, DATA, SACK, parameter padding, and CRC32C
+checksum validation, with a unit-tested OpenSSL DTLS application-data
+association bootstrap that can exchange SCTP DATA chunks, SACK responses, and
+reassemble fragmented SCTP DATA messages. The shared media/data binder and
+Room live-media startup helper can select that association transport in
+package-internal opt-in tests while the public default Room path continues to
+use the existing packet-envelope transport until LiveKit interop is complete.
+Data channel recovery now resets LiveKit channels after association restart, reopens
 DCEP on the next publish, and Room reconnect responses reset injected publisher
 data channels and receive loops before post-reconnect publish. A
 shared WebRTC DTLS/SRTP datagram demux and media/data session binder can now
@@ -266,8 +274,9 @@ The active implementation focus is now `1.0.0` hardening: expanding the new
 opt-in LiveKit-validated OpenSSL DTLS-SRTP publisher/subscriber media startup
 coverage into full secure RTP/RTCP send/receive validation, TURN TCP/TLS, live
 quality-control wiring, real-device video display hardening,
-standards-compliant DTLS-SCTP association behavior, real-device audio session
-hardening, integration apps, and size gates.
+default-path DTLS-SCTP association receive-pump integration, LiveKit-validated
+data packet publish/receive, real-device audio session hardening, integration
+apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation

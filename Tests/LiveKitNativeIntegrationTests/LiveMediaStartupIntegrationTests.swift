@@ -132,17 +132,17 @@ private func liveMediaIntegrationRoom() -> Room {
         signalConnection: SignalConnection(),
         subscriberPeerConnection: subscriberPeerConnection,
         publisherPeerConnection: publisherPeerConnection,
-        subscriberMediaStartupConfiguration: .defaultLive(
+        subscriberMediaStartupConfiguration: .defaultLiveMediaData(
             localCredentials: {
                 subscriberPeerConnection.configuration.iceCredentials
             },
-            handshaker: OpenSSLDTLSSRTPHandshaker(identity: subscriberIdentity)
+            identity: subscriberIdentity
         ),
-        publisherMediaStartupConfiguration: .defaultLive(
+        publisherMediaStartupConfiguration: .defaultLiveMediaData(
             localCredentials: {
                 publisherPeerConnection.configuration.iceCredentials
             },
-            handshaker: OpenSSLDTLSSRTPHandshaker(identity: publisherIdentity)
+            identity: publisherIdentity
         )
     )
 }

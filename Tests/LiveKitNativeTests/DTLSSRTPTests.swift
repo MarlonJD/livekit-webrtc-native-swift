@@ -220,6 +220,112 @@ final class DTLSSRTPTests: XCTestCase {
         await serverDTLS.close()
     }
 
+    func testOpenSSLDTLSApplicationDataCarriesStandardsSCTPAssociationPackets() async throws {
+        let clientIdentity = DTLSSRTPIdentity.generated()
+        let serverIdentity = DTLSSRTPIdentity.generated()
+        let datagrams = PairedDTLSDatagramTransport.makePair()
+        let clientDTLS = try OpenSSLDTLSApplicationDataTransport(
+            identity: clientIdentity,
+            role: .client,
+            transport: datagrams.client
+        )
+        let serverDTLS = try OpenSSLDTLSApplicationDataTransport(
+            identity: serverIdentity,
+            role: .server,
+            transport: datagrams.server
+        )
+
+        async let clientResult = clientDTLS.performHandshake(
+            role: .client,
+            expectedRemoteFingerprint: serverIdentity.fingerprint
+        )
+        async let serverResult = serverDTLS.performHandshake(
+            role: .server,
+            expectedRemoteFingerprint: clientIdentity.fingerprint
+        )
+        _ = try await (clientResult, serverResult)
+
+        let clientSCTP = DTLSSCTPAssociationDataChannelPacketTransport(
+            dtlsTransport: clientDTLS,
+            configuration: SCTPAssociationConfiguration(
+                localInitiateTag: 0x1111_2222,
+                initialTSN: 0x0000_0100,
+                stateCookie: Data([0xca, 0xfe]),
+                maxDataChunkPayloadSize: 4
+            )
+        )
+        let serverSCTP = DTLSSCTPAssociationDataChannelPacketTransport(
+            dtlsTransport: serverDTLS,
+            configuration: SCTPAssociationConfiguration(
+                localInitiateTag: 0x3333_4444,
+                initialTSN: 0x0000_0200,
+                stateCookie: Data([0xba, 0xad, 0xf0, 0x0d]),
+                maxDataChunkPayloadSize: 4
+            )
+        )
+        let outbound = SCTPDataChannelPacket(
+            streamID: 0,
+            ppid: .binary,
+            payload: Data([0x01, 0x02, 0x03])
+        )
+
+        async let serverReceive = serverSCTP.receive()
+        try await clientSCTP.send(outbound)
+        let received = try await serverReceive
+
+        XCTAssertEqual(received, outbound)
+        let clientEstablished = await clientSCTP.isEstablished
+        let serverEstablished = await serverSCTP.isEstablished
+        XCTAssertTrue(clientEstablished)
+        XCTAssertTrue(serverEstablished)
+
+        let inbound = SCTPDataChannelPacket(
+            streamID: 0,
+            ppid: .dataChannelControl,
+            payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
+        )
+
+        async let clientReceive = clientSCTP.receive()
+        try await serverSCTP.send(inbound)
+        let clientReceived = try await clientReceive
+
+        XCTAssertEqual(clientReceived, inbound)
+
+        let concurrentOutbound = SCTPDataChannelPacket(
+            streamID: 0,
+            ppid: .binary,
+            payload: Data([0x09, 0x08, 0x07])
+        )
+        let concurrentInbound = SCTPDataChannelPacket(
+            streamID: 0,
+            ppid: .binary,
+            payload: Data([0x06, 0x05, 0x04])
+        )
+
+        async let pendingClientReceive = clientSCTP.receive()
+        try await clientSCTP.send(concurrentOutbound)
+        let serverReceivedConcurrent = try await serverSCTP.receive()
+        try await serverSCTP.send(concurrentInbound)
+        let clientReceivedConcurrent = try await pendingClientReceive
+
+        XCTAssertEqual(serverReceivedConcurrent, concurrentOutbound)
+        XCTAssertEqual(clientReceivedConcurrent, concurrentInbound)
+
+        let fragmentedOutbound = SCTPDataChannelPacket(
+            streamID: 0,
+            ppid: .binary,
+            payload: Data(0..<13)
+        )
+
+        async let serverFragmentedReceive = serverSCTP.receive()
+        try await clientSCTP.send(fragmentedOutbound)
+        let receivedFragmented = try await serverFragmentedReceive
+
+        XCTAssertEqual(receivedFragmented, fragmentedOutbound)
+        await clientDTLS.close()
+        await serverDTLS.close()
+    }
+
     func testOpenSSLDTLSApplicationDataReassemblesFragmentedSCTPDataChannelPackets() async throws {
         let clientIdentity = DTLSSRTPIdentity.generated()
         let serverIdentity = DTLSSRTPIdentity.generated()
@@ -364,6 +470,91 @@ final class DTLSSRTPTests: XCTestCase {
 
         XCTAssertEqual(clientSession.handshakeResult.remoteFingerprint, serverIdentity.fingerprint)
         XCTAssertEqual(serverSession.handshakeResult.remoteFingerprint, clientIdentity.fingerprint)
+        XCTAssertEqual(receivedRTP, rtp)
+        XCTAssertEqual(receivedDataPacket, dataPacket)
+        await clientSession.close()
+        await serverSession.close()
+    }
+
+    func testMediaDataSessionBinderCanUseStandardsSCTPAssociationTransport() async throws {
+        let clientIdentity = DTLSSRTPIdentity.generated()
+        let serverIdentity = DTLSSRTPIdentity.generated()
+        let datagrams = PairedDTLSDatagramTransport.makePair()
+        let clientCandidate = dtlsCandidate(foundation: "client")
+        let serverCandidate = dtlsCandidate(foundation: "server")
+        let clientPair = ICECandidatePair(
+            local: clientCandidate,
+            remote: serverCandidate,
+            isControlling: true,
+            state: .succeeded,
+            nominated: true
+        )
+        let serverPair = ICECandidatePair(
+            local: serverCandidate,
+            remote: clientCandidate,
+            isControlling: false,
+            state: .succeeded,
+            nominated: true
+        )
+        let clientBinder = DTLSSRTPMediaDataSessionBinder(
+            datagramTransportFactory: FixedMediaDatagramTransportFactory(transport: datagrams.client),
+            identity: clientIdentity,
+            dataChannelTransportMode: .association(SCTPAssociationConfiguration(
+                localInitiateTag: 0x0102_0304,
+                initialTSN: 10,
+                stateCookie: Data([0xca, 0xfe])
+            ))
+        )
+        let serverBinder = DTLSSRTPMediaDataSessionBinder(
+            datagramTransportFactory: FixedMediaDatagramTransportFactory(transport: datagrams.server),
+            identity: serverIdentity,
+            dataChannelTransportMode: .association(SCTPAssociationConfiguration(
+                localInitiateTag: 0x0506_0708,
+                initialTSN: 20,
+                stateCookie: Data([0xba, 0xad, 0xf0, 0x0d])
+            ))
+        )
+        let clientConfiguration = try DTLSSRTPHandshakeConfiguration(
+            role: .client,
+            remoteFingerprint: serverIdentity.fingerprint
+        )
+        let serverConfiguration = try DTLSSRTPHandshakeConfiguration(
+            role: .server,
+            remoteFingerprint: clientIdentity.fingerprint
+        )
+
+        async let clientSessionTask = clientBinder.makeSession(
+            selectedCandidatePair: clientPair,
+            handshakeConfiguration: clientConfiguration
+        )
+        async let serverSessionTask = serverBinder.makeSession(
+            selectedCandidatePair: serverPair,
+            handshakeConfiguration: serverConfiguration
+        )
+        let (clientSession, serverSession) = try await (clientSessionTask, serverSessionTask)
+        let dataPacket = SCTPDataChannelPacket(
+            streamID: 0,
+            ppid: .binary,
+            payload: Data([0x11, 0x22, 0x33])
+        )
+        let rtp = RTPPacket(
+            marker: true,
+            payloadType: 102,
+            sequenceNumber: 23,
+            timestamp: 18_000,
+            ssrc: 0x5566_7788,
+            payload: Data((0..<32).map(UInt8.init))
+        )
+
+        async let receivedDataPacketTask = serverSession.dataChannelTransport.receive()
+        try await clientSession.dataChannelTransport.send(dataPacket)
+        try await clientSession.mediaTransport.sendRTP(rtp)
+
+        guard case let .rtp(receivedRTP) = try await serverSession.mediaTransport.receive() else {
+            return XCTFail("Expected demultiplexed SRTP packet.")
+        }
+        let receivedDataPacket = try await receivedDataPacketTask
+
         XCTAssertEqual(receivedRTP, rtp)
         XCTAssertEqual(receivedDataPacket, dataPacket)
         await clientSession.close()

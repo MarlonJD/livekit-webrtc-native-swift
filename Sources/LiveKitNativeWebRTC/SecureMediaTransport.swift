@@ -1520,13 +1520,13 @@ package struct DTLSSRTPMediaSessionBinder: Sendable {
 
 package struct DTLSSRTPMediaDataSession: Sendable {
     package var mediaTransport: DTLSSRTPMediaTransport
-    package var dataChannelTransport: DTLSSCTPDataChannelPacketTransport
+    package var dataChannelTransport: any SCTPDataChannelPacketTransceiver
     package var applicationDataTransport: OpenSSLDTLSApplicationDataTransport
     package var handshakeResult: DTLSSRTPHandshakeResult
 
     package init(
         mediaTransport: DTLSSRTPMediaTransport,
-        dataChannelTransport: DTLSSCTPDataChannelPacketTransport,
+        dataChannelTransport: any SCTPDataChannelPacketTransceiver,
         applicationDataTransport: OpenSSLDTLSApplicationDataTransport,
         handshakeResult: DTLSSRTPHandshakeResult
     ) {
@@ -1542,22 +1542,32 @@ package struct DTLSSRTPMediaDataSession: Sendable {
     }
 }
 
+package enum DTLSSCTPDataChannelTransportMode: Equatable, Sendable {
+    case packetEnvelope(maxFragmentPayloadSize: Int?)
+    case association(SCTPAssociationConfiguration)
+}
+
 package struct DTLSSRTPMediaDataSessionBinder: Sendable {
     package var datagramTransportFactory: any MediaDatagramTransportFactory
     package var identity: DTLSSRTPIdentity
     package var receiveAttemptLimit: Int
     package var maxDataChannelFragmentPayloadSize: Int?
+    package var dataChannelTransportMode: DTLSSCTPDataChannelTransportMode
 
     package init(
         datagramTransportFactory: any MediaDatagramTransportFactory = UDPMediaDatagramTransportFactory(),
         identity: DTLSSRTPIdentity = .generated(),
         receiveAttemptLimit: Int = 64,
-        maxDataChannelFragmentPayloadSize: Int? = nil
+        maxDataChannelFragmentPayloadSize: Int? = nil,
+        dataChannelTransportMode: DTLSSCTPDataChannelTransportMode? = nil
     ) {
         self.datagramTransportFactory = datagramTransportFactory
         self.identity = identity
         self.receiveAttemptLimit = max(1, receiveAttemptLimit)
         self.maxDataChannelFragmentPayloadSize = maxDataChannelFragmentPayloadSize
+        self.dataChannelTransportMode = dataChannelTransportMode ?? .packetEnvelope(
+            maxFragmentPayloadSize: maxDataChannelFragmentPayloadSize
+        )
     }
 
     package func makeSession(
@@ -1595,10 +1605,18 @@ package struct DTLSSRTPMediaDataSessionBinder: Sendable {
             expectedRemoteFingerprint: handshakeConfiguration.remoteFingerprint,
             datagramTransport: mediaDatagramTransport
         )
-        let dataChannelTransport = DTLSSCTPDataChannelPacketTransport(
-            dtlsTransport: applicationDataTransport,
-            maxFragmentPayloadSize: maxDataChannelFragmentPayloadSize
-        )
+        let dataChannelTransport: any SCTPDataChannelPacketTransceiver = switch dataChannelTransportMode {
+        case let .packetEnvelope(maxFragmentPayloadSize):
+            DTLSSCTPDataChannelPacketTransport(
+                dtlsTransport: applicationDataTransport,
+                maxFragmentPayloadSize: maxFragmentPayloadSize
+            )
+        case let .association(configuration):
+            DTLSSCTPAssociationDataChannelPacketTransport(
+                dtlsTransport: applicationDataTransport,
+                configuration: configuration
+            )
+        }
 
         return DTLSSRTPMediaDataSession(
             mediaTransport: mediaTransport,

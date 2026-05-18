@@ -1284,13 +1284,22 @@ final class RoomConnectTests: XCTestCase {
     }
 
     func testDefaultLiveMediaDataStartupConfigurationInstallsSharedBinder() {
+        let dataChannelMode = DTLSSCTPDataChannelTransportMode.association(
+            SCTPAssociationConfiguration(
+                localInitiateTag: 0x0102_0304,
+                initialTSN: 7,
+                maxDataChunkPayloadSize: 1_200
+            )
+        )
         let configuration = RoomPublisherMediaStartupConfiguration.defaultLiveMediaData(
             hostCandidateAddresses: { [] },
             identity: DTLSSRTPIdentity.generated(),
+            dataChannelTransportMode: dataChannelMode,
             consentFreshnessPolicy: .disabled
         )
 
         XCTAssertNotNil(configuration.mediaDataBinder)
+        XCTAssertEqual(configuration.mediaDataBinder?.dataChannelTransportMode, dataChannelMode)
     }
 
     func testDefaultLiveSubscriberMediaStartupFailsAtUnavailableDTLSSRTPBoundaryAfterSelectedICEPair() async throws {
