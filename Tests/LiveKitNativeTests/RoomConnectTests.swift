@@ -1302,6 +1302,75 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(configuration.mediaDataBinder?.dataChannelTransportMode, dataChannelMode)
     }
 
+    func testSubscriberMediaStartupWaitsForRTPMediaWhenInitialOfferIsDataOnly() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeSubscriberDataOnlyOfferResponse(),
+            makeSubscriberTrickleResponse(),
+            makeSubscriberTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let localCandidate = ICECandidate(
+            foundation: "subscriber-local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.11",
+            port: 55001,
+            type: .host
+        )
+        let checker = RoomMediaStartupICEChecker()
+        let inboundSTUNRecorder = SubscriberInboundSTUNResponderRecorder()
+        let subscriberPeerConnection = PeerConnectionCoordinator(
+            configuration: NativeWebRTCConfiguration(role: .subscriber)
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            subscriberPeerConnection: subscriberPeerConnection,
+            subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 43,
+                checker: checker,
+                binder: DTLSSRTPMediaSessionBinder(
+                    datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(
+                        transport: RoomMediaStartupDatagramTransport()
+                    ),
+                    handshaker: RoomMediaStartupDTLSHandshaker(
+                        result: try DTLSSRTPHandshakeResult(
+                            role: .client,
+                            exportedKeyingMaterial: roomMediaStartupExportedKeyingMaterial(),
+                            remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "DD:EE:FF")
+                        )
+                    )
+                ),
+                mediaDataBinder: DTLSSRTPMediaDataSessionBinder(
+                    datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(
+                        transport: RoomMediaStartupDatagramTransport()
+                    ),
+                    receiveAttemptLimit: 1
+                ),
+                inboundSTUNResponder: { credentials in
+                    inboundSTUNRecorder.record(credentials)
+                    return Task {}
+                },
+                consentFreshnessPolicy: .disabled
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        _ = await waitForSentFrameCount(3, transport: transport)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertNil(checker.capturedConfiguration)
+        XCTAssertNil(room.lastSubscriberMediaStartupResult)
+        XCTAssertNil(room.lastSubscriberMediaStartupError)
+        XCTAssertEqual(
+            inboundSTUNRecorder.credentials?.usernameFragment,
+            subscriberPeerConnection.configuration.iceCredentials.usernameFragment
+        )
+    }
+
     func testDefaultLiveSubscriberMediaStartupFailsAtUnavailableDTLSSRTPBoundaryAfterSelectedICEPair() async throws {
         let stunResponder = try RoomSTUNResponderSocket()
         stunResponder.start()
@@ -5302,6 +5371,17 @@ private func makeSubscriberOfferResponse() -> Livekit_SignalResponse {
     return response
 }
 
+private func makeSubscriberDataOnlyOfferResponse() -> Livekit_SignalResponse {
+    var offer = Livekit_SessionDescription()
+    offer.type = "offer"
+    offer.id = 7
+    offer.sdp = subscriberDataOnlyOfferSDP()
+
+    var response = Livekit_SignalResponse()
+    response.offer = offer
+    return response
+}
+
 private func makePublisherAnswerResponse() -> Livekit_SignalResponse {
     var answer = Livekit_SessionDescription()
     answer.type = "answer"
@@ -5716,6 +5796,23 @@ private func subscriberOfferSDP() -> String {
     a=rtpmap:35 AV1/90000
     m=application 9 UDP/DTLS/SCTP webrtc-datachannel
     a=mid:data
+    a=setup:actpass
+    a=sctp-port:5000
+    """
+}
+
+private func subscriberDataOnlyOfferSDP() -> String {
+    """
+    v=0
+    o=- 1 1 IN IP4 127.0.0.1
+    s=-
+    t=0 0
+    a=ice-ufrag:subscriber-remote-ufrag
+    a=ice-pwd:subscriber-remote-password
+    a=fingerprint:sha-256 DD:EE:FF
+    a=group:BUNDLE 0
+    m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+    a=mid:0
     a=setup:actpass
     a=sctp-port:5000
     """
@@ -6642,6 +6739,23 @@ private final class ICEServerRecorder: @unchecked Sendable {
     func record(_ iceServers: [ICEServer]) {
         lock.withLock {
             mutableICEServers = iceServers
+        }
+    }
+}
+
+private final class SubscriberInboundSTUNResponderRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var mutableCredentials: ICECredentials?
+
+    var credentials: ICECredentials? {
+        lock.withLock {
+            mutableCredentials
+        }
+    }
+
+    func record(_ credentials: ICECredentials) {
+        lock.withLock {
+            mutableCredentials = credentials
         }
     }
 }

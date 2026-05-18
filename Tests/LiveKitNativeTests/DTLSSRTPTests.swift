@@ -220,6 +220,51 @@ final class DTLSSRTPTests: XCTestCase {
         await serverDTLS.close()
     }
 
+    func testOpenSSLDTLSApplicationDataReceiveThrowsWhenClosedWhileAwaitingDatagram() async throws {
+        let clientIdentity = DTLSSRTPIdentity.generated()
+        let serverIdentity = DTLSSRTPIdentity.generated()
+        let datagrams = PairedDTLSDatagramTransport.makePair()
+        let clientDTLS = try OpenSSLDTLSApplicationDataTransport(
+            identity: clientIdentity,
+            role: .client,
+            transport: datagrams.client
+        )
+        let serverDTLS = try OpenSSLDTLSApplicationDataTransport(
+            identity: serverIdentity,
+            role: .server,
+            transport: datagrams.server
+        )
+
+        async let clientResult = clientDTLS.performHandshake(
+            role: .client,
+            expectedRemoteFingerprint: serverIdentity.fingerprint
+        )
+        async let serverResult = serverDTLS.performHandshake(
+            role: .server,
+            expectedRemoteFingerprint: clientIdentity.fingerprint
+        )
+        _ = try await (clientResult, serverResult)
+
+        let receiveTask = Task {
+            try await serverDTLS.receive()
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+
+        await serverDTLS.close()
+        try await clientDTLS.send(Data([0x42]))
+
+        do {
+            _ = try await withDTLSTestTimeout {
+                try await receiveTask.value
+            }
+            XCTFail("Expected receive to fail after the DTLS application-data transport closes.")
+        } catch {
+            XCTAssertEqual(error as? SecureMediaTransportError, .transportClosed)
+        }
+
+        await clientDTLS.close()
+    }
+
     func testOpenSSLDTLSApplicationDataCarriesStandardsSCTPAssociationPackets() async throws {
         let clientIdentity = DTLSSRTPIdentity.generated()
         let serverIdentity = DTLSSRTPIdentity.generated()
@@ -798,6 +843,30 @@ private final class PairedDTLSDatagramTransport: MediaDatagramTransport, @unchec
 private enum PairedDTLSDatagramTransportError: Error {
     case missingPeer
 }
+
+private func withDTLSTestTimeout<T: Sendable>(
+    nanoseconds: UInt64 = 1_000_000_000,
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask {
+            try await operation()
+        }
+        group.addTask {
+            try await Task.sleep(nanoseconds: nanoseconds)
+            throw DTLSTestTimeoutError()
+        }
+
+        guard let value = try await group.next() else {
+            throw DTLSTestTimeoutError()
+        }
+
+        group.cancelAll()
+        return value
+    }
+}
+
+private struct DTLSTestTimeoutError: Error {}
 
 private func dtlsCandidate(foundation: String) -> ICECandidate {
     ICECandidate(

@@ -239,6 +239,12 @@ struct RoomMediaStartupConfiguration: Sendable {
                 maxDataChannelFragmentPayloadSize: maxDataChannelFragmentPayloadSize,
                 dataChannelTransportMode: dataChannelTransportMode
             ),
+            inboundSTUNResponder: { credentials in
+                LocalICEUDPSocketInboundSTUNResponder.start(
+                    candidateStore: candidateStore,
+                    localCredentials: credentials
+                )
+            },
             consentFreshnessPolicy: consentFreshnessPolicy,
             consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
         )
@@ -793,9 +799,10 @@ public final class Room: @unchecked Sendable {
             startSignalLoop()
             LiveKitNativeLogging.log(.info, "Room connected.")
         } catch {
-            stopSignalLoop()
+            let signalLoopTask = stopSignalLoop()
             stopDataChannelReceiveLoop()
             await signalConnection.close()
+            await signalLoopTask?.value
             clearConnectionContext()
             resetPeerConnectionNegotiationState(restartICE: true)
             clearLocalParticipantCommandHandler()
@@ -814,11 +821,12 @@ public final class Room: @unchecked Sendable {
     public func disconnect() async {
         LiveKitNativeLogging.log(.info, "Disconnecting room.")
 
-        stopSignalLoop()
+        let signalLoopTask = stopSignalLoop()
         stopDataChannelReceiveLoop()
         await sendLeaveIfConnected()
         await transition(to: .disconnecting)
         await signalConnection.close()
+        await signalLoopTask?.value
         await requestTracker.clear()
         clearConnectionContext()
         resetPeerConnectionNegotiationState(restartICE: true)
@@ -1157,13 +1165,15 @@ public final class Room: @unchecked Sendable {
         replaceSignalLoopTask(with: task)
     }
 
-    private func stopSignalLoop() {
+    @discardableResult
+    private func stopSignalLoop() -> Task<Void, Never>? {
         let task = signalLoopLock.withLock {
             let task = signalLoopTask
             signalLoopTask = nil
             return task
         }
         task?.cancel()
+        return task
     }
 
     private func replaceSignalLoopTask(with task: Task<Void, Never>) {
@@ -2445,18 +2455,16 @@ public final class Room: @unchecked Sendable {
         }
 
         let localCandidates = subscriberLocalICECandidates()
-        guard !localCandidates.isEmpty else {
-            storeSubscriberMediaStartupError(
-                PeerConnectionNegotiationError.missingSelectedICECandidatePair
+        guard subscriberPeerConnection.remoteDescriptionContainsRTPMedia else {
+            startSubscriberInboundSTUNResponderIfNeeded(
+                configuration: subscriberMediaStartupConfiguration
             )
             return
         }
 
-        guard subscriberMediaStartupConfiguration.mediaDataBinder != nil ||
-              subscriberPeerConnection.remoteDescriptionContainsRTPMedia
-        else {
-            startSubscriberInboundSTUNResponderIfNeeded(
-                configuration: subscriberMediaStartupConfiguration
+        guard !localCandidates.isEmpty else {
+            storeSubscriberMediaStartupError(
+                PeerConnectionNegotiationError.missingSelectedICECandidatePair
             )
             return
         }
@@ -2840,9 +2848,8 @@ public final class Room: @unchecked Sendable {
                 policy: policy,
                 now: Date().timeIntervalSince1970
             )
-            do {
-                try await Task.sleep(nanoseconds: sleepNanoseconds)
-            } catch {
+            _ = try? await Task.sleep(nanoseconds: sleepNanoseconds)
+            if Task.isCancelled {
                 return
             }
         }

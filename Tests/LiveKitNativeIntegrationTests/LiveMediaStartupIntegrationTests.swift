@@ -9,8 +9,8 @@ final class LiveMediaStartupIntegrationTests: XCTestCase {
         let roomName = harness.roomName(suffix: "publisher-media")
         let subscriberIdentity = "swift-native-pub-media-sub"
         let publisherIdentity = "swift-native-pub-media-pub"
-        let subscriberRoom = liveMediaIntegrationRoom()
-        let publisherRoom = liveMediaIntegrationRoom()
+        let subscriberRoom = liveMediaIntegrationRoom(liveKitURL: harness.liveKitURL)
+        let publisherRoom = liveMediaIntegrationRoom(liveKitURL: harness.liveKitURL)
         let subscriberEvents = LiveKitIntegrationEventRecorder()
         subscriberRoom.delegate = subscriberEvents
 
@@ -65,8 +65,8 @@ final class LiveMediaStartupIntegrationTests: XCTestCase {
         let roomName = harness.roomName(suffix: "subscriber-media")
         let subscriberIdentity = "swift-native-sub-media-sub"
         let publisherIdentity = "swift-native-sub-media-pub"
-        let subscriberRoom = liveMediaIntegrationRoom()
-        let publisherRoom = liveMediaIntegrationRoom()
+        let subscriberRoom = liveMediaIntegrationRoom(liveKitURL: harness.liveKitURL)
+        let publisherRoom = liveMediaIntegrationRoom(liveKitURL: harness.liveKitURL)
         let subscriberEvents = LiveKitIntegrationEventRecorder()
         subscriberRoom.delegate = subscriberEvents
 
@@ -148,9 +148,11 @@ private func liveMediaIntegrationRoomOptions() -> RoomOptions {
     )
 }
 
-private func liveMediaIntegrationRoom() -> Room {
+private func liveMediaIntegrationRoom(liveKitURL: URL) -> Room {
     let subscriberIdentity = DTLSSRTPIdentity.generated()
     let publisherIdentity = DTLSSRTPIdentity.generated()
+    let hostCandidateAddresses = liveMediaHostCandidateAddresses(for: liveKitURL)
+    let bindAddress = liveMediaBindAddress(for: liveKitURL)
     let subscriberPeerConnection = PeerConnectionCoordinator(
         configuration: NativeWebRTCConfiguration(
             role: .subscriber,
@@ -170,16 +172,42 @@ private func liveMediaIntegrationRoom() -> Room {
         subscriberPeerConnection: subscriberPeerConnection,
         publisherPeerConnection: publisherPeerConnection,
         subscriberMediaStartupConfiguration: .defaultLiveMediaData(
+            hostCandidateAddresses: { hostCandidateAddresses },
+            bindAddress: bindAddress,
             localCredentials: {
                 subscriberPeerConnection.configuration.iceCredentials
             },
             identity: subscriberIdentity
         ),
         publisherMediaStartupConfiguration: .defaultLiveMediaData(
+            hostCandidateAddresses: { hostCandidateAddresses },
+            bindAddress: bindAddress,
             localCredentials: {
                 publisherPeerConnection.configuration.iceCredentials
             },
             identity: publisherIdentity
         )
     )
+}
+
+private func liveMediaHostCandidateAddresses(for liveKitURL: URL) -> [ICEInterfaceAddress] {
+    guard let host = liveKitURL.host?.lowercased(),
+          ["localhost", "127.0.0.1"].contains(host)
+    else {
+        return ICEHostCandidateGatherer.localInterfaceAddresses()
+    }
+
+    return [
+        ICEInterfaceAddress(name: "lo0", address: "127.0.0.1", localPreference: 101),
+    ]
+}
+
+private func liveMediaBindAddress(for liveKitURL: URL) -> String {
+    guard let host = liveKitURL.host?.lowercased(),
+          ["localhost", "127.0.0.1"].contains(host)
+    else {
+        return "0.0.0.0"
+    }
+
+    return "127.0.0.1"
 }

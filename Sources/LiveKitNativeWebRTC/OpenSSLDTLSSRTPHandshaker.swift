@@ -153,8 +153,10 @@ package actor OpenSSLDTLSApplicationDataTransport {
 
         var completed = false
         for _ in 0..<max(1, receiveAttemptLimit) {
+            try ensureOpen()
             let status = try session.handshakeStep(completed: &completed)
             try await flushOutbound()
+            try ensureOpen()
             if completed {
                 return try session.handshakeResult(
                     role: role,
@@ -166,6 +168,7 @@ package actor OpenSSLDTLSApplicationDataTransport {
             }
 
             let inbound = try await transport.receive()
+            try ensureOpen()
             try session.provide(inbound)
         }
 
@@ -182,12 +185,14 @@ package actor OpenSSLDTLSApplicationDataTransport {
         try ensureOpen()
 
         while true {
+            try ensureOpen()
             if let applicationData = try session.readApplicationData(maxByteCount: maxByteCount) {
                 try await flushOutbound()
                 return applicationData
             }
 
             let inbound = try await transport.receive()
+            try ensureOpen()
             try session.provide(inbound)
             try await flushOutbound()
         }
@@ -217,7 +222,7 @@ package actor OpenSSLDTLSApplicationDataTransport {
 }
 
 private final class OpenSSLDTLSSession {
-    private let raw: OpaquePointer
+    private var raw: OpaquePointer?
 
     init(
         identity: OpenSSLDTLSIdentityStorage,
@@ -236,10 +241,16 @@ private final class OpenSSLDTLSSession {
     }
 
     func close() {
+        guard let raw else {
+            return
+        }
+
+        self.raw = nil
         lkn_dtls_session_free(raw)
     }
 
     func provide(_ datagram: Data) throws {
+        let raw = try requireRaw()
         let status = datagram.withUnsafeBytes { bytes in
             lkn_dtls_session_provide_datagram(
                 raw,
@@ -253,6 +264,7 @@ private final class OpenSSLDTLSSession {
     }
 
     func handshakeStep(completed: inout Bool) throws -> Int32 {
+        let raw = try requireRaw()
         var isComplete: Int32 = 0
         let status = lkn_dtls_session_do_handshake(raw, &isComplete)
         completed = isComplete != 0
@@ -263,6 +275,7 @@ private final class OpenSSLDTLSSession {
     }
 
     func writeApplicationData(_ data: Data) throws {
+        let raw = try requireRaw()
         let status = data.withUnsafeBytes { bytes in
             lkn_dtls_session_write_application_data(
                 raw,
@@ -276,6 +289,7 @@ private final class OpenSSLDTLSSession {
     }
 
     func readApplicationData(maxByteCount: Int) throws -> Data? {
+        let raw = try requireRaw()
         let capacity = max(1, maxByteCount)
         var data = Data(repeating: 0, count: capacity)
         var length = 0
@@ -303,6 +317,7 @@ private final class OpenSSLDTLSSession {
     }
 
     func outboundDatagrams() throws -> [Data] {
+        let raw = try requireRaw()
         var datagrams: [Data] = []
         while true {
             let datagram = try OpenSSLDTLSIdentityStorage.copyBuffer { buffer, capacity, outLength in
@@ -319,6 +334,7 @@ private final class OpenSSLDTLSSession {
         role: DTLSSRTPRole,
         expectedRemoteFingerprint: DTLSSignature
     ) throws -> DTLSSRTPHandshakeResult {
+        let raw = try requireRaw()
         let profileIdentifier = lkn_dtls_session_selected_srtp_profile(raw)
         guard profileIdentifier != 0 else {
             throw DTLSSRTPError.missingSelectedSRTPProtectionProfile
@@ -358,6 +374,14 @@ private final class OpenSSLDTLSSession {
             exportedKeyingMaterial: exported,
             remoteFingerprint: remoteFingerprint
         )
+    }
+
+    private func requireRaw() throws -> OpaquePointer {
+        guard let raw else {
+            throw SecureMediaTransportError.transportClosed
+        }
+
+        return raw
     }
 }
 
