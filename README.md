@@ -377,18 +377,18 @@ SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting and
 session-protection context, RTCP feedback, H.264, VP8, Opus RTP scaffolding,
 and SCTP data-channel message paths. On this machine, the latest
 release-readiness smoke medians include protobuf signal roundtrip at
-`6.576 us/op`, subscriber SDP answer generation at `66.752 us/op`, STUN
-binding roundtrip at `1.688 us/op`, RTP encode/decode at `0.550 us/op`, SRTP
-replay protection at `0.045 us/op`, SRTP authenticated roundtrip at
-`7.907 us/op`, SRTP AES-CM payload roundtrip at `58.568 us/op`, full SRTP
-packet protect/unprotect at `65.662 us/op`, RTCP feedback roundtrip at
-`1.578 us/op`, SRTCP packet/replay roundtrip at `0.758 us/op`, SRTCP
-authenticated roundtrip at `6.242 us/op`, full SRTCP packet protect/unprotect
-at `8.582 us/op`, DTLS-SRTP exporter split at `0.300 us/op`, DTLS-SRTP session
-protect/unprotect at `75.267 us/op`, H.264 packetize/depacketize at
-`2.278 us/op`, VP8 payload depacketize at `0.135 us/op`, Opus RTP
+`6.370 us/op`, subscriber SDP answer generation at `71.779 us/op`, STUN
+binding roundtrip at `1.819 us/op`, RTP encode/decode at `0.621 us/op`, SRTP
+replay protection at `0.043 us/op`, SRTP authenticated roundtrip at
+`8.414 us/op`, SRTP AES-CM payload roundtrip at `63.523 us/op`, full SRTP
+packet protect/unprotect at `72.390 us/op`, RTCP feedback roundtrip at
+`1.711 us/op`, SRTCP packet/replay roundtrip at `0.809 us/op`, SRTCP
+authenticated roundtrip at `6.639 us/op`, full SRTCP packet protect/unprotect
+at `9.227 us/op`, DTLS-SRTP exporter split at `0.314 us/op`, DTLS-SRTP session
+protect/unprotect at `79.576 us/op`, H.264 packetize/depacketize at
+`2.389 us/op`, VP8 payload depacketize at `0.136 us/op`, Opus RTP
 packetize/depacketize at `0.027 us/op`, and SCTP DCEP open/ack roundtrip at
-`0.735 us/op`.
+`0.762 us/op`.
 
 Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
 CSV so this package does not reintroduce the forbidden binary WebRTC dependency.

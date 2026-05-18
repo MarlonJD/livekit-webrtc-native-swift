@@ -88,7 +88,7 @@ swift run -c release LiveKitNativeBenchmarks --samples 50 --warmup 5 --ops-per-s
 
 Environment:
 
-- Generated: `2026-05-18T11:57:27Z`
+- Generated: `2026-05-18T12:00:46Z`
 - OS: `Version 26.3.1 (a) (Build 25D771280a)`
 - Architecture: `arm64`
 - Build mode: SwiftPM release
@@ -97,24 +97,24 @@ Lower median and p95 values are better. `ops/sec` is derived from the median.
 
 | Benchmark | Category | Implementation | Samples | Ops/sample | Median us/op | P95 us/op | Ops/sec |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `signal.protobuf_roundtrip` | signaling | LiveKitNative | 50 | 100 | 6.576 | 6.919 | 152062.346 |
-| `sdp.subscriber_answer` | signaling | LiveKitNative | 50 | 20 | 66.752 | 70.806 | 14980.802 |
-| `stun.binding_roundtrip` | ice | LiveKitNative | 50 | 200 | 1.688 | 1.893 | 592592.593 |
-| `rtp.packet_encode_decode` | rtp | LiveKitNative | 50 | 500 | 0.550 | 0.607 | 1818459.547 |
-| `srtp.replay_protector` | security | LiveKitNative | 50 | 500 | 0.045 | 0.051 | 22263781.281 |
-| `srtp.authenticated_roundtrip` | security | LiveKitNative | 50 | 200 | 7.907 | 8.315 | 126468.857 |
-| `srtp.aes_cm_payload_roundtrip` | security | LiveKitNative | 50 | 100 | 58.568 | 60.270 | 17074.194 |
-| `srtp.packet_protect_unprotect` | security | LiveKitNative | 50 | 100 | 65.662 | 67.765 | 15229.393 |
-| `rtcp.feedback_roundtrip` | rtcp | LiveKitNative | 50 | 500 | 1.578 | 1.660 | 633579.458 |
-| `srtcp.packet_replay_roundtrip` | security | LiveKitNative | 50 | 500 | 0.758 | 0.871 | 1318680.159 |
-| `srtcp.authenticated_roundtrip` | security | LiveKitNative | 50 | 200 | 6.242 | 6.615 | 160192.231 |
-| `srtcp.packet_protect_unprotect` | security | LiveKitNative | 50 | 200 | 8.582 | 9.292 | 116524.652 |
-| `dtls_srtp.exporter_split` | security | LiveKitNative | 50 | 500 | 0.300 | 0.347 | 3334266.928 |
-| `dtls_srtp.session_protect_unprotect` | security | LiveKitNative | 50 | 50 | 75.267 | 79.120 | 13285.947 |
-| `h264.packetize_depacketize` | video | LiveKitNative | 50 | 50 | 2.278 | 2.775 | 438916.053 |
-| `vp8.payload_depacketize` | video | LiveKitNative | 50 | 500 | 0.135 | 0.137 | 7416637.000 |
-| `opus.rtp_packetize_depacketize` | audio | LiveKitNative | 50 | 500 | 0.027 | 0.027 | 37037037.037 |
-| `sctp.dcep_open_ack_roundtrip` | data | LiveKitNative | 50 | 500 | 0.735 | 0.822 | 1360237.008 |
+| `signal.protobuf_roundtrip` | signaling | LiveKitNative | 50 | 100 | 6.370 | 8.350 | 156985.871 |
+| `sdp.subscriber_answer` | signaling | LiveKitNative | 50 | 20 | 71.779 | 82.154 | 13931.622 |
+| `stun.binding_roundtrip` | ice | LiveKitNative | 50 | 200 | 1.819 | 2.017 | 549828.179 |
+| `rtp.packet_encode_decode` | rtp | LiveKitNative | 50 | 500 | 0.621 | 0.735 | 1609875.621 |
+| `srtp.replay_protector` | security | LiveKitNative | 50 | 500 | 0.043 | 0.053 | 23484101.263 |
+| `srtp.authenticated_roundtrip` | security | LiveKitNative | 50 | 200 | 8.414 | 9.506 | 118847.206 |
+| `srtp.aes_cm_payload_roundtrip` | security | LiveKitNative | 50 | 100 | 63.523 | 68.263 | 15742.453 |
+| `srtp.packet_protect_unprotect` | security | LiveKitNative | 50 | 100 | 72.390 | 79.541 | 13814.063 |
+| `rtcp.feedback_roundtrip` | rtcp | LiveKitNative | 50 | 500 | 1.711 | 1.863 | 584424.844 |
+| `srtcp.packet_replay_roundtrip` | security | LiveKitNative | 50 | 500 | 0.809 | 0.878 | 1236222.302 |
+| `srtcp.authenticated_roundtrip` | security | LiveKitNative | 50 | 200 | 6.639 | 7.157 | 150626.115 |
+| `srtcp.packet_protect_unprotect` | security | LiveKitNative | 50 | 200 | 9.227 | 9.794 | 108371.715 |
+| `dtls_srtp.exporter_split` | security | LiveKitNative | 50 | 500 | 0.314 | 0.337 | 3185565.565 |
+| `dtls_srtp.session_protect_unprotect` | security | LiveKitNative | 50 | 50 | 79.576 | 82.891 | 12566.628 |
+| `h264.packetize_depacketize` | video | LiveKitNative | 50 | 50 | 2.389 | 2.517 | 418557.150 |
+| `vp8.payload_depacketize` | video | LiveKitNative | 50 | 500 | 0.136 | 0.154 | 7339449.541 |
+| `opus.rtp_packetize_depacketize` | audio | LiveKitNative | 50 | 500 | 0.027 | 0.036 | 36808009.423 |
+| `sctp.dcep_open_ack_roundtrip` | data | LiveKitNative | 50 | 500 | 0.762 | 0.857 | 1312194.751 |
 
 ## Official SDK/WebRTC Comparison
 
