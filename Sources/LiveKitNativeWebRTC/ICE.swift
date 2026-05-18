@@ -834,6 +834,196 @@ package struct ICEAgentCheckSummary: Equatable, Sendable {
     }
 }
 
+package enum ICEConnectivityCheckKind: String, Equatable, Sendable {
+    case ordinary
+    case triggered
+}
+
+package struct ICEConnectivityCheckPacingPolicy: Equatable, Sendable {
+    package var intervalSeconds: TimeInterval
+    package var transactionTimeoutSeconds: TimeInterval
+    package var maxTriggeredChecksPerBurst: Int
+
+    package init(
+        intervalSeconds: TimeInterval = 0.050,
+        transactionTimeoutSeconds: TimeInterval = 5,
+        maxTriggeredChecksPerBurst: Int = 16
+    ) {
+        self.intervalSeconds = max(0, intervalSeconds)
+        self.transactionTimeoutSeconds = max(0, transactionTimeoutSeconds)
+        self.maxTriggeredChecksPerBurst = max(0, maxTriggeredChecksPerBurst)
+    }
+
+    package static let standard = ICEConnectivityCheckPacingPolicy()
+
+    package func dueTime(startTime: TimeInterval, index: Int) -> TimeInterval {
+        startTime + (Double(max(0, index)) * intervalSeconds)
+    }
+
+    package func timeoutTime(for dueAt: TimeInterval) -> TimeInterval {
+        dueAt + transactionTimeoutSeconds
+    }
+}
+
+package struct ICEConnectivityCheckScheduleEntry: Equatable, Sendable {
+    package var pair: ICECandidatePair
+    package var kind: ICEConnectivityCheckKind
+    package var dueAt: TimeInterval
+    package var timeoutAt: TimeInterval
+    package var shouldNominate: Bool
+
+    package init(
+        pair: ICECandidatePair,
+        kind: ICEConnectivityCheckKind,
+        dueAt: TimeInterval,
+        timeoutAt: TimeInterval,
+        shouldNominate: Bool
+    ) {
+        self.pair = pair
+        self.kind = kind
+        self.dueAt = dueAt
+        self.timeoutAt = timeoutAt
+        self.shouldNominate = shouldNominate
+    }
+}
+
+package struct ICEConnectivityCheckScheduler: Equatable, Sendable {
+    package var policy: ICEConnectivityCheckPacingPolicy
+
+    package init(policy: ICEConnectivityCheckPacingPolicy = .standard) {
+        self.policy = policy
+    }
+
+    package func schedule(
+        checklist: ICECandidateChecklist,
+        triggeredPairs: [ICECandidatePair] = [],
+        startTime: TimeInterval = 0,
+        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful
+    ) -> [ICEConnectivityCheckScheduleEntry] {
+        var scheduledKeys = Set<ICECandidatePairKey>()
+        var orderedPairs: [(ICECandidatePair, ICEConnectivityCheckKind)] = []
+
+        for pair in triggeredPairs.prefix(policy.maxTriggeredChecksPerBurst) where pair.isEligibleForConnectivityCheck {
+            let key = ICECandidatePairKey(pair)
+            guard scheduledKeys.insert(key).inserted else {
+                continue
+            }
+            orderedPairs.append((pair, .triggered))
+        }
+
+        for pair in checklist.pairs where pair.isEligibleForConnectivityCheck {
+            let key = ICECandidatePairKey(pair)
+            guard scheduledKeys.insert(key).inserted else {
+                continue
+            }
+            orderedPairs.append((pair, .ordinary))
+        }
+
+        return orderedPairs.enumerated().map { index, item in
+            let dueAt = policy.dueTime(startTime: startTime, index: index)
+            return ICEConnectivityCheckScheduleEntry(
+                pair: item.0,
+                kind: item.1,
+                dueAt: dueAt,
+                timeoutAt: policy.timeoutTime(for: dueAt),
+                shouldNominate: nominationPolicy == .nominateFirstSuccessful
+            )
+        }
+    }
+}
+
+package enum ICERoleAssertion: Equatable, Sendable {
+    case controlling(tieBreaker: UInt64)
+    case controlled(tieBreaker: UInt64)
+
+    package init?(message: STUNMessage) {
+        if let tieBreaker = message.firstAttribute(.iceControlling)?.uint64Value {
+            self = .controlling(tieBreaker: tieBreaker)
+            return
+        }
+
+        if let tieBreaker = message.firstAttribute(.iceControlled)?.uint64Value {
+            self = .controlled(tieBreaker: tieBreaker)
+            return
+        }
+
+        return nil
+    }
+
+    package var role: ICEAgentRole {
+        switch self {
+        case .controlling:
+            .controlling
+        case .controlled:
+            .controlled
+        }
+    }
+
+    package var tieBreaker: UInt64 {
+        switch self {
+        case let .controlling(tieBreaker), let .controlled(tieBreaker):
+            tieBreaker
+        }
+    }
+}
+
+package enum ICERoleConflictAction: Equatable, Sendable {
+    case none
+    case switchRole(ICEAgentRole)
+    case rejectWithRoleConflict
+}
+
+package struct ICERoleConflictResolution: Equatable, Sendable {
+    package var resolvedRole: ICEAgentRole
+    package var action: ICERoleConflictAction
+
+    package init(resolvedRole: ICEAgentRole, action: ICERoleConflictAction) {
+        self.resolvedRole = resolvedRole
+        self.action = action
+    }
+
+    package var shouldRejectRequest: Bool {
+        action == .rejectWithRoleConflict
+    }
+}
+
+package enum ICERoleConflictResolver {
+    package static func resolve(
+        localRole: ICEAgentRole,
+        localTieBreaker: UInt64,
+        remoteAssertion: ICERoleAssertion
+    ) -> ICERoleConflictResolution {
+        guard localRole == remoteAssertion.role else {
+            return ICERoleConflictResolution(resolvedRole: localRole, action: .none)
+        }
+
+        switch localRole {
+        case .controlling:
+            if localTieBreaker >= remoteAssertion.tieBreaker {
+                return ICERoleConflictResolution(
+                    resolvedRole: .controlling,
+                    action: .rejectWithRoleConflict
+                )
+            }
+            return ICERoleConflictResolution(
+                resolvedRole: .controlled,
+                action: .switchRole(.controlled)
+            )
+        case .controlled:
+            if localTieBreaker >= remoteAssertion.tieBreaker {
+                return ICERoleConflictResolution(
+                    resolvedRole: .controlling,
+                    action: .switchRole(.controlling)
+                )
+            }
+            return ICERoleConflictResolution(
+                resolvedRole: .controlled,
+                action: .rejectWithRoleConflict
+            )
+        }
+    }
+}
+
 package protocol ICEConnectivityChecking: Sendable {
     func checkCandidatePair(
         _ pair: ICECandidatePair,
@@ -996,6 +1186,8 @@ package enum ICEConnectivityCheckError: Error, Equatable, Sendable {
     case missingMappedAddress
     case invalidMessageIntegrity
     case invalidFingerprint
+    case roleConflict(STUNErrorCode)
+    case errorResponse(STUNErrorCode)
 }
 
 package protocol STUNDatagramTransport: Sendable {
@@ -1134,6 +1326,15 @@ package struct STUNBindingClient: Sendable {
             }
         }
 
+        if response.type == .bindingErrorResponse,
+           let errorCode = try response.firstAttribute(.errorCode)?.errorCodeValue {
+            if errorCode.code == 487 {
+                throw ICEConnectivityCheckError.roleConflict(errorCode)
+            }
+
+            throw ICEConnectivityCheckError.errorResponse(errorCode)
+        }
+
         guard response.type == .bindingSuccessResponse else {
             throw ICEConnectivityCheckError.unexpectedResponseType(response.type.rawValue)
         }
@@ -1215,6 +1416,27 @@ package final class STUNUDPSocketTransport: STUNDatagramTransport, @unchecked Se
         }
 
         return Data(buffer.prefix(receivedCount))
+    }
+}
+
+private struct ICECandidatePairKey: Hashable {
+    var localFoundation: String
+    var remoteFoundation: String
+
+    init(_ pair: ICECandidatePair) {
+        self.localFoundation = pair.local.foundation
+        self.remoteFoundation = pair.remote.foundation
+    }
+}
+
+private extension ICECandidatePair {
+    var isEligibleForConnectivityCheck: Bool {
+        switch state {
+        case .frozen, .waiting, .inProgress:
+            true
+        case .succeeded, .failed:
+            false
+        }
     }
 }
 

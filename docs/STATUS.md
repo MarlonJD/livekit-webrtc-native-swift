@@ -88,6 +88,9 @@ Deterministic ICE consent freshness planning now models selected-pair consent
 check deadlines, timeout expiry, bounded failure expiry, disabled policy, and
 clamped jitter without a wall-clock dependency, and an injectable consent
 freshness executor can advance success/failure/expiry state in unit tests.
+Connectivity-check orchestration now has deterministic pacing, transaction
+timeout scheduling, triggered-check priority, STUN 487 role-conflict parsing,
+and tie-breaker based role-conflict resolution primitives in unit tests.
 Injected Room media startup now starts a selected-pair consent freshness loop
 after secure transport binding and closes the protected transport when consent
 expires. Public `Room` initialization now installs default socket-backed
@@ -419,6 +422,11 @@ The old binary WebRTC dependency path has been removed from the package model.
     failure expiry, disabled policy, and clamped jitter
   - injectable ICE consent freshness executor primitive that records
     success/failure state and reports timeout/failure expiry
+  - deterministic ICE connectivity-check scheduler that prioritizes triggered
+    pairs, applies pacing intervals, records transaction timeout deadlines, and
+    carries nomination intent
+  - STUN 487 role-conflict response parsing plus tie-breaker based ICE role
+    conflict resolution primitives
   - injected Room publisher/subscriber media startup can run a selected-pair
     consent freshness loop and close the protected transport on expiry
   - bounded RTP jitter buffer primitive for contiguous release, duplicate/old
@@ -717,7 +725,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 428 tests passed
+  - 432 tests passed
   - 1 test skipped by opt-in guard
 - Release-mode benchmark smoke:
   - `swift run -c release LiveKitNativeBenchmarks`
@@ -726,7 +734,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,696,869 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,713,417 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -761,8 +769,9 @@ The following checks passed after the latest implementation pass:
   peer connection startup against a real LiveKit server.
 - Consuming the stored signaling-provided STUN/TURN server list from public
   Room options for default candidate gathering and TURN relay allocation.
-- Full ICE restart signaling against LiveKit, connectivity-check pacing,
-  timeout, triggered checks, and role-conflict handling.
+- Full ICE restart signaling against LiveKit and live `ICEAgent` integration
+  for the deterministic connectivity-check pacing, transaction timeout,
+  triggered-check, and role-conflict primitives.
 - Consent freshness execution over default ICEAgent selected pairs.
 - Full TURN relay client behavior beyond the current Allocate, Refresh,
   CreatePermission, ChannelBind, ChannelData framing, abstract relay transport,

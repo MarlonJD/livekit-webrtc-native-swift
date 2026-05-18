@@ -209,6 +209,94 @@ final class ICEPriorityTests: XCTestCase {
         XCTAssertEqual(message.firstAttribute(.useCandidate)?.value, Data())
     }
 
+    func testConnectivityCheckSchedulerPrioritizesTriggeredPairsWithPacingAndTimeout() throws {
+        let local = iceCandidate(foundation: "local", address: "192.0.2.10", port: 50_000)
+        let remoteOrdinary = iceCandidate(
+            foundation: "remote-ordinary",
+            type: .serverReflexive,
+            localPreference: 65_535,
+            address: "203.0.113.10",
+            port: 60_000
+        )
+        let remoteTriggered = iceCandidate(
+            foundation: "remote-triggered",
+            type: .relayed,
+            localPreference: 100,
+            address: "203.0.113.20",
+            port: 60_001
+        )
+        let checklist = ICECandidateChecklist(
+            localCandidates: [local],
+            remoteCandidates: [remoteOrdinary, remoteTriggered],
+            isControlling: true
+        )
+        let triggeredPair = try XCTUnwrap(checklist.pairs.first {
+            $0.remote.foundation == "remote-triggered"
+        })
+
+        let scheduler = ICEConnectivityCheckScheduler(
+            policy: ICEConnectivityCheckPacingPolicy(
+                intervalSeconds: 0.050,
+                transactionTimeoutSeconds: 2,
+                maxTriggeredChecksPerBurst: 1
+            )
+        )
+        let schedule = scheduler.schedule(
+            checklist: checklist,
+            triggeredPairs: [triggeredPair],
+            startTime: 10,
+            nominationPolicy: .nominateFirstSuccessful
+        )
+
+        XCTAssertEqual(schedule.map(\.kind), [.triggered, .ordinary])
+        XCTAssertEqual(schedule.map { $0.pair.remote.foundation }, ["remote-triggered", "remote-ordinary"])
+        XCTAssertEqual(schedule.map(\.dueAt), [10, 10.050])
+        XCTAssertEqual(schedule.map(\.timeoutAt), [12, 12.050])
+        XCTAssertTrue(schedule.allSatisfy(\.shouldNominate))
+    }
+
+    func testRoleConflictResolverSwitchesOrRejectsFromTieBreaker() {
+        let lowerControlling = ICERoleConflictResolver.resolve(
+            localRole: .controlling,
+            localTieBreaker: 10,
+            remoteAssertion: .controlling(tieBreaker: 20)
+        )
+        XCTAssertEqual(lowerControlling.action, .switchRole(.controlled))
+        XCTAssertEqual(lowerControlling.resolvedRole, .controlled)
+        XCTAssertFalse(lowerControlling.shouldRejectRequest)
+
+        let strongerControlling = ICERoleConflictResolver.resolve(
+            localRole: .controlling,
+            localTieBreaker: 30,
+            remoteAssertion: .controlling(tieBreaker: 20)
+        )
+        XCTAssertEqual(strongerControlling.action, .rejectWithRoleConflict)
+        XCTAssertEqual(strongerControlling.resolvedRole, .controlling)
+        XCTAssertTrue(strongerControlling.shouldRejectRequest)
+
+        let strongerControlled = ICERoleConflictResolver.resolve(
+            localRole: .controlled,
+            localTieBreaker: 30,
+            remoteAssertion: .controlled(tieBreaker: 20)
+        )
+        XCTAssertEqual(strongerControlled.action, .switchRole(.controlling))
+        XCTAssertEqual(strongerControlled.resolvedRole, .controlling)
+    }
+
+    func testRoleAssertionParsesICEControllingAndControlledAttributes() {
+        let controlling = STUNMessage(
+            type: .bindingRequest,
+            attributes: [.iceControlling(tieBreaker: 0xAA)]
+        )
+        let controlled = STUNMessage(
+            type: .bindingRequest,
+            attributes: [.iceControlled(tieBreaker: 0xBB)]
+        )
+
+        XCTAssertEqual(ICERoleAssertion(message: controlling), .controlling(tieBreaker: 0xAA))
+        XCTAssertEqual(ICERoleAssertion(message: controlled), .controlled(tieBreaker: 0xBB))
+    }
+
     func testChecklistSortsPairsAndTracksNomination() {
         let local = ICECandidate(
             foundation: "local",
@@ -506,6 +594,32 @@ final class ICEPriorityTests: XCTestCase {
             )
         ) { error in
             XCTAssertEqual(error as? ICEConnectivityCheckError, .invalidMessageIntegrity)
+        }
+    }
+
+    func testSTUNBindingClientMapsRoleConflictErrorResponse() throws {
+        let client = STUNBindingClient(transport: FakeSTUNDatagramTransport { requestData in
+            let request = try STUNMessage(decoding: requestData)
+            let response = STUNMessage(
+                type: .bindingErrorResponse,
+                transactionID: request.transactionID,
+                attributes: [.errorCode(487, reason: "Role Conflict")]
+            )
+            return try response.encoded()
+        })
+
+        XCTAssertThrowsError(try client.requestServerReflexiveAddress(
+            localCredentials: ICECredentials(usernameFragment: "local", password: "local-password"),
+            remoteCredentials: ICECredentials(usernameFragment: "remote", password: "remote-password"),
+            priority: 1_864_403_327,
+            role: .controlling,
+            tieBreaker: 10,
+            retryPolicy: .once
+        )) { error in
+            XCTAssertEqual(
+                error as? ICEConnectivityCheckError,
+                .roleConflict(STUNErrorCode(code: 487, reason: "Role Conflict"))
+            )
         }
     }
 

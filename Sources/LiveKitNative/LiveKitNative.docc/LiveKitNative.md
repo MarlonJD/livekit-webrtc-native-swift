@@ -161,7 +161,10 @@ deterministic maintenance execution over abstract transports, and a setup plan
 can create and execute that configured session deterministically. A ChannelData
 relay transport can encode outbound payloads and decode inbound packets over
 an abstract media datagram transport while
-preserving partial stream remainder and peer endpoint metadata. Fresh join,
+preserving partial stream remainder and peer endpoint metadata. ICE
+connectivity-check orchestration now has deterministic pacing, transaction
+timeout scheduling, triggered-check priority, STUN 487 role-conflict parsing,
+and tie-breaker based role-conflict resolution primitives. Fresh join,
 reconnect, and disconnect boundaries now reset stale remote SDP/ICE negotiation
 state without replacing the local peer connection configuration, and regenerate
 local ICE credentials for the next negotiation.

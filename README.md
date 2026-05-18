@@ -172,9 +172,10 @@ server-reflexive candidate discovery from supported `stun:` ICE server URLs
 for bound-socket startup, default public `Room` subscriber/publisher media
 startup configurations that gather and trickle socket-backed local ICE
 candidates and use the shared DTLS/SRTP media-data binder, deterministic ICE
-consent freshness planning, injectable executor
-primitive, and Room-level consent loop for selected pairs after secure-media
-startup succeeds, bounded RTP
+consent freshness planning, injectable executor primitive, Room-level consent
+loop for selected pairs after secure-media startup succeeds, deterministic ICE
+connectivity-check pacing/timeout scheduling with triggered-check priority,
+and STUN 487 role-conflict parsing plus tie-breaker resolution, bounded RTP
 jitter buffering with gap skip, duplicate/old packet drops, missing-sequence
 accounting, and sequence-wrap ordering, TURN endpoint parsing from
 `turn:`/`turns:` ICE server URLs with UDP/TCP/TLS intent and credentials
@@ -334,18 +335,18 @@ SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting and
 session-protection context, RTCP feedback, H.264, VP8, Opus RTP scaffolding,
 and SCTP data-channel message paths. On this machine, the latest
 release-readiness smoke medians include protobuf signal roundtrip at
-`7.924 us/op`, subscriber SDP answer generation at `103.106 us/op`, STUN
-binding roundtrip at `1.833 us/op`, RTP encode/decode at `0.586 us/op`, SRTP
-replay protection at `0.047 us/op`, SRTP authenticated roundtrip at
-`8.339 us/op`, SRTP AES-CM payload roundtrip at `61.417 us/op`, full SRTP
-packet protect/unprotect at `69.690 us/op`, RTCP feedback roundtrip at
-`1.710 us/op`, SRTCP packet/replay roundtrip at `0.785 us/op`, SRTCP
-authenticated roundtrip at `6.868 us/op`, full SRTCP packet protect/unprotect
-at `9.281 us/op`, DTLS-SRTP exporter split at `0.322 us/op`, DTLS-SRTP session
-protect/unprotect at `80.011 us/op`, H.264 packetize/depacketize at
-`2.466 us/op`, VP8 payload depacketize at `0.149 us/op`, Opus RTP
+`7.836 us/op`, subscriber SDP answer generation at `102.938 us/op`, STUN
+binding roundtrip at `1.820 us/op`, RTP encode/decode at `0.596 us/op`, SRTP
+replay protection at `0.046 us/op`, SRTP authenticated roundtrip at
+`8.572 us/op`, SRTP AES-CM payload roundtrip at `64.967 us/op`, full SRTP
+packet protect/unprotect at `72.540 us/op`, RTCP feedback roundtrip at
+`1.798 us/op`, SRTCP packet/replay roundtrip at `0.848 us/op`, SRTCP
+authenticated roundtrip at `6.922 us/op`, full SRTCP packet protect/unprotect
+at `9.610 us/op`, DTLS-SRTP exporter split at `0.330 us/op`, DTLS-SRTP session
+protect/unprotect at `82.818 us/op`, H.264 packetize/depacketize at
+`2.572 us/op`, VP8 payload depacketize at `0.147 us/op`, Opus RTP
 packetize/depacketize at `0.026 us/op`, and SCTP DCEP open/ack roundtrip at
-`0.809 us/op`.
+`0.824 us/op`.
 
 Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
 CSV so this package does not reintroduce the forbidden binary WebRTC dependency.
