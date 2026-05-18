@@ -203,7 +203,7 @@ unit-test level, and keep publisher offer track state so a later local publish
 after resume still includes existing local media sections. LiveKit E2E
 verification for the OpenSSL DTLS-SRTP path, real-device video display validation,
 standards-compliant live SCTP association behavior, TURN TCP/TLS execution,
-real-device media timing, meeting-grade audio session behavior,
+real-device media timing, route/interruption audio-session recovery,
 complete live congestion/adaptive-quality control,
 LiveKit-validated data-channel recovery, and reconnect
 media recovery remain part of production

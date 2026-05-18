@@ -9,6 +9,8 @@ public struct RoomOptions: Equatable, Sendable {
     public var subscriberAdaptiveTrackSettingsPriority: UInt32
     public var automaticallyDecodeSubscriberVideo: Bool
     public var automaticallyPlaySubscriberAudio: Bool
+    public var automaticallyConfigureAudioSession: Bool
+    public var audioSessionConfiguration: AudioSessionConfiguration
 
     public init(
         defaultAutoSubscribe: Bool = true,
@@ -18,7 +20,9 @@ public struct RoomOptions: Equatable, Sendable {
         automaticallyApplySubscriberAdaptiveTrackSettings: Bool = false,
         subscriberAdaptiveTrackSettingsPriority: UInt32 = 0,
         automaticallyDecodeSubscriberVideo: Bool = false,
-        automaticallyPlaySubscriberAudio: Bool = false
+        automaticallyPlaySubscriberAudio: Bool = false,
+        automaticallyConfigureAudioSession: Bool = false,
+        audioSessionConfiguration: AudioSessionConfiguration = .voiceChat
     ) {
         self.defaultAutoSubscribe = defaultAutoSubscribe
         self.defaultAdaptiveStream = defaultAdaptiveStream
@@ -28,6 +32,8 @@ public struct RoomOptions: Equatable, Sendable {
         self.subscriberAdaptiveTrackSettingsPriority = subscriberAdaptiveTrackSettingsPriority
         self.automaticallyDecodeSubscriberVideo = automaticallyDecodeSubscriberVideo
         self.automaticallyPlaySubscriberAudio = automaticallyPlaySubscriberAudio
+        self.automaticallyConfigureAudioSession = automaticallyConfigureAudioSession
+        self.audioSessionConfiguration = audioSessionConfiguration
     }
 }
 

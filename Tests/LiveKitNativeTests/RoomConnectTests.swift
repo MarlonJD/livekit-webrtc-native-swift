@@ -115,6 +115,48 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(queryItems.first(where: { $0.name == "auto_subscribe_data_track" })?.value, "false")
     }
 
+    func testConnectConfiguresAudioSessionWhenEnabled() async throws {
+        let response = makeJoinResponse()
+        let encodedResponse = try SignalFrameCodec().encode(response)
+        let transport = MockSignalTransport(incomingFrames: [.binary(encodedResponse)])
+        let audioSessionController = RecordingAudioSessionController()
+        let room = Room(
+            options: RoomOptions(automaticallyConfigureAudioSession: true),
+            signalConnection: SignalConnection(transport: transport),
+            audioSessionController: audioSessionController
+        )
+
+        try await room.connect(url: URL(string: "https://example.test")!, token: "token")
+
+        XCTAssertEqual(
+            audioSessionController.events,
+            [.configure(.voiceChat), .activate]
+        )
+
+        await room.disconnect()
+
+        XCTAssertEqual(
+            audioSessionController.events,
+            [.configure(.voiceChat), .activate, .deactivate]
+        )
+    }
+
+    func testConnectLeavesAudioSessionAloneByDefault() async throws {
+        let response = makeJoinResponse()
+        let encodedResponse = try SignalFrameCodec().encode(response)
+        let transport = MockSignalTransport(incomingFrames: [.binary(encodedResponse)])
+        let audioSessionController = RecordingAudioSessionController()
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            audioSessionController: audioSessionController
+        )
+
+        try await room.connect(url: URL(string: "https://example.test")!, token: "token")
+        await room.disconnect()
+
+        XCTAssertEqual(audioSessionController.events, [])
+    }
+
     func testConnectOptionsOverrideRoomDefaultConnectionSettings() async throws {
         let response = makeJoinResponse()
         let encodedResponse = try SignalFrameCodec().encode(response)
@@ -4899,6 +4941,41 @@ final class RoomConnectTests: XCTestCase {
 
         let sentFramesAfterLocalPublish = await transport.sentFrames
         XCTAssertEqual(sentFramesAfterLocalPublish.count, 1)
+    }
+}
+
+private enum RecordingAudioSessionEvent: Equatable {
+    case configure(AudioSessionConfiguration)
+    case activate
+    case deactivate
+}
+
+private final class RecordingAudioSessionController: AudioSessionControlling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var mutableEvents: [RecordingAudioSessionEvent] = []
+
+    var events: [RecordingAudioSessionEvent] {
+        lock.withLock {
+            mutableEvents
+        }
+    }
+
+    func configureForVoiceChat(_ configuration: AudioSessionConfiguration) throws {
+        lock.withLock {
+            mutableEvents.append(.configure(configuration))
+        }
+    }
+
+    func activate() throws {
+        lock.withLock {
+            mutableEvents.append(.activate)
+        }
+    }
+
+    func deactivate() throws {
+        lock.withLock {
+            mutableEvents.append(.deactivate)
+        }
     }
 }
 

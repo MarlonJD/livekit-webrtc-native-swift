@@ -16,7 +16,7 @@ default live media send/receive completion, Apple-platform OpenSSL packaging,
 VideoToolbox-backed production H.264
 encode/decode with hardware path verification and fallback policy,
 standards-compliant DTLS-backed SCTP, media
-recovery during reconnect, meeting-grade audio, jitter buffering, packet-loss
+recovery during reconnect, real-device audio-session validation, jitter buffering, packet-loss
 recovery, live congestion control, applied adaptive quality, real-device iOS
 soak/performance tests, and end-to-end LiveKit compatibility testing.
 Publisher `AddTrackRequest` signaling is now wired for local audio/video
@@ -33,9 +33,12 @@ be decoded through VideoToolbox into `CVPixelBuffer` frames when
 `RoomOptions.automaticallyDecodeSubscriberVideo` is enabled, and
 `Room.setSubscriberVideoRenderer` can hand decoded frames to an
 application-provided renderer, including the built-in UIKit/AppKit `VideoView`.
+`RoomOptions.automaticallyConfigureAudioSession` can now opt into applying a
+voice-chat audio session for Room connect/disconnect lifecycle on iOS while
+remaining a no-op on macOS unit tests.
 LiveKit E2E media
 validation, real-device video display validation, complete live congestion-control policy,
-meeting-grade audio session behavior, and production runtime pacing are still
+route/interruption audio recovery, and production runtime pacing are still
 open.
 Data-track publish/unpublish/update-subscription signaling is also wired at
 unit-test level, including server/SFU data-track unpublish cleanup for local
@@ -759,6 +762,11 @@ The old binary WebRTC dependency path has been removed from the package model.
     AudioToolbox and schedules PCM buffers into `AVAudioPlayerNode`
   - `RoomOptions.automaticallyPlaySubscriberAudio` opt-in wiring for default
     subscriber receive-loop audio playout scheduling
+  - `AudioSessionConfiguration` and `AudioSessionController` primitives for
+    iOS `.playAndRecord` / `.voiceChat` setup, preferred sample-rate and I/O
+    buffer duration, Bluetooth/AirPlay/speaker policy, interruption parsing,
+    route-change parsing, and opt-in Room connect/disconnect activation through
+    `RoomOptions.automaticallyConfigureAudioSession`
   - native microphone publish pipeline that starts after publisher secure media
     transport startup and sends AudioToolbox Opus packets through the stored
     publisher RTP sender
@@ -825,7 +833,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 472 tests passed
+  - 477 tests passed
   - 1 test skipped by opt-in guard
 - `swift build --target LiveKitNativeWebRTC --jobs 1 --disable-index-store -debug-info-format none`
   - target build passed
@@ -838,7 +846,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,835,995 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,841,082 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -940,10 +948,10 @@ The following checks passed after the latest implementation pass:
 - Full Swift VP8 pixel reconstruction and renderer handoff.
 - Production policy for platforms where AudioToolbox Opus encode/decode is not
   available; a vendored `libopus` dependency remains intentionally excluded.
-- Meeting-grade iOS audio session management, capture/playout timing, echo
-  cancellation, noise suppression strategy, automatic gain behavior, route
-  changes, Bluetooth behavior, interruptions, and background/foreground
-  recovery.
+- Real-device validation of the new iOS audio-session lifecycle with
+  capture/playout timing, echo cancellation, noise suppression strategy,
+  automatic gain behavior, route changes, Bluetooth behavior, interruptions,
+  and background/foreground recovery.
 - Bounded capture, decode, and render queues plus end-to-end real-time
   backpressure validation beyond the current camera publish frame gate.
 
@@ -1005,7 +1013,7 @@ The following checks passed after the latest implementation pass:
 8. Track VP9 and AV1 as future advanced SVC codec profiles, gated by
    dependency policy, battery/thermal behavior, LiveKit negotiation, and
    cross-client compatibility.
-9. Make meeting-grade audio, jitter buffering, packet-loss recovery, live
+9. Make real-device audio-session validation, jitter buffering, packet-loss recovery, live
    congestion control, applied adaptive quality, TURN-only operation, reconnect
    media recovery, and real-device iOS soak/performance testing production
    blockers.
@@ -1024,7 +1032,7 @@ media SDK.
 Do not tag this as production-ready `1.0.0` until
 `LiveKitNative.productionReadiness.status == .productionReady`, blockers are
 empty, VideoToolbox-backed H.264 encode/decode and hardware/fallback behavior
-are validated on real devices, meeting-grade audio and network adaptation are
+are validated on real devices, audio route/interruption recovery and network adaptation are
 validated, weak-network/TURN-only/multi-participant/soak tests pass, local
 LiveKit integration tests pass, and the release size/dependency guards pass on
 CI.

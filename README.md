@@ -99,8 +99,8 @@ general production video meetings until the hardening bar covers the full call
 experience, not only the signaling and media packet paths.
 
 Production readiness must include meeting-grade audio capture and playout,
-echo cancellation, route changes, Bluetooth behavior, interruptions,
-background/foreground transitions, jitter buffering, packet-loss recovery,
+echo cancellation, validated audio-session route changes, Bluetooth behavior,
+interruptions, background/foreground transitions, jitter buffering, packet-loss recovery,
 RTCP feedback, live bandwidth estimation, congestion control, applied adaptive
 quality, bounded frame dropping across real-time media queues, reconnect media
 recovery, TURN-only operation, and multi-participant behavior.
@@ -266,7 +266,7 @@ The active implementation focus is now `1.0.0` hardening: validating the
 OpenSSL-backed DTLS-SRTP `use_srtp` handshake/exporter against LiveKit,
 completing LiveKit-validated default secure media transport, TURN TCP/TLS,
 live quality-control wiring, real-device video display hardening,
-standards-compliant DTLS-SCTP association behavior, meeting-grade audio session
+standards-compliant DTLS-SCTP association behavior, real-device audio session
 hardening, integration apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
@@ -374,11 +374,12 @@ and opt-in automatic signaling, subscriber Receiver Report
 generation/cadence/sending, REMB packet/planner/sending, opt-in subscriber
 Opus playout scheduling, opt-in subscriber H.264 VideoToolbox decode-to-pixel-buffer
 scheduling, public `SubscriberVideoFrameRenderer` handoff, UIKit/AppKit
-`VideoView` sample-buffer display, and matching
+`VideoView` sample-buffer display, opt-in voice-chat audio-session
+configuration through `RoomOptions.automaticallyConfigureAudioSession`, and matching
 `RequestResponse` failure
 mapping are unit-tested, while LiveKit E2E media validation, real-device video
 display validation, standards-compliant live SCTP association behavior, TURN
-TCP/TLS execution, media recovery, meeting-grade audio session behavior, and
+TCP/TLS execution, media recovery, route/interruption audio recovery, and
 end-to-end LiveKit hardening are still open.
 
 ## Benchmarks
@@ -430,7 +431,7 @@ binary size proxy. The strict gate additionally requires
 That strict gate intentionally fails today because LiveKit E2E secure RTP/RTCP
 verification, full ICE/TURN hardening, real-device video display validation,
 standards-compliant live SCTP, Apple-platform OpenSSL packaging validation,
-meeting-grade audio session behavior, full live congestion/adaptive-quality
+real-device audio route/interruption recovery, full live congestion/adaptive-quality
 policy, and end-to-end LiveKit tests are still open.
 
 ## Requirements

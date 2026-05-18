@@ -293,6 +293,7 @@ public final class Room: @unchecked Sendable {
     private let subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration?
     private let publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration?
     private let subscriberRTCPReceiverReportPolicy: RTCPReceiverReportSchedulePolicy
+    private let audioSessionController: any AudioSessionControlling
     private let publisherDataChannelIsInjected: Bool
     private var publisherDataChannel: LocalDataChannelPublisher?
     private let publisherRTCPBandwidthEstimates = RTCPBandwidthEstimateStore()
@@ -310,6 +311,7 @@ public final class Room: @unchecked Sendable {
     private let reconnectSyncStateLock = NSLock()
     private let reconnectSessionDescriptionLock = NSLock()
     private let dataChannelReceiveLoopLock = NSLock()
+    private let audioSessionLock = NSLock()
     private let eventContinuation: AsyncStream<RoomEvent>.Continuation
     private var signalLoopTask: Task<Void, Never>?
     private var connectionContext: RoomConnectionContext?
@@ -346,6 +348,7 @@ public final class Room: @unchecked Sendable {
     private var lastSubscriberAdaptiveTrackSettingsPlan: AdaptiveTrackSettingsPlan?
     private var dataChannelReceiveTask: Task<Void, Never>?
     private var dataChannelReceiveLoopID: UInt64 = 0
+    private var audioSessionActivated = false
     private var reconnectSubscribedTrackSIDs: Set<String> = []
     private var reconnectDisabledTrackSIDs: Set<String> = []
     private var reconnectSubscriberOffer: Livekit_SessionDescription?
@@ -684,7 +687,8 @@ public final class Room: @unchecked Sendable {
         subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration? = nil,
         publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration? = nil,
         publisherDataChannel: LocalDataChannelPublisher? = nil,
-        subscriberRTCPReceiverReportPolicy: RTCPReceiverReportSchedulePolicy = .standard
+        subscriberRTCPReceiverReportPolicy: RTCPReceiverReportSchedulePolicy = .standard,
+        audioSessionController: any AudioSessionControlling = AudioSessionController()
     ) {
         self.options = options
         self.signalConnection = signalConnection
@@ -693,6 +697,7 @@ public final class Room: @unchecked Sendable {
         self.subscriberMediaStartupConfiguration = subscriberMediaStartupConfiguration
         self.publisherMediaStartupConfiguration = publisherMediaStartupConfiguration
         self.subscriberRTCPReceiverReportPolicy = subscriberRTCPReceiverReportPolicy
+        self.audioSessionController = audioSessionController
         self.publisherDataChannelIsInjected = publisherDataChannel != nil
         self.publisherDataChannel = publisherDataChannel
         self.subscriberMediaReceivePipeline = SubscriberMediaReceivePipeline(
@@ -716,6 +721,7 @@ public final class Room: @unchecked Sendable {
         stopDataChannelReceiveLoop()
         closeMediaStartupTransportDetached(clearSubscriberMediaStartupState())
         closeMediaStartupTransportDetached(clearPublisherMediaStartupState())
+        deactivateAudioSessionIfNeeded()
         Task { [signalConnection] in
             await signalConnection.close()
         }
@@ -735,6 +741,7 @@ public final class Room: @unchecked Sendable {
         await transition(to: .connecting)
 
         do {
+            try configureAudioSessionIfNeeded()
             try await connectSignalAndApplyInitialResponse(
                 context: context,
                 reconnect: connectOptions.reconnect,
@@ -749,6 +756,7 @@ public final class Room: @unchecked Sendable {
             clearConnectionContext()
             resetPeerConnectionNegotiationState(restartICE: true)
             clearLocalParticipantCommandHandler()
+            deactivateAudioSessionIfNeeded()
             await transition(to: .disconnected)
             LiveKitNativeLogging.log(.error, "Room connect failed: \(error.localizedDescription)")
             throw error
@@ -780,6 +788,7 @@ public final class Room: @unchecked Sendable {
             emit(event)
         }
 
+        deactivateAudioSessionIfNeeded()
         emit(.connectionStateChanged(.disconnected))
         LiveKitNativeLogging.log(.info, "Room disconnected.")
     }
@@ -954,6 +963,46 @@ public final class Room: @unchecked Sendable {
         emit(.connectionStateChanged(connectionState))
     }
 
+    private func configureAudioSessionIfNeeded() throws {
+        guard options.automaticallyConfigureAudioSession else {
+            return
+        }
+
+        if audioSessionLock.withLock({ audioSessionActivated }) {
+            return
+        }
+
+        try audioSessionController.configureForVoiceChat(options.audioSessionConfiguration)
+        try audioSessionController.activate()
+        audioSessionLock.withLock {
+            audioSessionActivated = true
+        }
+    }
+
+    private func deactivateAudioSessionIfNeeded() {
+        guard options.automaticallyConfigureAudioSession else {
+            return
+        }
+
+        let shouldDeactivate = audioSessionLock.withLock {
+            guard audioSessionActivated else {
+                return false
+            }
+
+            audioSessionActivated = false
+            return true
+        }
+        guard shouldDeactivate else {
+            return
+        }
+
+        do {
+            try audioSessionController.deactivate()
+        } catch {
+            LiveKitNativeLogging.log(.warning, "Audio session deactivate failed: \(error.localizedDescription)")
+        }
+    }
+
     private func applyInitialSignalResponse(_ response: Livekit_SignalResponse) async throws {
         guard case let .join(joinResponse)? = response.message else {
             throw LiveKitNativeError.invalidSignalFrame("Expected initial JoinResponse from LiveKit signaling.")
@@ -1001,6 +1050,7 @@ public final class Room: @unchecked Sendable {
                     self.clearConnectionContext()
                     self.resetPeerConnectionNegotiationState(restartICE: true)
                     self.clearLocalParticipantCommandHandler()
+                    self.deactivateAudioSessionIfNeeded()
                     await self.transition(to: .disconnected)
                     LiveKitNativeLogging.log(.error, "Signal loop stopped: \(error.localizedDescription)")
                     return
@@ -1270,6 +1320,7 @@ public final class Room: @unchecked Sendable {
                 clearConnectionContext()
                 resetPeerConnectionNegotiationState(restartICE: true)
                 clearLocalParticipantCommandHandler()
+                deactivateAudioSessionIfNeeded()
                 await transition(to: .disconnected)
                 return false
             }
@@ -1279,6 +1330,7 @@ public final class Room: @unchecked Sendable {
             clearConnectionContext()
             resetPeerConnectionNegotiationState(restartICE: true)
             clearLocalParticipantCommandHandler()
+            deactivateAudioSessionIfNeeded()
             await transition(to: .disconnected)
             return false
         }
