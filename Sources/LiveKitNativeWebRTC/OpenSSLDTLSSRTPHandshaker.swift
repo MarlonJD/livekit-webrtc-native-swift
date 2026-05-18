@@ -125,6 +125,97 @@ package struct OpenSSLDTLSSRTPHandshaker: DTLSSRTPHandshaking {
     }
 }
 
+package actor OpenSSLDTLSApplicationDataTransport {
+    private let session: OpenSSLDTLSSession
+    private let transport: any MediaDatagramTransport
+    private var isClosed = false
+
+    package init(
+        identity: DTLSSRTPIdentity,
+        role: DTLSSRTPRole,
+        transport: any MediaDatagramTransport,
+        profiles: [SRTPProtectionProfile] = [.aes128CMHMACSHA180, .aes128CMHMACSHA132]
+    ) throws {
+        guard let storage = identity.storage else {
+            throw DTLSSRTPError.dtlsIdentityUnavailable("OpenSSL DTLS identity is unavailable.")
+        }
+
+        self.session = try OpenSSLDTLSSession(identity: storage, role: role, profiles: profiles)
+        self.transport = transport
+    }
+
+    package func performHandshake(
+        role: DTLSSRTPRole,
+        expectedRemoteFingerprint: DTLSSignature,
+        receiveAttemptLimit: Int = 64
+    ) async throws -> DTLSSRTPHandshakeResult {
+        try ensureOpen()
+
+        var completed = false
+        for _ in 0..<max(1, receiveAttemptLimit) {
+            let status = try session.handshakeStep(completed: &completed)
+            try await flushOutbound()
+            if completed {
+                return try session.handshakeResult(
+                    role: role,
+                    expectedRemoteFingerprint: expectedRemoteFingerprint
+                )
+            }
+            guard status == LKN_DTLS_WANT_READ || status == LKN_DTLS_OK else {
+                throw DTLSSRTPError.dtlsHandshakeFailed(OpenSSLDTLSIdentityStorage.lastError())
+            }
+
+            let inbound = try await transport.receive()
+            try session.provide(inbound)
+        }
+
+        throw DTLSSRTPError.dtlsHandshakeFailed("OpenSSL DTLS handshake did not complete before the receive attempt limit.")
+    }
+
+    package func send(_ data: Data) async throws {
+        try ensureOpen()
+        try session.writeApplicationData(data)
+        try await flushOutbound()
+    }
+
+    package func receive(maxByteCount: Int = Int(UInt16.max)) async throws -> Data {
+        try ensureOpen()
+
+        while true {
+            if let applicationData = try session.readApplicationData(maxByteCount: maxByteCount) {
+                try await flushOutbound()
+                return applicationData
+            }
+
+            let inbound = try await transport.receive()
+            try session.provide(inbound)
+            try await flushOutbound()
+        }
+    }
+
+    package func close() {
+        guard !isClosed else {
+            return
+        }
+
+        isClosed = true
+        session.close()
+    }
+
+    private func ensureOpen() throws {
+        guard !isClosed else {
+            throw SecureMediaTransportError.transportClosed
+        }
+    }
+
+    private func flushOutbound() async throws {
+        let datagrams = try session.outboundDatagrams()
+        for datagram in datagrams {
+            try await transport.send(datagram)
+        }
+    }
+}
+
 private final class OpenSSLDTLSSession {
     private let raw: OpaquePointer
 
@@ -171,15 +262,56 @@ private final class OpenSSLDTLSSession {
         return status
     }
 
+    func writeApplicationData(_ data: Data) throws {
+        let status = data.withUnsafeBytes { bytes in
+            lkn_dtls_session_write_application_data(
+                raw,
+                bytes.bindMemory(to: UInt8.self).baseAddress,
+                data.count
+            )
+        }
+        guard status == LKN_DTLS_OK else {
+            throw DTLSSRTPError.dtlsHandshakeFailed(OpenSSLDTLSIdentityStorage.lastError())
+        }
+    }
+
+    func readApplicationData(maxByteCount: Int) throws -> Data? {
+        let capacity = max(1, maxByteCount)
+        var data = Data(repeating: 0, count: capacity)
+        var length = 0
+        let status = data.withUnsafeMutableBytes { bytes in
+            lkn_dtls_session_read_application_data(
+                raw,
+                bytes.bindMemory(to: UInt8.self).baseAddress,
+                capacity,
+                &length
+            )
+        }
+        if status == LKN_DTLS_WANT_READ {
+            return nil
+        }
+        guard status == LKN_DTLS_OK else {
+            throw DTLSSRTPError.dtlsHandshakeFailed(OpenSSLDTLSIdentityStorage.lastError())
+        }
+        return Data(data.prefix(length))
+    }
+
     func flushOutbound(to transport: any MediaDatagramTransport) async throws {
+        for datagram in try outboundDatagrams() {
+            try await transport.send(datagram)
+        }
+    }
+
+    func outboundDatagrams() throws -> [Data] {
+        var datagrams: [Data] = []
         while true {
             let datagram = try OpenSSLDTLSIdentityStorage.copyBuffer { buffer, capacity, outLength in
                 lkn_dtls_session_copy_outbound(raw, buffer, capacity, outLength)
             }
             guard !datagram.isEmpty else {
-                return
+                return datagrams
             }
-            try await transport.send(datagram)
+            datagrams.append(datagram)
         }
     }
 

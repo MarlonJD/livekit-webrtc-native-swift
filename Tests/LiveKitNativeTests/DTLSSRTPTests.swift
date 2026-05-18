@@ -179,6 +179,47 @@ final class DTLSSRTPTests: XCTestCase {
         XCTAssertGreaterThan(datagrams.server.sentDatagramCount, 0)
     }
 
+    func testOpenSSLDTLSApplicationDataCarriesSCTPDataChannelPackets() async throws {
+        let clientIdentity = DTLSSRTPIdentity.generated()
+        let serverIdentity = DTLSSRTPIdentity.generated()
+        let datagrams = PairedDTLSDatagramTransport.makePair()
+        let clientDTLS = try OpenSSLDTLSApplicationDataTransport(
+            identity: clientIdentity,
+            role: .client,
+            transport: datagrams.client
+        )
+        let serverDTLS = try OpenSSLDTLSApplicationDataTransport(
+            identity: serverIdentity,
+            role: .server,
+            transport: datagrams.server
+        )
+
+        async let clientResult = clientDTLS.performHandshake(
+            role: .client,
+            expectedRemoteFingerprint: serverIdentity.fingerprint
+        )
+        async let serverResult = serverDTLS.performHandshake(
+            role: .server,
+            expectedRemoteFingerprint: clientIdentity.fingerprint
+        )
+        _ = try await (clientResult, serverResult)
+
+        let clientSCTP = DTLSSCTPDataChannelPacketTransport(dtlsTransport: clientDTLS)
+        let serverSCTP = DTLSSCTPDataChannelPacketTransport(dtlsTransport: serverDTLS)
+        let packet = SCTPDataChannelPacket(
+            streamID: 0,
+            ppid: .binary,
+            payload: Data([0x01, 0x02, 0x03])
+        )
+
+        try await clientSCTP.send(packet)
+        let received = try await serverSCTP.receive()
+
+        XCTAssertEqual(received, packet)
+        await clientDTLS.close()
+        await serverDTLS.close()
+    }
+
     func testShortAuthenticationTagProfileUsesSameExporterByteCount() throws {
         let profile = try SRTPProtectionProfile(identifier: 0x0002)
         let exported = Data((0..<60).map(UInt8.init))

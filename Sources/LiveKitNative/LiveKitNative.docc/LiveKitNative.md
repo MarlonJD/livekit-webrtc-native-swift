@@ -31,7 +31,10 @@ frame assembly, keyframe metadata extraction, and a decode-only frame inspector.
 Milestone 0.6 adds WebRTC data-channel DCEP open/ack messages, reliable/lossy
 SCTP channel planning, LiveKit `DataPacket` user-packet mapping,
 `publish(data:options:)` local publish planning, and data-track
-publish/unpublish/update-subscription signaling. Active work has moved to 1.0
+publish/unpublish/update-subscription signaling. The 1.0 hardening path now
+adds queued local data publish flushing through an injected SCTP packet
+transport, inbound data-channel `DataPacket` event plumbing, and OpenSSL DTLS
+application-data packet transport coverage. Active work has moved to 1.0
 hardening with explicit production
 readiness gates, request/response correlation for client-originated signaling,
 metadata/name/attribute update requests, configurable logging, disconnect
@@ -159,9 +162,9 @@ the latest negotiated subscriber answer / publisher offer SDP state at
 unit-test level, and keep publisher offer track state so a later local publish
 after resume still includes existing local media sections. LiveKit E2E
 verification for the OpenSSL DTLS-SRTP path, default subscriber jitter-buffer
-integration, RTP sender capture/encode startup, subscriber-pipeline RTCP
-feedback dispatch, and reconnect media recovery remain part of production
-hardening.
+integration, standards-compliant live SCTP association behavior, RTP sender
+capture/encode startup, subscriber-pipeline RTCP feedback dispatch, and
+reconnect media recovery remain part of production hardening.
 
 Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the

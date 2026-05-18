@@ -20,8 +20,6 @@ final class LiveKitDataPacketTests: XCTestCase {
 
         XCTAssertEqual(plan.reliability, .reliable)
         XCTAssertEqual(plan.channelLabel, LiveKitSCTPDataChannelLabel.reliable)
-        XCTAssertEqual(plan.sctpPacket.streamID, LocalDataPublishPlan.reliableStreamID)
-        XCTAssertEqual(plan.sctpPacket.ppid, .binary)
         XCTAssertEqual(decoded.kind, .reliable)
         XCTAssertEqual(decoded.user.payload, payload)
         XCTAssertEqual(decoded.user.topic, "chat")
@@ -35,11 +33,10 @@ final class LiveKitDataPacketTests: XCTestCase {
             data: Data([0x01, 0x02, 0x03]),
             options: DataPublishOptions(reliable: false)
         )
-        let decoded = try Livekit_DataPacket(serializedBytes: plan.sctpPacket.payload)
+        let decoded = try Livekit_DataPacket(serializedBytes: plan.encodedPacket)
 
         XCTAssertEqual(plan.reliability, .lossy)
         XCTAssertEqual(plan.channelLabel, LiveKitSCTPDataChannelLabel.lossy)
-        XCTAssertEqual(plan.sctpPacket.streamID, LocalDataPublishPlan.lossyStreamID)
         XCTAssertEqual(decoded.kind, .lossy)
         XCTAssertEqual(decoded.user.payload, Data([0x01, 0x02, 0x03]))
     }
@@ -85,11 +82,12 @@ final class LiveKitDataPacketTests: XCTestCase {
 
         try await publisher.publish(plan)
 
+        let reliableStreamID = await publisher.streamID(for: .reliable)
         let queuedCount = await publisher.pendingPlanCount
         XCTAssertEqual(queuedCount, 1)
         XCTAssertEqual(transport.sentPackets.count, 1)
         let openPacket = try XCTUnwrap(transport.sentPackets.first)
-        XCTAssertEqual(openPacket.streamID, LocalDataPublishPlan.reliableStreamID)
+        XCTAssertEqual(openPacket.streamID, reliableStreamID)
         XCTAssertEqual(openPacket.ppid, .dataChannelControl)
         XCTAssertEqual(
             try SCTPDataChannelControlMessage(decoding: openPacket.payload),
@@ -98,7 +96,7 @@ final class LiveKitDataPacketTests: XCTestCase {
 
         try await publisher.acceptControlPacket(
             SCTPDataChannelPacket(
-                streamID: LocalDataPublishPlan.reliableStreamID,
+                streamID: reliableStreamID,
                 ppid: .dataChannelControl,
                 payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
             )
@@ -107,7 +105,10 @@ final class LiveKitDataPacketTests: XCTestCase {
         let flushedCount = await publisher.pendingPlanCount
         XCTAssertEqual(flushedCount, 0)
         XCTAssertEqual(transport.sentPackets.count, 2)
-        XCTAssertEqual(transport.sentPackets[1], plan.sctpPacket)
+        XCTAssertEqual(
+            transport.sentPackets[1],
+            SCTPDataChannelPacket(streamID: reliableStreamID, ppid: .binary, payload: plan.encodedPacket)
+        )
     }
 
     func testLocalDataChannelPublisherSendsImmediatelyWhenChannelIsOpen() async throws {
@@ -117,9 +118,10 @@ final class LiveKitDataPacketTests: XCTestCase {
         let secondPlan = try LocalDataPublishPlan(data: Data([0x02]), options: DataPublishOptions(reliable: false))
 
         try await publisher.publish(firstPlan)
+        let lossyStreamID = await publisher.streamID(for: .lossy)
         try await publisher.acceptControlPacket(
             SCTPDataChannelPacket(
-                streamID: LocalDataPublishPlan.lossyStreamID,
+                streamID: lossyStreamID,
                 ppid: .dataChannelControl,
                 payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
             )
@@ -129,10 +131,84 @@ final class LiveKitDataPacketTests: XCTestCase {
         let queuedCount = await publisher.pendingPlanCount
         XCTAssertEqual(queuedCount, 0)
         XCTAssertEqual(transport.sentPackets.count, 3)
-        XCTAssertEqual(transport.sentPackets[0].streamID, LocalDataPublishPlan.lossyStreamID)
+        XCTAssertEqual(transport.sentPackets[0].streamID, lossyStreamID)
         XCTAssertEqual(transport.sentPackets[0].ppid, .dataChannelControl)
-        XCTAssertEqual(transport.sentPackets[1], firstPlan.sctpPacket)
-        XCTAssertEqual(transport.sentPackets[2], secondPlan.sctpPacket)
+        XCTAssertEqual(
+            transport.sentPackets[1],
+            SCTPDataChannelPacket(streamID: lossyStreamID, ppid: .binary, payload: firstPlan.encodedPacket)
+        )
+        XCTAssertEqual(
+            transport.sentPackets[2],
+            SCTPDataChannelPacket(streamID: lossyStreamID, ppid: .binary, payload: secondPlan.encodedPacket)
+        )
+    }
+
+    func testLocalDataChannelPublisherUsesManagerStreamIDsWhenFlushing() async throws {
+        let transport = RecordingSCTPDataChannelPacketTransport()
+        let manager = SCTPDataChannelManager(firstLocalStreamID: 1)
+        let publisher = LocalDataChannelPublisher(manager: manager, transport: transport)
+        let plan = try LocalDataPublishPlan(data: Data([0x01]), options: DataPublishOptions(reliable: true))
+
+        try await publisher.publish(plan)
+        let reliableStreamID = await publisher.streamID(for: .reliable)
+        try await publisher.acceptControlPacket(
+            SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
+            )
+        )
+
+        XCTAssertEqual(reliableStreamID, 1)
+        XCTAssertEqual(
+            transport.sentPackets.last,
+            SCTPDataChannelPacket(streamID: 1, ppid: .binary, payload: plan.encodedPacket)
+        )
+    }
+
+    func testLocalDataChannelPublisherAcksRemoteOpenAndDecodesInboundPacket() async throws {
+        let transport = RecordingSCTPDataChannelPacketTransport()
+        let publisher = LocalDataChannelPublisher(transport: transport)
+        let reliableStreamID = await publisher.streamID(for: .reliable)
+
+        let openPacket = SCTPDataChannelPacket(
+            streamID: reliableStreamID,
+            ppid: .dataChannelControl,
+            payload: SCTPDataChannelControlMessage.open(
+                SCTPDataChannelOpenMessage(reliability: .reliable, label: LiveKitSCTPDataChannelLabel.reliable)
+            ).encoded()
+        )
+
+        let controlResult = try await publisher.acceptInboundPacket(openPacket)
+        XCTAssertNil(controlResult)
+        XCTAssertEqual(
+            transport.sentPackets,
+            [SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
+            )]
+        )
+
+        let packet = LiveKitDataPacketMapper.makeUserPacket(
+            data: Data("hi".utf8),
+            options: DataPublishOptions(reliable: true, topic: "chat"),
+            participantSid: "PA_remote",
+            participantIdentity: "remote"
+        )
+        let received = try await publisher.acceptInboundPacket(
+            SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .binary,
+                payload: try packet.serializedData()
+            )
+        )
+
+        XCTAssertEqual(received?.payload, Data("hi".utf8))
+        XCTAssertEqual(received?.topic, "chat")
+        XCTAssertEqual(received?.reliability, .reliable)
+        XCTAssertEqual(received?.participantSid, "PA_remote")
+        XCTAssertEqual(received?.participantIdentity, "remote")
     }
 
     func testDataTrackSignalPlansBuildProtocolRequests() {

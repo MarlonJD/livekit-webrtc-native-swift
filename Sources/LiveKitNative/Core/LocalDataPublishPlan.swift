@@ -4,6 +4,7 @@ import LiveKitNativeWebRTC
 
 enum LiveKitDataPacketMappingError: Error, Equatable, Sendable {
     case unsupportedPacketValue
+    case unsupportedSCTPPPID(SCTPDataChannelPPID)
 }
 
 struct ReceivedLiveKitDataPacket: Equatable, Sendable {
@@ -67,12 +68,8 @@ enum LiveKitDataPacketMapper {
 }
 
 struct LocalDataPublishPlan: Equatable, Sendable {
-    static let reliableStreamID: UInt16 = 0
-    static let lossyStreamID: UInt16 = 2
-
     var packet: Livekit_DataPacket
     var encodedPacket: Data
-    var sctpPacket: SCTPDataChannelPacket
     var reliability: SCTPDataChannelReliability
     var channelLabel: String
 
@@ -91,16 +88,7 @@ struct LocalDataPublishPlan: Equatable, Sendable {
             participantIdentity: participantIdentity
         )
         self.encodedPacket = try packet.serializedData()
-        self.sctpPacket = SCTPDataChannelPacket(
-            streamID: options.reliable ? Self.reliableStreamID : Self.lossyStreamID,
-            ppid: encodedPacket.isEmpty ? .binaryEmpty : .binary,
-            payload: encodedPacket
-        )
     }
-}
-
-protocol SCTPDataChannelPacketTransport: Sendable {
-    func send(_ packet: SCTPDataChannelPacket) async throws
 }
 
 actor LocalDataChannelPublisher {
@@ -122,11 +110,20 @@ actor LocalDataChannelPublisher {
         pendingPlans.count
     }
 
+    nonisolated var canReceivePackets: Bool {
+        transport is any SCTPDataChannelPacketTransceiver
+    }
+
+    func streamID(for reliability: SCTPDataChannelReliability) -> UInt16 {
+        ensureLiveKitChannelsInitialized()
+        return manager.ensureLiveKitChannel(for: reliability).streamID
+    }
+
     func publish(_ plan: LocalDataPublishPlan) async throws {
         ensureLiveKitChannelsInitialized()
         let channel = manager.ensureLiveKitChannel(for: plan.reliability)
         if channel.state == .open {
-            try await transport.send(plan.sctpPacket)
+            try await transport.send(channel.binaryPacket(for: plan))
             return
         }
 
@@ -140,9 +137,36 @@ actor LocalDataChannelPublisher {
     }
 
     func acceptControlPacket(_ packet: SCTPDataChannelPacket) async throws {
+        _ = try await acceptInboundPacket(packet)
+    }
+
+    func acceptInboundPacket(_ packet: SCTPDataChannelPacket) async throws -> ReceivedLiveKitDataPacket? {
         ensureLiveKitChannelsInitialized()
+        guard packet.isControl else {
+            return try receivedDataPacket(from: packet)
+        }
+
+        let message = try SCTPDataChannelControlMessage(decoding: packet.payload)
         try manager.acceptControlPacket(packet)
+        if case .open = message,
+           try manager.channel(for: packet.streamID).state == .open {
+            try await transport.send(SCTPDataChannelPacket(
+                streamID: packet.streamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
+            ))
+        }
         try await flushPendingPlans()
+        return nil
+    }
+
+    func receiveInboundPacket() async throws -> ReceivedLiveKitDataPacket? {
+        guard let transceiver = transport as? any SCTPDataChannelPacketTransceiver else {
+            throw LiveKitNativeError.notImplemented("SCTP data channel receive transport")
+        }
+
+        let packet = try await transceiver.receive()
+        return try await acceptInboundPacket(packet)
     }
 
     private func ensureLiveKitChannelsInitialized() {
@@ -175,7 +199,8 @@ actor LocalDataChannelPublisher {
             }
 
             do {
-                try await transport.send(plan.sctpPacket)
+                let channel = manager.ensureLiveKitChannel(for: plan.reliability)
+                try await transport.send(channel.binaryPacket(for: plan))
             } catch {
                 remainingPlans.append(plan)
                 firstError = error
@@ -189,6 +214,25 @@ actor LocalDataChannelPublisher {
         }
     }
 
+    private func receivedDataPacket(from packet: SCTPDataChannelPacket) throws -> ReceivedLiveKitDataPacket {
+        let channel = try manager.channel(for: packet.streamID)
+        guard channel.state == .open else {
+            throw SCTPDataChannelError.channelNotOpen(packet.streamID)
+        }
+
+        let payload: Data
+        switch packet.ppid {
+        case .binary:
+            payload = packet.payload
+        case .binaryEmpty:
+            payload = Data()
+        default:
+            throw LiveKitDataPacketMappingError.unsupportedSCTPPPID(packet.ppid)
+        }
+
+        return try LiveKitDataPacketMapper.decodeUserPacket(from: payload)
+    }
+
     private func isOpen(reliability: SCTPDataChannelReliability) -> Bool {
         manager.ensureLiveKitChannel(for: reliability).state == .open
     }
@@ -199,6 +243,12 @@ actor LocalDataChannelPublisher {
         }
 
         pendingPlans.remove(at: index)
+    }
+}
+
+private extension SCTPDataChannel {
+    func binaryPacket(for plan: LocalDataPublishPlan) throws -> SCTPDataChannelPacket {
+        try makeBinaryPacket(plan.encodedPacket)
     }
 }
 

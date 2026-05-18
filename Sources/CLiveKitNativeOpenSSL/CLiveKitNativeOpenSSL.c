@@ -308,6 +308,61 @@ int lkn_dtls_session_copy_outbound(
     return LKN_DTLS_OK;
 }
 
+int lkn_dtls_session_write_application_data(
+    LKNOpenSSLDTLSSession *session,
+    const uint8_t *data,
+    size_t length
+) {
+    if (session == NULL || session->ssl == NULL || data == NULL || length > INT_MAX) {
+        return LKN_DTLS_FAILED;
+    }
+    if (SSL_is_init_finished(session->ssl) != 1) {
+        return LKN_DTLS_FAILED;
+    }
+
+    int written = SSL_write(session->ssl, data, (int)length);
+    if (written == (int)length) {
+        return LKN_DTLS_OK;
+    }
+
+    int ssl_error = SSL_get_error(session->ssl, written);
+    if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
+        return LKN_DTLS_WANT_READ;
+    }
+
+    lkn_store_error();
+    return LKN_DTLS_FAILED;
+}
+
+int lkn_dtls_session_read_application_data(
+    LKNOpenSSLDTLSSession *session,
+    uint8_t *buffer,
+    size_t capacity,
+    size_t *out_length
+) {
+    if (session == NULL || session->ssl == NULL || buffer == NULL || out_length == NULL || capacity > INT_MAX) {
+        return LKN_DTLS_FAILED;
+    }
+    if (SSL_is_init_finished(session->ssl) != 1) {
+        return LKN_DTLS_FAILED;
+    }
+
+    *out_length = 0;
+    int read_count = SSL_read(session->ssl, buffer, (int)capacity);
+    if (read_count > 0) {
+        *out_length = (size_t)read_count;
+        return LKN_DTLS_OK;
+    }
+
+    int ssl_error = SSL_get_error(session->ssl, read_count);
+    if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE || ssl_error == SSL_ERROR_ZERO_RETURN) {
+        return LKN_DTLS_WANT_READ;
+    }
+
+    lkn_store_error();
+    return LKN_DTLS_FAILED;
+}
+
 int lkn_dtls_session_export_keying_material(
     LKNOpenSSLDTLSSession *session,
     const char *label,

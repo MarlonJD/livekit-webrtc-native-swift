@@ -3880,7 +3880,7 @@ final class RoomConnectTests: XCTestCase {
 
         try await dataChannelPublisher.acceptControlPacket(
             SCTPDataChannelPacket(
-                streamID: LocalDataPublishPlan.reliableStreamID,
+                streamID: await dataChannelPublisher.streamID(for: .reliable),
                 ppid: .dataChannelControl,
                 payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
             )
@@ -3893,6 +3893,57 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(dataPacket.user.topic, "chat")
         XCTAssertEqual(dataPacket.participantSid, "PA_local")
         XCTAssertEqual(dataPacket.participantIdentity, "marlon")
+    }
+
+    func testInboundDataChannelPacketEmitsDataReceivedEvent() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let signalTransport = MockSignalTransport(incomingFrames: frames)
+        let dataTransport = RecordingSCTPDataChannelPacketTransport()
+        let dataChannelPublisher = LocalDataChannelPublisher(transport: dataTransport)
+        let room = Room(
+            signalConnection: SignalConnection(transport: signalTransport),
+            publisherDataChannel: dataChannelPublisher
+        )
+        let eventRecorder = RoomEventRecorder()
+        room.delegate = eventRecorder
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let reliableStreamID = await dataChannelPublisher.streamID(for: .reliable)
+        try await room.acceptDataChannelPacket(
+            SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.open(
+                    SCTPDataChannelOpenMessage(reliability: .reliable, label: LiveKitSCTPDataChannelLabel.reliable)
+                ).encoded()
+            )
+        )
+
+        let packet = LiveKitDataPacketMapper.makeUserPacket(
+            data: Data("hello".utf8),
+            options: DataPublishOptions(reliable: true, topic: "chat"),
+            participantSid: "PA_alice",
+            participantIdentity: "alice"
+        )
+        try await room.acceptDataChannelPacket(
+            SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .binary,
+                payload: try packet.serializedData()
+            )
+        )
+
+        let events = await eventRecorder.waitForEventCount(5)
+        guard case let .dataReceived(payload, participant, topic) = events.last else {
+            return XCTFail("Expected dataReceived event.")
+        }
+        XCTAssertEqual(payload, Data("hello".utf8))
+        XCTAssertEqual(participant?.sid, "PA_alice")
+        XCTAssertEqual(topic, "chat")
+        XCTAssertEqual(dataTransport.sentPackets.last?.ppid, .dataChannelControl)
     }
 
     func testUpdateDataSubscriptionSendsSignalRequest() async throws {

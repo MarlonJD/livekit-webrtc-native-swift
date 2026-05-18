@@ -2,7 +2,10 @@ import Foundation
 
 package enum SCTPDataChannelError: Error, Equatable, Sendable {
     case truncatedControlMessage
+    case truncatedPacketEnvelope
     case invalidControlMessageType(UInt8)
+    case invalidPacketEnvelopePPID(UInt32)
+    case packetEnvelopeLengthMismatch(expected: Int, actual: Int)
     case invalidUTF8
     case duplicateStreamID(UInt16)
     case duplicateLabel(String)
@@ -91,6 +94,14 @@ package struct SCTPDataChannelPacket: Equatable, Sendable {
     package var isControl: Bool {
         ppid == .dataChannelControl
     }
+}
+
+package protocol SCTPDataChannelPacketTransport: Sendable {
+    func send(_ packet: SCTPDataChannelPacket) async throws
+}
+
+package protocol SCTPDataChannelPacketTransceiver: SCTPDataChannelPacketTransport {
+    func receive() async throws -> SCTPDataChannelPacket
 }
 
 package enum SCTPDataChannelControlMessage: Equatable, Sendable {
@@ -343,6 +354,68 @@ package final class SCTPDataChannelManager: @unchecked Sendable {
         }
 
         return nextStreamID
+    }
+}
+
+package struct SCTPDataChannelPacketEnvelopeCodec: Sendable {
+    package init() {}
+
+    package func encode(_ packet: SCTPDataChannelPacket) -> Data {
+        var data = Data()
+        data.append(packet.streamID.bigEndianBytes)
+        data.append(packet.ppid.rawValue.bigEndianBytes)
+        data.append(UInt32(packet.payload.count).bigEndianBytes)
+        data.append(packet.payload)
+        return data
+    }
+
+    package func decode(_ data: Data) throws -> SCTPDataChannelPacket {
+        guard data.count >= 10 else {
+            throw SCTPDataChannelError.truncatedPacketEnvelope
+        }
+
+        let streamID = data.uint16(at: 0)
+        let rawPPID = data.uint32(at: 2)
+        guard let ppid = SCTPDataChannelPPID(rawValue: rawPPID) else {
+            throw SCTPDataChannelError.invalidPacketEnvelopePPID(rawPPID)
+        }
+
+        let payloadLength = Int(data.uint32(at: 6))
+        let actualLength = data.count - 10
+        guard actualLength == payloadLength else {
+            throw SCTPDataChannelError.packetEnvelopeLengthMismatch(
+                expected: payloadLength,
+                actual: actualLength
+            )
+        }
+
+        return SCTPDataChannelPacket(
+            streamID: streamID,
+            ppid: ppid,
+            payload: Data(data.dropFirst(10))
+        )
+    }
+}
+
+package actor DTLSSCTPDataChannelPacketTransport: SCTPDataChannelPacketTransceiver {
+    private let dtlsTransport: OpenSSLDTLSApplicationDataTransport
+    private let codec: SCTPDataChannelPacketEnvelopeCodec
+
+    package init(
+        dtlsTransport: OpenSSLDTLSApplicationDataTransport,
+        codec: SCTPDataChannelPacketEnvelopeCodec = SCTPDataChannelPacketEnvelopeCodec()
+    ) {
+        self.dtlsTransport = dtlsTransport
+        self.codec = codec
+    }
+
+    package func send(_ packet: SCTPDataChannelPacket) async throws {
+        try await dtlsTransport.send(codec.encode(packet))
+    }
+
+    package func receive() async throws -> SCTPDataChannelPacket {
+        let data = try await dtlsTransport.receive()
+        return try codec.decode(data)
     }
 }
 

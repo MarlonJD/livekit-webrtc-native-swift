@@ -234,6 +234,7 @@ public final class Room: @unchecked Sendable {
     private let publisherMediaStartupLock = NSLock()
     private let reconnectSyncStateLock = NSLock()
     private let reconnectSessionDescriptionLock = NSLock()
+    private let dataChannelReceiveLoopLock = NSLock()
     private let eventContinuation: AsyncStream<RoomEvent>.Continuation
     private var signalLoopTask: Task<Void, Never>?
     private var connectionContext: RoomConnectionContext?
@@ -262,6 +263,8 @@ public final class Room: @unchecked Sendable {
     private var publisherRTCPReceiveLoopID: UInt64 = 0
     private var publisherLocalCandidatesGathered = false
     private var publisherLocalCandidates: [ICECandidate] = []
+    private var dataChannelReceiveTask: Task<Void, Never>?
+    private var dataChannelReceiveLoopID: UInt64 = 0
     private var reconnectSubscribedTrackSIDs: Set<String> = []
     private var reconnectDisabledTrackSIDs: Set<String> = []
     private var reconnectSubscriberAnswer: Livekit_SessionDescription?
@@ -374,6 +377,12 @@ public final class Room: @unchecked Sendable {
         }
     }
 
+    var isDataChannelReceiveLoopActive: Bool {
+        dataChannelReceiveLoopLock.withLock {
+            dataChannelReceiveTask != nil
+        }
+    }
+
     func setSubscriberRTCPHandler(_ handler: (@Sendable (RTCPPacket) async -> Void)?) {
         let taskToCancel = subscriberMediaStartupLock.withLock {
             subscriberRTCPHandler = handler
@@ -439,6 +448,16 @@ public final class Room: @unchecked Sendable {
         }
 
         try await transport.sendRTCP(packet)
+    }
+
+    func acceptDataChannelPacket(_ packet: SCTPDataChannelPacket) async throws {
+        guard let publisherDataChannel else {
+            throw LiveKitNativeError.notImplemented("DTLS-backed SCTP data transport")
+        }
+
+        if let received = try await publisherDataChannel.acceptInboundPacket(packet) {
+            await emitDataReceived(received)
+        }
     }
 
     @discardableResult
@@ -568,6 +587,7 @@ public final class Room: @unchecked Sendable {
 
     deinit {
         stopSignalLoop()
+        stopDataChannelReceiveLoop()
         closeMediaStartupTransportDetached(clearSubscriberMediaStartupState())
         closeMediaStartupTransportDetached(clearPublisherMediaStartupState())
         Task { [signalConnection] in
@@ -594,6 +614,7 @@ public final class Room: @unchecked Sendable {
             LiveKitNativeLogging.log(.info, "Room connected.")
         } catch {
             stopSignalLoop()
+            stopDataChannelReceiveLoop()
             await signalConnection.close()
             clearConnectionContext()
             resetPeerConnectionNegotiationState(restartICE: true)
@@ -608,6 +629,7 @@ public final class Room: @unchecked Sendable {
         LiveKitNativeLogging.log(.info, "Disconnecting room.")
 
         stopSignalLoop()
+        stopDataChannelReceiveLoop()
         await sendLeaveIfConnected()
         await transition(to: .disconnecting)
         await signalConnection.close()
@@ -697,6 +719,7 @@ public final class Room: @unchecked Sendable {
         snapshots.replace(with: result.0)
         configureLocalParticipant(result.0.localParticipant)
         emit(.connectionStateChanged(.connected))
+        startDataChannelReceiveLoopIfReady()
 
         for event in result.1 {
             emit(event)
@@ -757,6 +780,40 @@ public final class Room: @unchecked Sendable {
             return previousTask
         }
         previousTask?.cancel()
+    }
+
+    private func startDataChannelReceiveLoopIfReady() {
+        guard let publisherDataChannel else {
+            return
+        }
+        guard publisherDataChannel.canReceivePackets else {
+            return
+        }
+
+        dataChannelReceiveLoopLock.withLock {
+            guard dataChannelReceiveTask == nil else {
+                return
+            }
+
+            dataChannelReceiveLoopID &+= 1
+            let loopID = dataChannelReceiveLoopID
+            dataChannelReceiveTask = Task { [weak self, publisherDataChannel] in
+                await self?.runDataChannelReceiveLoop(
+                    publisherDataChannel: publisherDataChannel,
+                    loopID: loopID
+                )
+            }
+        }
+    }
+
+    private func stopDataChannelReceiveLoop() {
+        let task = dataChannelReceiveLoopLock.withLock {
+            let task = dataChannelReceiveTask
+            dataChannelReceiveTask = nil
+            dataChannelReceiveLoopID &+= 1
+            return task
+        }
+        task?.cancel()
     }
 
     private func applySignalResponse(_ response: Livekit_SignalResponse) async throws -> Bool {
@@ -2191,6 +2248,34 @@ public final class Room: @unchecked Sendable {
         }
     }
 
+    private func runDataChannelReceiveLoop(
+        publisherDataChannel: LocalDataChannelPublisher,
+        loopID: UInt64
+    ) async {
+        defer {
+            clearDataChannelReceiveTask(loopID: loopID)
+        }
+
+        while !Task.isCancelled {
+            do {
+                if let packet = try await publisherDataChannel.receiveInboundPacket() {
+                    await emitDataReceived(packet)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                if !Task.isCancelled {
+                    LiveKitNativeLogging.log(.error, "Data channel receive loop stopped: \(error.localizedDescription)")
+                }
+                return
+            }
+        }
+    }
+
+    private func emitDataReceived(_ packet: ReceivedLiveKitDataPacket) async {
+        emit(await actor.dataEvent(for: packet))
+    }
+
     private func isRecoverablePublisherRTCPReceiveError(_ error: any Error) -> Bool {
         guard case let SecureMediaTransportError.socketReceiveFailed(code) = error else {
             return false
@@ -2234,6 +2319,15 @@ public final class Room: @unchecked Sendable {
                 return
             }
             subscriberRTCPReceiveTask = nil
+        }
+    }
+
+    private func clearDataChannelReceiveTask(loopID: UInt64) {
+        dataChannelReceiveLoopLock.withLock {
+            guard dataChannelReceiveLoopID == loopID else {
+                return
+            }
+            dataChannelReceiveTask = nil
         }
     }
 

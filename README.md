@@ -220,8 +220,9 @@ channels, binary PPID envelopes, LiveKit `DataPacket` user-packet mapping,
 `publish(data:options:)` local publish planning, data-track publish/unpublish
 request/response signaling, data subscription update signaling, queued local
 data publish flushing through an injected SCTP packet transport after
-reliable/lossy DCEP acknowledgement, and
-`RoomEvent.dataReceived` mapping for decoded packets.
+reliable/lossy DCEP acknowledgement, inbound remote DCEP acknowledgement,
+inbound `DataPacket` decode to `RoomEvent.dataReceived`, and OpenSSL DTLS
+application-data packet transport coverage.
 Media section requirements and data-track subscriber handles are retained as
 latest-value Room state and emitted as typed room events.
 
@@ -229,7 +230,8 @@ The active implementation focus is now `1.0.0` hardening: validating the
 OpenSSL-backed DTLS-SRTP `use_srtp` handshake/exporter against LiveKit,
 completing default live secure media transport, reconnect, TURN, quality
 controls, default capture/encode startup into the tested RTP sender bridge,
-DTLS-SCTP network transport, integration apps, and size gates.
+standards-compliant DTLS-SCTP association behavior, integration apps, and size
+gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -298,11 +300,13 @@ publish/unpublish request flows, and server/SFU media/data-track unpublish clean
 for reconnect state, injected publisher transport teardown, consent-freshness
 execution primitives plus the media-startup consent loop, RTP jitter-buffer
 primitives, default socket-backed Room ICE trickle startup, queued data publish
-flush after data-channel DCEP ack, and matching `RequestResponse` failure
+flush after data-channel DCEP ack, inbound data-channel event plumbing, DTLS
+application-data packet transport, and matching `RequestResponse` failure
 mapping are unit-tested, while real default secure media transport completion,
-default live consent execution after DTLS, live DTLS-backed SCTP association,
-subscriber jitter-buffer integration, capture/encode loop startup, media
-recovery, and end-to-end reconnect hardening are still open.
+default live consent execution after DTLS, standards-compliant live SCTP
+association behavior, subscriber jitter-buffer integration, capture/encode
+loop startup, media recovery, and end-to-end reconnect hardening are still
+open.
 
 ## Benchmarks
 
@@ -352,8 +356,9 @@ binary size proxy. The strict gate additionally requires
 `LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
 That strict gate intentionally fails today because LiveKit E2E secure RTP/RTCP
 verification, full ICE/TURN hardening, publisher capture/encode startup,
-subscriber-pipeline RTCP feedback dispatch, live SCTP, Apple-platform OpenSSL
-packaging validation, and end-to-end LiveKit tests are still open.
+subscriber-pipeline RTCP feedback dispatch, standards-compliant live SCTP,
+Apple-platform OpenSSL packaging validation, and end-to-end LiveKit tests are
+still open.
 
 ## Requirements
 

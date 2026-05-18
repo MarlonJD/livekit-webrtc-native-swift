@@ -43,6 +43,17 @@ int lkn_dtls_session_copy_outbound(
     size_t capacity,
     size_t *out_length
 );
+int lkn_dtls_session_write_application_data(
+    LKNOpenSSLDTLSSession *session,
+    const uint8_t *data,
+    size_t length
+);
+int lkn_dtls_session_read_application_data(
+    LKNOpenSSLDTLSSession *session,
+    uint8_t *buffer,
+    size_t capacity,
+    size_t *out_length
+);
 int lkn_dtls_session_export_keying_material(
     LKNOpenSSLDTLSSession *session,
     const char *label,

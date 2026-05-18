@@ -69,4 +69,24 @@ final class SCTPDataChannelTests: XCTestCase {
             XCTAssertEqual(error as? SCTPDataChannelError, .channelNotOpen(0))
         }
     }
+
+    func testPacketEnvelopeCodecRoundTripsStreamPPIDAndPayload() throws {
+        let codec = SCTPDataChannelPacketEnvelopeCodec()
+        let packet = SCTPDataChannelPacket(
+            streamID: 3,
+            ppid: .binary,
+            payload: Data([0x01, 0x02, 0x03])
+        )
+
+        let encoded = codec.encode(packet)
+        let decoded = try codec.decode(encoded)
+
+        XCTAssertEqual(decoded, packet)
+    }
+
+    func testPacketEnvelopeCodecRejectsTruncatedEnvelope() {
+        XCTAssertThrowsError(try SCTPDataChannelPacketEnvelopeCodec().decode(Data([0x00, 0x01]))) { error in
+            XCTAssertEqual(error as? SCTPDataChannelError, .truncatedPacketEnvelope)
+        }
+    }
 }
