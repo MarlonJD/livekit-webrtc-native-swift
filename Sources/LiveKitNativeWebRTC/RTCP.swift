@@ -564,15 +564,12 @@ private extension Data {
             throw RTCPError.invalidLength
         }
 
-        let first = index(startIndex, offsetBy: offset)
-        let second = index(after: first)
-        let third = index(after: second)
-        let fourth = index(after: third)
-
-        return UInt32(self[first]) << 24 |
-            UInt32(self[second]) << 16 |
-            UInt32(self[third]) << 8 |
-            UInt32(self[fourth])
+        var value: UInt32 = 0
+        for byteOffset in 0..<4 {
+            let byteIndex = index(startIndex, offsetBy: offset + byteOffset)
+            value = (value << 8) | UInt32(self[byteIndex])
+        }
+        return value
     }
 
     func networkUInt64(at offset: Int) throws -> UInt64 {
@@ -580,22 +577,11 @@ private extension Data {
             throw RTCPError.invalidLength
         }
 
-        let first = index(startIndex, offsetBy: offset)
-        let second = index(after: first)
-        let third = index(after: second)
-        let fourth = index(after: third)
-        let fifth = index(after: fourth)
-        let sixth = index(after: fifth)
-        let seventh = index(after: sixth)
-        let eighth = index(after: seventh)
-
-        return UInt64(self[first]) << 56 |
-            UInt64(self[second]) << 48 |
-            UInt64(self[third]) << 40 |
-            UInt64(self[fourth]) << 32 |
-            UInt64(self[fifth]) << 24 |
-            UInt64(self[sixth]) << 16 |
-            UInt64(self[seventh]) << 8 |
-            UInt64(self[eighth])
+        var value: UInt64 = 0
+        for byteOffset in 0..<8 {
+            let byteIndex = index(startIndex, offsetBy: offset + byteOffset)
+            value = (value << 8) | UInt64(self[byteIndex])
+        }
+        return value
     }
 }
