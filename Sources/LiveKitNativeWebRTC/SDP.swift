@@ -136,6 +136,12 @@ package struct SDPSessionDescription: Equatable, Sendable {
         }
     }
 
+    package var containsApplicationMedia: Bool {
+        mediaSections.contains { section in
+            section.mediaLine.hasPrefix("application ")
+        }
+    }
+
     package func serialized() -> String {
         lines.map(\.serialized).joined(separator: "\r\n") + "\r\n"
     }

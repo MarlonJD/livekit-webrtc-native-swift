@@ -31,6 +31,8 @@ final class SDPTests: XCTestCase {
         XCTAssertEqual(description.mediaSections[1].codecNames, ["H264", "VP8"])
         XCTAssertTrue(description.mediaSections[0].hasRTCPMux)
         XCTAssertTrue(description.mediaSections[1].hasRTCPMux)
+        XCTAssertTrue(description.containsRTPMedia)
+        XCTAssertTrue(description.containsApplicationMedia)
     }
 
     func testSerializesWithCRLFTerminator() throws {

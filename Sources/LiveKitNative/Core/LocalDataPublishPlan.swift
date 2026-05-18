@@ -94,16 +94,19 @@ struct LocalDataPublishPlan: Equatable, Sendable {
 actor LocalDataChannelPublisher {
     private let manager: SCTPDataChannelManager
     private let transport: any SCTPDataChannelPacketTransport
+    private let optimisticallyOpenLocalChannels: Bool
     private var openedChannelStreamIDs: Set<UInt16> = []
     private var pendingPlans: [LocalDataPublishPlan] = []
     private var liveKitChannelsInitialized = false
 
     init(
         manager: SCTPDataChannelManager = SCTPDataChannelManager(),
-        transport: any SCTPDataChannelPacketTransport
+        transport: any SCTPDataChannelPacketTransport,
+        optimisticallyOpenLocalChannels: Bool = false
     ) {
         self.manager = manager
         self.transport = transport
+        self.optimisticallyOpenLocalChannels = optimisticallyOpenLocalChannels
     }
 
     var pendingPlanCount: Int {
@@ -119,6 +122,11 @@ actor LocalDataChannelPublisher {
         return manager.ensureLiveKitChannel(for: reliability).streamID
     }
 
+    func hasOpenChannel(for reliability: SCTPDataChannelReliability) -> Bool {
+        ensureLiveKitChannelsInitialized()
+        return isOpen(reliability: reliability)
+    }
+
     func publish(_ plan: LocalDataPublishPlan) async throws {
         ensureLiveKitChannelsInitialized()
         let channel = manager.ensureLiveKitChannel(for: plan.reliability)
@@ -130,6 +138,10 @@ actor LocalDataChannelPublisher {
         pendingPlans.append(plan)
         do {
             try await sendOpenIfNeeded(channel)
+            if optimisticallyOpenLocalChannels {
+                channel.acceptAcknowledgement()
+                try await flushPendingPlans()
+            }
         } catch {
             removePendingPlan(plan)
             throw error

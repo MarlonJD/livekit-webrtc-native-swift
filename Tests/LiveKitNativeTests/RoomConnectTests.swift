@@ -1114,7 +1114,7 @@ final class RoomConnectTests: XCTestCase {
         }
         XCTAssertEqual(finalTrickle.target, .subscriber)
         XCTAssertTrue(finalTrickle.final)
-        XCTAssertTrue(finalTrickle.candidateInit.isEmpty)
+        XCTAssertEqual(finalTrickle.candidateInit, "{}")
     }
 
     func testSignalLoopPassesJoinICEServersToSubscriberLocalCandidateGathering() async throws {
@@ -1302,7 +1302,7 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(configuration.mediaDataBinder?.dataChannelTransportMode, dataChannelMode)
     }
 
-    func testSubscriberMediaStartupWaitsForRTPMediaWhenInitialOfferIsDataOnly() async throws {
+    func testSubscriberMediaStartupWaitsForRTPMediaWhenInitialOfferIsDataOnlyWithoutMediaDataBinder() async throws {
         let frames = try [
             makeJoinResponse(),
             makeSubscriberDataOnlyOfferResponse(),
@@ -1344,11 +1344,71 @@ final class RoomConnectTests: XCTestCase {
                         )
                     )
                 ),
+                inboundSTUNResponder: { credentials in
+                    inboundSTUNRecorder.record(credentials)
+                    return Task {}
+                },
+                consentFreshnessPolicy: .disabled
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        _ = await waitForSentFrameCount(3, transport: transport)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertNil(checker.capturedConfiguration)
+        XCTAssertNil(room.lastSubscriberMediaStartupResult)
+        XCTAssertNil(room.lastSubscriberMediaStartupError)
+        XCTAssertNil(inboundSTUNRecorder.credentials)
+    }
+
+    func testSubscriberMediaStartupWaitsForRTPMediaWhenDataOnlyOfferHasMediaDataBinderButDataAutoSubscribeDisabled() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeSubscriberDataOnlyOfferResponse(),
+            makeSubscriberTrickleResponse(),
+            makeSubscriberTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let localCandidate = ICECandidate(
+            foundation: "subscriber-local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.11",
+            port: 55001,
+            type: .host
+        )
+        let checker = RoomMediaStartupICEChecker()
+        let inboundSTUNRecorder = SubscriberInboundSTUNResponderRecorder()
+        let datagramFactory = RoomMediaStartupDatagramTransportFactory(
+            transport: RoomMediaStartupDatagramTransport()
+        )
+        let subscriberPeerConnection = PeerConnectionCoordinator(
+            configuration: NativeWebRTCConfiguration(role: .subscriber)
+        )
+        let room = Room(
+            options: RoomOptions(defaultAutoSubscribeDataTrack: false),
+            signalConnection: SignalConnection(transport: transport),
+            subscriberPeerConnection: subscriberPeerConnection,
+            subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 43,
+                checker: checker,
+                binder: DTLSSRTPMediaSessionBinder(
+                    datagramTransportFactory: datagramFactory,
+                    handshaker: RoomMediaStartupDTLSHandshaker(
+                        result: try DTLSSRTPHandshakeResult(
+                            role: .client,
+                            exportedKeyingMaterial: roomMediaStartupExportedKeyingMaterial(),
+                            remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "DD:EE:FF")
+                        )
+                    )
+                ),
                 mediaDataBinder: DTLSSRTPMediaDataSessionBinder(
-                    datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(
-                        transport: RoomMediaStartupDatagramTransport()
-                    ),
-                    receiveAttemptLimit: 1
+                    datagramTransportFactory: datagramFactory,
+                    identity: .generated()
                 ),
                 inboundSTUNResponder: { credentials in
                     inboundSTUNRecorder.record(credentials)
@@ -1365,10 +1425,7 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertNil(checker.capturedConfiguration)
         XCTAssertNil(room.lastSubscriberMediaStartupResult)
         XCTAssertNil(room.lastSubscriberMediaStartupError)
-        XCTAssertEqual(
-            inboundSTUNRecorder.credentials?.usernameFragment,
-            subscriberPeerConnection.configuration.iceCredentials.usernameFragment
-        )
+        XCTAssertNil(inboundSTUNRecorder.credentials)
     }
 
     func testDefaultLiveSubscriberMediaStartupFailsAtUnavailableDTLSSRTPBoundaryAfterSelectedICEPair() async throws {
@@ -1549,6 +1606,58 @@ final class RoomConnectTests: XCTestCase {
             value: "DD:EE:FF"
         ))
         XCTAssertEqual(datagramFactory.capturedPair?.remote.foundation, "1")
+    }
+
+    func testSignalLoopRestartsPendingSubscriberMediaStartupWhenUpdatedOfferArrives() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makeSubscriberOfferResponse(),
+            makeSubscriberTrickleResponse(),
+            makeSubscriberTrickleCompleteResponse(),
+            makeSubscriberOfferResponse(),
+            makeSubscriberTrickleResponse(),
+            makeSubscriberTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let localCandidate = ICECandidate(
+            foundation: "subscriber-local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.11",
+            port: 55001,
+            type: .host
+        )
+        let checker = RoomMediaStartupICEChecker()
+        let handshaker = SuspendingRoomMediaStartupDTLSHandshaker()
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(
+                transport: RoomMediaStartupDatagramTransport()
+            ),
+            handshaker: handshaker
+        )
+        let subscriberPeerConnection = PeerConnectionCoordinator(
+            configuration: NativeWebRTCConfiguration(role: .subscriber)
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            subscriberPeerConnection: subscriberPeerConnection,
+            subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 43,
+                checker: checker,
+                binder: binder,
+                consentFreshnessPolicy: .disabled
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let handshakeCount = await handshaker.waitForCallCount(2)
+        XCTAssertEqual(handshakeCount, 2)
+        XCTAssertNil(room.lastSubscriberMediaStartupResult)
+        await room.disconnect()
     }
 
     func testSignalLoopStartsPublisherMediaTransportAfterAnswerAndFinalTrickle() async throws {
@@ -3637,7 +3746,7 @@ final class RoomConnectTests: XCTestCase {
         }
         XCTAssertEqual(finalTrickle.target, .publisher)
         XCTAssertTrue(finalTrickle.final)
-        XCTAssertTrue(finalTrickle.candidateInit.isEmpty)
+        XCTAssertEqual(finalTrickle.candidateInit, "{}")
 
         _ = try await publishTask.value
     }
@@ -4544,6 +4653,53 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(dataPacket.user.topic, "chat")
         XCTAssertEqual(dataPacket.participantSid, "PA_local")
         XCTAssertEqual(dataPacket.participantIdentity, "marlon")
+    }
+
+    func testPublishDataUsesPublisherDataChannelWhenSubscriberDataChannelIsOpen() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let signalTransport = MockSignalTransport(incomingFrames: frames)
+        let publisherTransport = RecordingSCTPDataChannelPacketTransport()
+        let subscriberTransport = RecordingSCTPDataChannelPacketTransport()
+        let subscriberDataChannel = LocalDataChannelPublisher(transport: subscriberTransport)
+        let room = Room(
+            signalConnection: SignalConnection(transport: signalTransport),
+            publisherDataChannel: LocalDataChannelPublisher(
+                transport: publisherTransport,
+                optimisticallyOpenLocalChannels: true
+            ),
+            subscriberDataChannel: subscriberDataChannel
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let reliableStreamID = await subscriberDataChannel.streamID(for: .reliable)
+        try await subscriberDataChannel.acceptControlPacket(
+            SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.open(
+                    SCTPDataChannelOpenMessage(reliability: .reliable, label: LiveKitSCTPDataChannelLabel.reliable)
+                ).encoded()
+            )
+        )
+
+        try await room.localParticipant.publish(
+            data: Data("hello".utf8),
+            options: DataPublishOptions(reliable: true, topic: "chat")
+        )
+
+        XCTAssertEqual(subscriberTransport.sentPackets.count, 1)
+        XCTAssertEqual(subscriberTransport.sentPackets[0].ppid, .dataChannelControl)
+        XCTAssertEqual(publisherTransport.sentPackets.count, 2)
+        XCTAssertEqual(publisherTransport.sentPackets[0].ppid, .dataChannelControl)
+        XCTAssertEqual(publisherTransport.sentPackets[1].ppid, .binary)
+
+        let dataPacket = try Livekit_DataPacket(serializedBytes: publisherTransport.sentPackets[1].payload)
+        XCTAssertEqual(dataPacket.kind, .reliable)
+        XCTAssertEqual(dataPacket.user.payload, Data("hello".utf8))
+        XCTAssertEqual(dataPacket.user.topic, "chat")
     }
 
     func testReconnectResetsInjectedDataChannelBeforeNextPublish() async throws {
@@ -6551,6 +6707,39 @@ private final class RoomMediaStartupDTLSHandshaker: DTLSSRTPHandshaking, @unchec
             mutableCapturedConfiguration = configuration
         }
         return result
+    }
+}
+
+private final class SuspendingRoomMediaStartupDTLSHandshaker: DTLSSRTPHandshaking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var mutableCallCount = 0
+
+    func waitForCallCount(_ expectedCount: Int, attempts: Int = 100) async -> Int {
+        for _ in 0..<attempts {
+            let count = lock.withLock {
+                mutableCallCount
+            }
+            if count >= expectedCount {
+                return count
+            }
+
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        return lock.withLock {
+            mutableCallCount
+        }
+    }
+
+    func performHandshake(
+        configuration _: DTLSSRTPHandshakeConfiguration,
+        transport _: any MediaDatagramTransport
+    ) async throws -> DTLSSRTPHandshakeResult {
+        lock.withLock {
+            mutableCallCount += 1
+        }
+        try await Task.sleep(nanoseconds: 60_000_000_000)
+        throw CancellationError()
     }
 }
 

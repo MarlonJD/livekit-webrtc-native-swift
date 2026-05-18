@@ -174,8 +174,14 @@ final class IntegrationOptInTests: XCTestCase {
         let roomName = harness.roomName(suffix: "data-packet")
         let subscriberIdentity = "swift-native-data-packet-sub"
         let publisherIdentity = "swift-native-data-packet-pub"
-        let subscriberRoom = liveIntegrationMediaDataRoom()
-        let publisherRoom = liveIntegrationMediaDataRoom()
+        let subscriberRoom = liveIntegrationMediaDataRoom(
+            liveKitURL: harness.liveKitURL,
+            options: liveIntegrationMediaDataPacketOptions()
+        )
+        let publisherRoom = liveIntegrationMediaDataRoom(
+            liveKitURL: harness.liveKitURL,
+            options: liveIntegrationMediaDataPacketOptions()
+        )
         let subscriberEvents = LiveKitIntegrationEventRecorder()
         subscriberRoom.delegate = subscriberEvents
 
@@ -188,6 +194,8 @@ final class IntegrationOptInTests: XCTestCase {
             let videoPublication = try await withLiveKitIntegrationTimeout(seconds: 20) {
                 try await publisherRoom.localParticipant.publish(videoTrack: videoTrack)
             }
+            _ = try await harness.waitForPublisherMediaStartup(publisherRoom, timeoutSeconds: 30)
+
             _ = try await subscriberEvents.waitForTrackSubscribedOrRemoteVideoPublication(
                 publisherIdentity: publisherIdentity,
                 trackSID: videoPublication.sid,
@@ -195,7 +203,6 @@ final class IntegrationOptInTests: XCTestCase {
             )
             try await subscriberRoom.updateSubscription(trackSIDs: [videoPublication.sid], subscribe: true)
 
-            _ = try await harness.waitForPublisherMediaStartup(publisherRoom, timeoutSeconds: 30)
             _ = try await harness.waitForSubscriberMediaStartup(subscriberRoom, timeoutSeconds: 30)
 
             let payload = Data("standards-sctp-ping".utf8)
@@ -242,9 +249,23 @@ private func liveIntegrationSignalingRoom() -> Room {
     )
 }
 
-private func liveIntegrationMediaDataRoom() -> Room {
+private func liveIntegrationMediaDataPacketOptions() -> RoomOptions {
+    RoomOptions(
+        defaultAutoSubscribe: false,
+        defaultAdaptiveStream: true,
+        defaultSubscriberAllowPause: true,
+        defaultAutoSubscribeDataTrack: false
+    )
+}
+
+private func liveIntegrationMediaDataRoom(
+    liveKitURL: URL,
+    options: RoomOptions = liveIntegrationRoomOptions()
+) -> Room {
     let subscriberIdentity = DTLSSRTPIdentity.generated()
     let publisherIdentity = DTLSSRTPIdentity.generated()
+    let hostCandidateAddresses = liveIntegrationHostCandidateAddresses(for: liveKitURL)
+    let bindAddress = liveIntegrationBindAddress(for: liveKitURL)
     let subscriberPeerConnection = PeerConnectionCoordinator(
         configuration: NativeWebRTCConfiguration(
             role: .subscriber,
@@ -258,11 +279,13 @@ private func liveIntegrationMediaDataRoom() -> Room {
         )
     )
     return Room(
-        options: liveIntegrationRoomOptions(),
+        options: options,
         signalConnection: SignalConnection(),
         subscriberPeerConnection: subscriberPeerConnection,
         publisherPeerConnection: publisherPeerConnection,
         subscriberMediaStartupConfiguration: .defaultLiveMediaData(
+            hostCandidateAddresses: { hostCandidateAddresses },
+            bindAddress: bindAddress,
             localCredentials: {
                 subscriberPeerConnection.configuration.iceCredentials
             },
@@ -270,6 +293,8 @@ private func liveIntegrationMediaDataRoom() -> Room {
             dataChannelTransportMode: liveIntegrationStandardsSCTPMode()
         ),
         publisherMediaStartupConfiguration: .defaultLiveMediaData(
+            hostCandidateAddresses: { hostCandidateAddresses },
+            bindAddress: bindAddress,
             localCredentials: {
                 publisherPeerConnection.configuration.iceCredentials
             },
@@ -281,4 +306,20 @@ private func liveIntegrationMediaDataRoom() -> Room {
 
 private func liveIntegrationStandardsSCTPMode() -> DTLSSCTPDataChannelTransportMode {
     .association(SCTPAssociationConfiguration(maxDataChunkPayloadSize: 1_200))
+}
+
+private func liveIntegrationHostCandidateAddresses(for liveKitURL: URL) -> [ICEInterfaceAddress] {
+    guard let host = liveKitURL.host?.lowercased(),
+          ["localhost", "127.0.0.1"].contains(host)
+    else {
+        return ICEHostCandidateGatherer.localInterfaceAddresses()
+    }
+
+    return [
+        ICEInterfaceAddress(name: "lo0", address: "127.0.0.1", localPreference: 101),
+    ]
+}
+
+private func liveIntegrationBindAddress(for _: URL) -> String {
+    "0.0.0.0"
 }

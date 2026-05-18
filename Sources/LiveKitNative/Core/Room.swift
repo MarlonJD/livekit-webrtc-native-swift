@@ -314,6 +314,9 @@ private final class DefaultRoomMediaStartupLocalCandidateProvider: @unchecked Se
 }
 
 public final class Room: @unchecked Sendable {
+    private static let mediaStartupSelectedPairRetryLimit = 300
+    private static let mediaStartupSelectedPairRetryDelayNanoseconds: UInt64 = 100_000_000
+
     public weak var delegate: (any RoomDelegate)?
     public let events: AsyncStream<RoomEvent>
 
@@ -362,6 +365,7 @@ public final class Room: @unchecked Sendable {
     private var subscriberMediaStartupTask: Task<Void, Never>?
     private var subscriberMediaStartupResult: PeerConnectionMediaStartupResult?
     private var subscriberMediaStartupError: (any Error)?
+    private var subscriberMediaStartupSelectedPairRetryCount = 0
     private var subscriberInboundSTUNResponderTask: Task<Void, Never>?
     private var subscriberICEConsentFreshnessTask: Task<Void, Never>?
     private var subscriberRTCPHandler: (@Sendable (RTCPPacket) async -> Void)?
@@ -375,6 +379,7 @@ public final class Room: @unchecked Sendable {
     private var publisherMediaStartupTask: Task<Void, Never>?
     private var publisherMediaStartupResult: PeerConnectionMediaStartupResult?
     private var publisherMediaStartupError: (any Error)?
+    private var publisherMediaStartupSelectedPairRetryCount = 0
     private var publisherICEConsentFreshnessTask: Task<Void, Never>?
     private var publisherRTCPHandler: (@Sendable (RTCPPacket) async -> Void)?
     private var publisherRTCPReceiveTask: Task<Void, Never>?
@@ -1504,6 +1509,7 @@ public final class Room: @unchecked Sendable {
         storeReconnectSubscriberOffer(offer)
         storeReconnectSubscriberAnswer(answer)
         try await sendSubscriberLocalICETrickleCandidates()
+        resetPendingSubscriberMediaStartupForUpdatedRemoteDescription()
         startSubscriberMediaTransportIfReady()
     }
 
@@ -1701,11 +1707,16 @@ public final class Room: @unchecked Sendable {
     }
 
     private func sendPublisherData(_ plan: LocalDataPublishPlan) async throws {
-        guard let publisherDataChannel else {
+        if let publisherDataChannel {
+            try await publisherDataChannel.publish(plan)
+            return
+        }
+
+        guard let subscriberDataChannel else {
             throw LiveKitNativeError.notImplemented("DTLS-backed SCTP data transport")
         }
 
-        try await publisherDataChannel.publish(plan)
+        try await subscriberDataChannel.publish(plan)
     }
 
     private func sendUnpublishDataTrack(_ plan: LocalDataTrackPublishPlan) async throws -> DataTrackInfo {
@@ -2455,17 +2466,20 @@ public final class Room: @unchecked Sendable {
         }
 
         let localCandidates = subscriberLocalICECandidates()
-        guard subscriberPeerConnection.remoteDescriptionContainsRTPMedia else {
-            startSubscriberInboundSTUNResponderIfNeeded(
-                configuration: subscriberMediaStartupConfiguration
+        let hasSubscriberMediaPath = subscriberPeerConnection.remoteDescriptionContainsRTPMedia ||
+            (
+                subscriberMediaStartupConfiguration.mediaDataBinder != nil &&
+                subscriberPeerConnection.remoteDescriptionContainsApplicationMedia &&
+                shouldStartSubscriberApplicationMediaTransport()
             )
+        guard hasSubscriberMediaPath else {
             return
         }
 
         guard !localCandidates.isEmpty else {
-            storeSubscriberMediaStartupError(
-                PeerConnectionNegotiationError.missingSelectedICECandidatePair
-            )
+            if handleSubscriberMediaStartupFailure(PeerConnectionNegotiationError.missingSelectedICECandidatePair) {
+                scheduleSubscriberMediaTransportRetry()
+            }
             return
         }
 
@@ -2503,8 +2517,15 @@ public final class Room: @unchecked Sendable {
                 self?.storeSubscriberMediaStartupResult(result)
                 LiveKitNativeLogging.log(.info, "Subscriber media transport started.")
             } catch {
-                self?.storeSubscriberMediaStartupError(error)
-                LiveKitNativeLogging.log(.error, "Subscriber media transport startup failed: \(error.localizedDescription)")
+                guard let self else {
+                    return
+                }
+                if self.handleSubscriberMediaStartupFailure(error) {
+                    self.scheduleSubscriberMediaTransportRetry()
+                    LiveKitNativeLogging.log(.debug, "Subscriber media transport startup waiting for selected ICE candidate pair.")
+                } else {
+                    LiveKitNativeLogging.log(.error, "Subscriber media transport startup failed: \(error.localizedDescription)")
+                }
             }
         }
 
@@ -2538,9 +2559,9 @@ public final class Room: @unchecked Sendable {
 
         let localCandidates = publisherLocalICECandidates()
         guard !localCandidates.isEmpty else {
-            storePublisherMediaStartupError(
-                PeerConnectionNegotiationError.missingSelectedICECandidatePair
-            )
+            if handlePublisherMediaStartupFailure(PeerConnectionNegotiationError.missingSelectedICECandidatePair) {
+                schedulePublisherMediaTransportRetry()
+            }
             return
         }
 
@@ -2558,8 +2579,15 @@ public final class Room: @unchecked Sendable {
                 self?.storePublisherMediaStartupResult(result)
                 LiveKitNativeLogging.log(.info, "Publisher media transport started.")
             } catch {
-                self?.storePublisherMediaStartupError(error)
-                LiveKitNativeLogging.log(.error, "Publisher media transport startup failed: \(error.localizedDescription)")
+                guard let self else {
+                    return
+                }
+                if self.handlePublisherMediaStartupFailure(error) {
+                    self.schedulePublisherMediaTransportRetry()
+                    LiveKitNativeLogging.log(.debug, "Publisher media transport startup waiting for selected ICE candidate pair.")
+                } else {
+                    LiveKitNativeLogging.log(.error, "Publisher media transport startup failed: \(error.localizedDescription)")
+                }
             }
         }
 
@@ -2572,6 +2600,7 @@ public final class Room: @unchecked Sendable {
         publisherMediaStartupLock.withLock {
             publisherMediaStartupResult = result
             publisherMediaStartupError = nil
+            publisherMediaStartupSelectedPairRetryCount = 0
         }
         installPublisherDataChannelIfAvailable(from: result)
         startPublisherICEConsentFreshnessLoopIfReady(result: result)
@@ -2583,6 +2612,7 @@ public final class Room: @unchecked Sendable {
         subscriberMediaStartupLock.withLock {
             subscriberMediaStartupResult = result
             subscriberMediaStartupError = nil
+            subscriberMediaStartupSelectedPairRetryCount = 0
         }
         installSubscriberDataChannelIfAvailable(from: result)
         startSubscriberICEConsentFreshnessLoopIfReady(result: result)
@@ -2591,15 +2621,96 @@ public final class Room: @unchecked Sendable {
     }
 
     private func storePublisherMediaStartupError(_ error: any Error) {
-        publisherMediaStartupLock.withLock {
-            publisherMediaStartupError = error
-        }
+        _ = handlePublisherMediaStartupFailure(error)
     }
 
     private func storeSubscriberMediaStartupError(_ error: any Error) {
+        _ = handleSubscriberMediaStartupFailure(error)
+    }
+
+    @discardableResult
+    private func handleSubscriberMediaStartupFailure(_ error: any Error) -> Bool {
         subscriberMediaStartupLock.withLock {
-            subscriberMediaStartupError = error
+            subscriberMediaStartupTask = nil
+            guard Self.isRetryableMediaStartupError(error),
+                  subscriberMediaStartupSelectedPairRetryCount < Self.mediaStartupSelectedPairRetryLimit
+            else {
+                subscriberMediaStartupError = error
+                return false
+            }
+
+            subscriberMediaStartupStarted = false
+            subscriberMediaStartupError = nil
+            subscriberMediaStartupSelectedPairRetryCount += 1
+            return true
         }
+    }
+
+    @discardableResult
+    private func handlePublisherMediaStartupFailure(_ error: any Error) -> Bool {
+        publisherMediaStartupLock.withLock {
+            publisherMediaStartupTask = nil
+            guard Self.isRetryableMediaStartupError(error),
+                  publisherMediaStartupSelectedPairRetryCount < Self.mediaStartupSelectedPairRetryLimit
+            else {
+                publisherMediaStartupError = error
+                return false
+            }
+
+            publisherMediaStartupStarted = false
+            publisherMediaStartupError = nil
+            publisherMediaStartupSelectedPairRetryCount += 1
+            return true
+        }
+    }
+
+    private func scheduleSubscriberMediaTransportRetry() {
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.mediaStartupSelectedPairRetryDelayNanoseconds)
+            self?.startSubscriberMediaTransportIfReady()
+        }
+    }
+
+    private func schedulePublisherMediaTransportRetry() {
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.mediaStartupSelectedPairRetryDelayNanoseconds)
+            self?.startPublisherMediaTransportIfReady()
+        }
+    }
+
+    private func resetPendingSubscriberMediaStartupForUpdatedRemoteDescription() {
+        let task = subscriberMediaStartupLock.withLock {
+            guard subscriberMediaStartupResult == nil,
+                  subscriberMediaStartupStarted || subscriberMediaStartupError != nil
+            else {
+                return nil as Task<Void, Never>?
+            }
+
+            let task = subscriberMediaStartupTask
+            subscriberMediaStartupStarted = false
+            subscriberMediaStartupTask = nil
+            subscriberMediaStartupError = nil
+            return task
+        }
+        task?.cancel()
+    }
+
+    private func shouldStartSubscriberApplicationMediaTransport() -> Bool {
+        currentConnectionContext()?.connectOptions.autoSubscribeDataTrack == true ||
+            dataTrackSubscriberHandles != nil
+    }
+
+    private static func isRetryableMediaStartupError(_ error: any Error) -> Bool {
+        (error as? PeerConnectionNegotiationError) == .missingSelectedICECandidatePair ||
+            isRecoverableSocketReceiveError(error)
+    }
+
+    private static func isRecoverableSocketReceiveError(_ error: any Error) -> Bool {
+        guard case let SecureMediaTransportError.socketReceiveFailed(code) = error else {
+            return false
+        }
+
+        return code == EAGAIN || code == EWOULDBLOCK
     }
 
     private func startSubscriberInboundSTUNResponderIfNeeded(
@@ -2637,7 +2748,10 @@ public final class Room: @unchecked Sendable {
             return
         }
 
-        publisherDataChannel = LocalDataChannelPublisher(transport: dataChannelTransport)
+        publisherDataChannel = LocalDataChannelPublisher(
+            transport: dataChannelTransport,
+            optimisticallyOpenLocalChannels: true
+        )
         startDataChannelReceiveLoopIfReady()
     }
 
@@ -2648,7 +2762,10 @@ public final class Room: @unchecked Sendable {
             return
         }
 
-        subscriberDataChannel = LocalDataChannelPublisher(transport: dataChannelTransport)
+        subscriberDataChannel = LocalDataChannelPublisher(
+            transport: dataChannelTransport,
+            optimisticallyOpenLocalChannels: true
+        )
         startSubscriberDataChannelReceiveLoopIfReady()
     }
 
@@ -2665,6 +2782,7 @@ public final class Room: @unchecked Sendable {
             subscriberMediaStartupTask = nil
             subscriberMediaStartupResult = nil
             subscriberMediaStartupError = nil
+            subscriberMediaStartupSelectedPairRetryCount = 0
             subscriberInboundSTUNResponderTask = nil
             subscriberICEConsentFreshnessTask = nil
             subscriberRTCPReceiveTask = nil
@@ -2701,6 +2819,7 @@ public final class Room: @unchecked Sendable {
             publisherMediaStartupTask = nil
             publisherMediaStartupResult = nil
             publisherMediaStartupError = nil
+            publisherMediaStartupSelectedPairRetryCount = 0
             publisherICEConsentFreshnessTask = nil
             publisherRTCPReceiveTask = nil
             publisherLocalCandidatesGathered = false
@@ -3124,19 +3243,11 @@ public final class Room: @unchecked Sendable {
     }
 
     private func isRecoverablePublisherRTCPReceiveError(_ error: any Error) -> Bool {
-        guard case let SecureMediaTransportError.socketReceiveFailed(code) = error else {
-            return false
-        }
-
-        return code == EAGAIN || code == EWOULDBLOCK
+        Self.isRecoverableSocketReceiveError(error)
     }
 
     private func isRecoverableSubscriberRTCPReceiveError(_ error: any Error) -> Bool {
-        guard case let SecureMediaTransportError.socketReceiveFailed(code) = error else {
-            return false
-        }
-
-        return code == EAGAIN || code == EWOULDBLOCK
+        Self.isRecoverableSocketReceiveError(error)
     }
 
     private func publisherRTCPHandlerSnapshot() -> (@Sendable (RTCPPacket) async -> Void)? {
@@ -3282,6 +3393,7 @@ public final class Room: @unchecked Sendable {
         var finalTrickle = Livekit_TrickleRequest()
         finalTrickle.target = .subscriber
         finalTrickle.final = true
+        finalTrickle.candidateInit = "{}"
 
         var finalRequest = Livekit_SignalRequest()
         finalRequest.trickle = finalTrickle
@@ -3311,6 +3423,7 @@ public final class Room: @unchecked Sendable {
         var finalTrickle = Livekit_TrickleRequest()
         finalTrickle.target = .publisher
         finalTrickle.final = true
+        finalTrickle.candidateInit = "{}"
 
         var finalRequest = Livekit_SignalRequest()
         finalRequest.trickle = finalTrickle

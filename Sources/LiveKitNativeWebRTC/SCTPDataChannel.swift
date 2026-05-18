@@ -787,11 +787,11 @@ package final class SCTPDataChannelManager: @unchecked Sendable {
         }
 
         let message = try SCTPDataChannelControlMessage(decoding: packet.payload)
-        let channel = try channel(for: packet.streamID)
         switch message {
         case let .open(openMessage):
-            channel.acceptRemoteOpen(openMessage)
+            acceptRemoteOpen(openMessage, streamID: packet.streamID)
         case .acknowledgement:
+            let channel = try channel(for: packet.streamID)
             channel.acceptAcknowledgement()
         }
     }
@@ -823,6 +823,25 @@ package final class SCTPDataChannelManager: @unchecked Sendable {
             for channel in channelsByStreamID.values {
                 channel.resetForRecovery()
             }
+        }
+    }
+
+    private func acceptRemoteOpen(_ message: SCTPDataChannelOpenMessage, streamID: UInt16) {
+        lock.withCriticalSection {
+            if let channel = channelsByStreamID[streamID] {
+                channel.acceptRemoteOpen(message)
+                channelsByLabel[message.label] = channel
+                return
+            }
+
+            if let previous = channelsByLabel[message.label] {
+                channelsByStreamID.removeValue(forKey: previous.streamID)
+            }
+
+            let channel = SCTPDataChannel(streamID: streamID, label: message.label, reliability: message.reliability)
+            channel.acceptRemoteOpen(message)
+            channelsByStreamID[streamID] = channel
+            channelsByLabel[message.label] = channel
         }
     }
 
