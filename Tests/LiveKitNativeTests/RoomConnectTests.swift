@@ -86,6 +86,67 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(queryItems.first(where: { $0.name == "auto_subscribe_data_track" })?.value, "false")
     }
 
+    func testConnectUsesRoomDefaultConnectionSettings() async throws {
+        let response = makeJoinResponse()
+        let encodedResponse = try SignalFrameCodec().encode(response)
+        let transport = MockSignalTransport(incomingFrames: [.binary(encodedResponse)])
+        let room = Room(
+            options: RoomOptions(
+                defaultAutoSubscribe: false,
+                defaultAdaptiveStream: true,
+                defaultSubscriberAllowPause: true,
+                defaultAutoSubscribeDataTrack: false
+            ),
+            signalConnection: SignalConnection(transport: transport)
+        )
+
+        try await room.connect(url: URL(string: "https://example.test")!, token: "token")
+
+        let connectedURLs = await transport.connectedURLs
+        let connectedURL = try XCTUnwrap(connectedURLs.first)
+        let queryItems = URLComponents(url: connectedURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+
+        XCTAssertEqual(queryItems.first(where: { $0.name == "auto_subscribe" })?.value, "false")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "adaptive_stream" })?.value, "true")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "subscriber_allow_pause" })?.value, "true")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "auto_subscribe_data_track" })?.value, "false")
+    }
+
+    func testConnectOptionsOverrideRoomDefaultConnectionSettings() async throws {
+        let response = makeJoinResponse()
+        let encodedResponse = try SignalFrameCodec().encode(response)
+        let transport = MockSignalTransport(incomingFrames: [.binary(encodedResponse)])
+        let room = Room(
+            options: RoomOptions(
+                defaultAutoSubscribe: false,
+                defaultAdaptiveStream: true,
+                defaultSubscriberAllowPause: true,
+                defaultAutoSubscribeDataTrack: false
+            ),
+            signalConnection: SignalConnection(transport: transport)
+        )
+
+        try await room.connect(
+            url: URL(string: "https://example.test")!,
+            token: "token",
+            connectOptions: ConnectOptions(
+                autoSubscribe: true,
+                adaptiveStream: false,
+                subscriberAllowPause: false,
+                autoSubscribeDataTrack: true
+            )
+        )
+
+        let connectedURLs = await transport.connectedURLs
+        let connectedURL = try XCTUnwrap(connectedURLs.first)
+        let queryItems = URLComponents(url: connectedURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+
+        XCTAssertEqual(queryItems.first(where: { $0.name == "auto_subscribe" })?.value, "true")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "adaptive_stream" })?.value, "false")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "subscriber_allow_pause" })?.value, "false")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "auto_subscribe_data_track" })?.value, "true")
+    }
+
     func testConnectReturnsToDisconnectedWhenInitialFrameIsNotJoin() async throws {
         var pong = Livekit_Pong()
         pong.timestamp = 42

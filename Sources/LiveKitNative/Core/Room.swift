@@ -704,7 +704,11 @@ public final class Room: @unchecked Sendable {
 
     public func connect(url: URL, token: String, connectOptions: ConnectOptions = .init()) async throws {
         LiveKitNativeLogging.log(.info, "Connecting room.")
-        let context = RoomConnectionContext(serverURL: url, token: token, connectOptions: connectOptions)
+        let context = RoomConnectionContext(
+            serverURL: url,
+            token: token,
+            connectOptions: connectOptions.resolvingDefaults(from: options)
+        )
         setConnectionContext(context)
         resetPeerConnectionNegotiationState()
 
@@ -2947,6 +2951,25 @@ private struct RoomConnectionContext: Sendable {
     var serverURL: URL
     var token: String
     var connectOptions: ConnectOptions
+}
+
+private extension ConnectOptions {
+    func resolvingDefaults(from options: RoomOptions) -> ConnectOptions {
+        var resolved = self
+        if resolved.autoSubscribe == nil {
+            resolved.autoSubscribe = options.defaultAutoSubscribe
+        }
+        if resolved.adaptiveStream == nil {
+            resolved.adaptiveStream = options.defaultAdaptiveStream
+        }
+        if resolved.subscriberAllowPause == nil {
+            resolved.subscriberAllowPause = options.defaultSubscriberAllowPause
+        }
+        if resolved.autoSubscribeDataTrack == nil {
+            resolved.autoSubscribeDataTrack = options.defaultAutoSubscribeDataTrack
+        }
+        return resolved
+    }
 }
 
 private extension ICEServer {

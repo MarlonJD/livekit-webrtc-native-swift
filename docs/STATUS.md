@@ -166,9 +166,10 @@ without requiring an external RTCP handler, and matching H.264 camera pipelines
 can apply recommended bitrate/FPS caps to VideoToolbox.
 Subscriber-side recommendations can also be planned and sent as LiveKit
 `UpdateTrackSettings` requests for low/medium/high/off reception.
-`ConnectOptions` can now advertise LiveKit adaptive stream, subscriber pause,
-and data-track auto-subscribe preferences on the initial `/rtc` signaling URL
-without relying on ad hoc URL query strings.
+`RoomOptions` can now set default LiveKit adaptive stream, subscriber pause,
+and data-track auto-subscribe preferences for the initial `/rtc` signaling URL,
+with per-connection `ConnectOptions` overrides, without relying on ad hoc URL
+query strings.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -236,6 +237,9 @@ The old binary WebRTC dependency path has been removed from the package model.
 - `/rtc` signal URL builder with token, reconnect, auto-subscribe, SDK version,
   `protocol=9`, and optional adaptive-stream/subscriber-pause/data-track
   auto-subscribe query parameters.
+- `RoomOptions` defaults can advertise adaptive-stream/subscriber-pause/data
+  auto-subscribe connection preferences, while `ConnectOptions` can override
+  them per connection.
 - Binary protobuf frame codec using `SwiftProtobuf`.
 - `SignalTransport` abstraction over WebSocket-style binary/text frames.
 - `URLSessionWebSocketSignalTransport` with send, receive, ping, and close
@@ -608,8 +612,9 @@ The old binary WebRTC dependency path has been removed from the package model.
   - subscriber adaptive track-settings planner that maps quality
     recommendations into LiveKit low/medium/high/off `UpdateTrackSettings`
     requests with bounded resolution and FPS caps
-  - first-class `ConnectOptions` query flags for LiveKit adaptive stream,
-    subscriber pause, and data-track auto-subscribe connection settings
+  - first-class `RoomOptions` defaults and `ConnectOptions` overrides for
+    LiveKit adaptive stream, subscriber pause, and data-track auto-subscribe
+    connection settings
   - bounded media frame backpressure policy and thread-safe video frame
     controller that drop stale, full-queue, or saturated keyframe-overfill
     frames before encode work is queued
@@ -795,7 +800,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 460 tests passed
+  - 462 tests passed
   - 1 test skipped by opt-in guard
 - Release-mode benchmark smoke:
   - `swift run -c release LiveKitNativeBenchmarks`
@@ -804,7 +809,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,799,546 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,800,299 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed

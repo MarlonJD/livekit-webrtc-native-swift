@@ -2,9 +2,20 @@ import Foundation
 
 public struct RoomOptions: Equatable, Sendable {
     public var defaultAutoSubscribe: Bool
+    public var defaultAdaptiveStream: Bool?
+    public var defaultSubscriberAllowPause: Bool?
+    public var defaultAutoSubscribeDataTrack: Bool?
 
-    public init(defaultAutoSubscribe: Bool = true) {
+    public init(
+        defaultAutoSubscribe: Bool = true,
+        defaultAdaptiveStream: Bool? = nil,
+        defaultSubscriberAllowPause: Bool? = nil,
+        defaultAutoSubscribeDataTrack: Bool? = nil
+    ) {
         self.defaultAutoSubscribe = defaultAutoSubscribe
+        self.defaultAdaptiveStream = defaultAdaptiveStream
+        self.defaultSubscriberAllowPause = defaultSubscriberAllowPause
+        self.defaultAutoSubscribeDataTrack = defaultAutoSubscribeDataTrack
     }
 }
 
