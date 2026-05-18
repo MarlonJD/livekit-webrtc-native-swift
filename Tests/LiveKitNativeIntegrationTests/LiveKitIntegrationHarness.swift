@@ -105,6 +105,45 @@ struct LiveKitIntegrationHarness: Sendable {
         )
     }
 
+    func waitForPublisherDataChannelInstalled(
+        _ room: Room,
+        timeoutSeconds: TimeInterval = 10
+    ) async throws -> RoomDataChannelObserverState {
+        try await waitForDataChannelState(
+            role: "publisher",
+            expected: "installed",
+            timeoutSeconds: timeoutSeconds,
+            state: { await room.publisherDataChannelObserverState() },
+            matches: { $0.installed }
+        )
+    }
+
+    func waitForSubscriberDataChannelInstalled(
+        _ room: Room,
+        timeoutSeconds: TimeInterval = 10
+    ) async throws -> RoomDataChannelObserverState {
+        try await waitForDataChannelState(
+            role: "subscriber",
+            expected: "installed",
+            timeoutSeconds: timeoutSeconds,
+            state: { await room.subscriberDataChannelObserverState() },
+            matches: { $0.installed }
+        )
+    }
+
+    func waitForPublisherReliableDataChannelOpenAndFlushed(
+        _ room: Room,
+        timeoutSeconds: TimeInterval = 10
+    ) async throws -> RoomDataChannelObserverState {
+        try await waitForDataChannelState(
+            role: "publisher",
+            expected: "reliable channel open with no pending publish plans",
+            timeoutSeconds: timeoutSeconds,
+            state: { await room.publisherDataChannelObserverState() },
+            matches: { $0.installed && $0.reliableOpen && $0.pendingPlanCount == 0 }
+        )
+    }
+
     private static func requiredValue(_ name: String, in environment: [String: String]) throws -> String {
         let value = environment[name]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !value.isEmpty else {
@@ -120,30 +159,72 @@ struct LiveKitIntegrationHarness: Sendable {
         result: @escaping @Sendable () -> PeerConnectionMediaStartupResult?,
         error: @escaping @Sendable () -> (any Error)?
     ) async throws -> PeerConnectionMediaStartupResult {
-        try await withLiveKitIntegrationTimeout(seconds: timeoutSeconds) {
-            while !Task.isCancelled {
-                if let error = error() {
-                    throw LiveKitIntegrationHarnessError.mediaStartupFailed(
-                        role: role,
-                        reason: String(describing: error)
-                    )
-                }
-
-                if let result = result() {
-                    guard result.iceSummary.state == .connected else {
-                        throw LiveKitIntegrationHarnessError.unexpectedMediaStartupICEState(
+        do {
+            return try await withLiveKitIntegrationTimeout(seconds: timeoutSeconds) {
+                while !Task.isCancelled {
+                    if let error = error() {
+                        throw LiveKitIntegrationHarnessError.mediaStartupFailed(
                             role: role,
-                            state: result.iceSummary.state.rawValue
+                            reason: String(describing: error)
                         )
                     }
 
-                    return result
+                    if let result = result() {
+                        guard result.iceSummary.state == .connected else {
+                            throw LiveKitIntegrationHarnessError.unexpectedMediaStartupICEState(
+                                role: role,
+                                state: result.iceSummary.state.rawValue
+                            )
+                        }
+
+                        return result
+                    }
+
+                    try await Task.sleep(nanoseconds: 50_000_000)
                 }
 
-                try await Task.sleep(nanoseconds: 50_000_000)
+                throw CancellationError()
             }
+        } catch LiveKitIntegrationHarnessError.timeout {
+            let lastResult = result()
+            throw LiveKitIntegrationHarnessError.mediaStartupTimeout(
+                role: role,
+                seconds: timeoutSeconds,
+                lastICEState: lastResult?.iceSummary.state.rawValue,
+                selectedPair: lastResult.map { String(describing: $0.selectedCandidatePair) },
+                lastError: error().map { String(describing: $0) }
+            )
+        }
+    }
 
-            throw CancellationError()
+    private func waitForDataChannelState(
+        role: String,
+        expected: String,
+        timeoutSeconds: TimeInterval,
+        state: @escaping @Sendable () async -> RoomDataChannelObserverState,
+        matches: @escaping @Sendable (RoomDataChannelObserverState) -> Bool
+    ) async throws -> RoomDataChannelObserverState {
+        do {
+            return try await withLiveKitIntegrationTimeout(seconds: timeoutSeconds) {
+                while !Task.isCancelled {
+                    let snapshot = await state()
+                    if matches(snapshot) {
+                        return snapshot
+                    }
+
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                }
+
+                throw CancellationError()
+            }
+        } catch LiveKitIntegrationHarnessError.timeout {
+            let snapshot = await state()
+            throw LiveKitIntegrationHarnessError.dataChannelStateTimeout(
+                role: role,
+                expected: expected,
+                state: snapshot.description,
+                seconds: timeoutSeconds
+            )
         }
     }
 }
@@ -355,6 +436,14 @@ enum LiveKitIntegrationHarnessError: Error, CustomStringConvertible {
     case invalidTokenInput(String)
     case mediaStartupFailed(role: String, reason: String)
     case unexpectedMediaStartupICEState(role: String, state: String)
+    case mediaStartupTimeout(
+        role: String,
+        seconds: TimeInterval,
+        lastICEState: String?,
+        selectedPair: String?,
+        lastError: String?
+    )
+    case dataChannelStateTimeout(role: String, expected: String, state: String, seconds: TimeInterval)
     case timeout(seconds: TimeInterval)
 
     var description: String {
@@ -369,6 +458,14 @@ enum LiveKitIntegrationHarnessError: Error, CustomStringConvertible {
             "LiveKit integration \(role) media startup failed: \(reason)."
         case let .unexpectedMediaStartupICEState(role, state):
             "LiveKit integration \(role) media startup ICE state was \(state), expected connected."
+        case let .mediaStartupTimeout(role, seconds, lastICEState, selectedPair, lastError):
+            "LiveKit integration \(role) media startup timed out after \(seconds) seconds; " +
+                "lastICEState=\(lastICEState ?? "nil"), " +
+                "selectedPair=\(selectedPair ?? "nil"), " +
+                "lastError=\(lastError ?? "nil")."
+        case let .dataChannelStateTimeout(role, expected, state, seconds):
+            "LiveKit integration \(role) data channel did not reach \(expected) after " +
+                "\(seconds) seconds; last state: \(state)."
         case let .timeout(seconds):
             "LiveKit integration operation timed out after \(seconds) seconds."
         }
@@ -379,22 +476,53 @@ func withLiveKitIntegrationTimeout<T: Sendable>(
     seconds: TimeInterval,
     operation: @escaping @Sendable () async throws -> T
 ) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
+    let outcome = await withTaskGroup(of: LiveKitIntegrationTimeoutOutcome<T>.self) { group in
         group.addTask {
-            try await operation()
+            do {
+                return .success(try await operation())
+            } catch {
+                return .failure(LiveKitIntegrationCapturedError(error))
+            }
         }
         group.addTask {
-            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            throw LiveKitIntegrationHarnessError.timeout(seconds: seconds)
+            do {
+                try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+            } catch {
+                return .failure(LiveKitIntegrationCapturedError(error))
+            }
+            return .timeout
         }
 
-        guard let result = try await group.next() else {
-            throw LiveKitIntegrationHarnessError.timeout(seconds: seconds)
+        guard let result = await group.next() else {
+            return LiveKitIntegrationTimeoutOutcome<T>.timeout
         }
 
         group.cancelAll()
         return result
     }
+
+    switch outcome {
+    case let .success(value):
+        return value
+    case let .failure(error):
+        throw error.error
+    case .timeout:
+        throw LiveKitIntegrationHarnessError.timeout(seconds: seconds)
+    }
+}
+
+private struct LiveKitIntegrationCapturedError: @unchecked Sendable {
+    let error: any Error
+
+    init(_ error: any Error) {
+        self.error = error
+    }
+}
+
+private enum LiveKitIntegrationTimeoutOutcome<T: Sendable>: Sendable {
+    case success(T)
+    case failure(LiveKitIntegrationCapturedError)
+    case timeout
 }
 
 extension Data {

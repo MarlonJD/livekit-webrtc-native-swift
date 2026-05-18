@@ -313,6 +313,18 @@ private final class DefaultRoomMediaStartupLocalCandidateProvider: @unchecked Se
     }
 }
 
+struct RoomDataChannelObserverState: CustomStringConvertible, Equatable, Sendable {
+    var installed: Bool
+    var reliableOpen: Bool
+    var lossyOpen: Bool
+    var pendingPlanCount: Int
+
+    var description: String {
+        "installed=\(installed), reliableOpen=\(reliableOpen), " +
+            "lossyOpen=\(lossyOpen), pendingPlanCount=\(pendingPlanCount)"
+    }
+}
+
 public final class Room: @unchecked Sendable {
     private static let mediaStartupSelectedPairRetryLimit = 300
     private static let mediaStartupSelectedPairRetryDelayNanoseconds: UInt64 = 100_000_000
@@ -428,6 +440,14 @@ public final class Room: @unchecked Sendable {
         publisherMediaStartupLock.withLock {
             publisherMediaStartupError
         }
+    }
+
+    func publisherDataChannelObserverState() async -> RoomDataChannelObserverState {
+        await dataChannelObserverState(for: publisherDataChannel)
+    }
+
+    func subscriberDataChannelObserverState() async -> RoomDataChannelObserverState {
+        await dataChannelObserverState(for: subscriberDataChannel)
     }
 
     func publisherAudioRTPSender(sid: String) -> PublisherAudioRTPSender? {
@@ -1717,6 +1737,26 @@ public final class Room: @unchecked Sendable {
         }
 
         try await subscriberDataChannel.publish(plan)
+    }
+
+    private func dataChannelObserverState(
+        for dataChannel: LocalDataChannelPublisher?
+    ) async -> RoomDataChannelObserverState {
+        guard let dataChannel else {
+            return RoomDataChannelObserverState(
+                installed: false,
+                reliableOpen: false,
+                lossyOpen: false,
+                pendingPlanCount: 0
+            )
+        }
+
+        return RoomDataChannelObserverState(
+            installed: true,
+            reliableOpen: await dataChannel.hasOpenChannel(for: .reliable),
+            lossyOpen: await dataChannel.hasOpenChannel(for: .lossy),
+            pendingPlanCount: await dataChannel.pendingPlanCount
+        )
     }
 
     private func sendUnpublishDataTrack(_ plan: LocalDataTrackPublishPlan) async throws -> DataTrackInfo {

@@ -61,21 +61,26 @@ SCTP packet/chunk coverage now includes INIT, INIT_ACK, COOKIE_ECHO,
 COOKIE_ACK, DATA, SACK, parameter padding, and CRC32C checksum validation, with
 a separate unit-tested OpenSSL DTLS application-data association bootstrap that
 can exchange SCTP DATA chunks, SACK responses, and fragmented SCTP DATA
-messages without replacing the default Room data-channel path yet. The shared
-media/data session binder and package-internal Room live-media startup helper
-can now select that association transport in opt-in unit tests while the public
-default Room path remains on the existing packet-envelope transport until
-LiveKit interop is complete. SCTP
-data-channel recovery can now reset
-LiveKit channels after association restart, reopen DCEP on the next publish,
-and Room reconnect responses reset injected publisher data channels and receive
-loops before post-reconnect publish. A shared DTLS/SRTP datagram demux and media/data
-session binder can now keep persistent OpenSSL DTLS application data and SRTP
-media on one selected ICE datagram path in unit tests, and public default
-`Room` initialization now selects that combined startup binder for live
-media/data transport construction. Full standards-compliant SCTP association
+messages without replacing the default Room data-channel path yet. The
+association transport also suppresses duplicate DATA TSNs and tracks contiguous
+cumulative SACK state. The shared media/data session binder and package-internal
+Room live-media startup helper can now select that association transport in
+opt-in unit tests, and the separately gated LiveKit integration harness validates
+a two-client reliable `DataPacket` publish/receive path over the
+standards-shaped SCTP association transport. The public default Room path remains
+on the existing packet-envelope transport until the remaining standards-compliant
+SCTP hardening is complete.
+SCTP data-channel recovery can now reset LiveKit channels after association
+restart, reopen DCEP on the next publish, and Room reconnect responses reset
+injected publisher data channels and receive loops before post-reconnect publish.
+A shared DTLS/SRTP datagram demux and media/data session binder can now keep
+persistent OpenSSL DTLS application data and SRTP media on one selected ICE
+datagram path in unit tests, and public default `Room` initialization now
+selects that combined startup binder for live media/data transport construction.
+Full standards-compliant SCTP association
 receive-pump integration, congestion control, LiveKit-validated data-channel
-recovery, and E2E hardening remain open.
+recovery, promotion of the separately gated live data-packet smoke into the
+default integration gate, and E2E hardening remain open.
 Server/SFU `TrackUnpublishedResponse` cleanup for local media publications also
 clears local publication state and cached publisher offer reconnect state so
 resume reconnects and later publisher offers do not replay removed media.
@@ -845,7 +850,8 @@ The old binary WebRTC dependency path has been removed from the package model.
     checksum validation
   - separate OpenSSL DTLS application-data SCTP association bootstrap coverage
     that completes INIT/COOKIE startup, exchanges DATA/SACK between paired
-    local endpoints, and reassembles fragmented SCTP DATA messages without
+    local endpoints, reassembles fragmented SCTP DATA messages, suppresses
+    duplicate DATA TSNs, and tracks contiguous cumulative SACK state without
     replacing the default Room path yet
   - opt-in media/data session binder mode that selects the standards-shaped
     SCTP association transport over the shared DTLS/SRTP demux, plus a
@@ -875,11 +881,19 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test --jobs 1`
-  - 491 tests selected
-  - 6 tests skipped by opt-in guard
+  - 507 tests selected
+  - 7 tests skipped by opt-in guard
+- `swift test --filter ProductionReadinessTests --jobs 1`
+  - 2 production-readiness tests selected
+- `swift test --filter DTLSSRTPTests --jobs 1`
+  - 24 DTLS/SRTP and SCTP association tests selected
 - `swift test --filter LiveKitNativeIntegrationTests --jobs 1`
-  - 8 integration tests selected
-  - 6 live tests skipped by opt-in guard without LiveKit environment variables
+  - 12 integration tests selected
+  - 7 live tests skipped by opt-in guard without LiveKit environment variables
+- `LIVEKIT_NATIVE_RUN_INTEGRATION=1 swift test --filter LiveMediaStartupIntegrationTests --jobs 1`
+  - 2 live OpenSSL DTLS-SRTP media startup tests passed against local LiveKit
+- `LIVEKIT_NATIVE_RUN_INTEGRATION=1 LIVEKIT_NATIVE_RUN_DATA_TRACK_INTEGRATION=1 swift test --filter IntegrationOptInTests/testTwoLiveKitClientsPublishAndReceiveDataPacketOverStandardsSCTP --jobs 1`
+  - separately gated standards-shaped SCTP DataPacket live smoke passed against local LiveKit
 - `LIVEKIT_NATIVE_RELEASE_RUN_TESTS=0 LIVEKIT_NATIVE_RELEASE_RUN_BENCHMARKS=0 LIVEKIT_NATIVE_RELEASE_RUN_SIZE_GATE=0 scripts/check_release_readiness.sh`
   - release-shape check passed with tests, benchmarks, and size gate disabled
 - `swift build --target LiveKitNativeWebRTC --jobs 1 --disable-index-store -debug-info-format none`
@@ -1026,9 +1040,9 @@ The following checks passed after the latest implementation pass:
   two-client data-track subscriber-handle signaling and standards-shaped SCTP
   data-packet publish/receive tests, and live OpenSSL DTLS-SRTP
   publisher/subscriber media startup.
-- Make the separately gated data packet publish/receive test pass against
-  LiveKit over standards-compliant SCTP, then move it into the default live
-  integration gate.
+- Harden the separately gated data packet publish/receive test beyond the
+  current standards-shaped SCTP live smoke, then move it into the default live
+  integration gate once the standards-compliant SCTP blocker is closed.
 - Full RTP/RTCP publish/subscribe media validation beyond startup and one H.264
   RTP send attempt.
 - Reconnect integration test.

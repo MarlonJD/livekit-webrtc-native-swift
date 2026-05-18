@@ -36,10 +36,13 @@ publish/unpublish/update-subscription signaling. The 1.0 hardening path now
 adds queued local data publish flushing through an injected SCTP packet
 transport, inbound data-channel `DataPacket` event plumbing, and OpenSSL DTLS
 application-data packet transport coverage with deterministic packet
-fragmentation/reassembly and fragmented-packet retransmission scheduling. Data
-channel recovery can reset LiveKit channels after association restart and
-Room reconnect responses reset injected publisher data channels before
-post-reconnect publish. A
+fragmentation/reassembly and fragmented-packet retransmission scheduling.
+Standards-shaped SCTP association coverage now suppresses duplicate DATA TSNs
+and tracks contiguous cumulative SACK state. Data channel recovery can reset
+LiveKit channels after association restart and Room reconnect responses reset
+injected publisher data channels before post-reconnect publish. Separately
+gated LiveKit integration now validates a two-client reliable `DataPacket`
+publish/receive smoke over the standards-shaped SCTP association transport. A
 shared WebRTC DTLS/SRTP datagram demux and media/data session binder can keep
 persistent OpenSSL DTLS application data and SRTP media on the same selected
 ICE datagram path in unit tests, and public default `Room` construction now
@@ -206,7 +209,8 @@ startup is configured, send LiveKit `SyncState` for retained media subscription
 preferences, disabled subscribed tracks, and local media/data publications at
 unit-test level, and keep publisher offer track state so a later local publish
 after resume still includes existing local media sections. LiveKit E2E
-verification for the OpenSSL DTLS-SRTP path, real-device video display validation,
+verification beyond the current OpenSSL DTLS-SRTP startup and data-packet
+smoke paths, real-device video display validation,
 standards-compliant live SCTP association behavior, TURN TCP/TLS execution,
 real-device media timing, route/interruption audio-session recovery,
 complete live congestion/adaptive-quality control,

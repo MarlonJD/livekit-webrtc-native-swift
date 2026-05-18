@@ -58,6 +58,44 @@ final class IntegrationOptInTests: XCTestCase {
         XCTAssertEqual(video["canPublishData"] as? Bool, true)
     }
 
+    func testIntegrationTimeoutSurfacesHarnessTimeout() async {
+        do {
+            _ = try await withLiveKitIntegrationTimeout(seconds: 0.01) {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                return "finished"
+            }
+            XCTFail("Expected integration timeout.")
+        } catch let error as LiveKitIntegrationHarnessError {
+            guard case let .timeout(seconds) = error else {
+                return XCTFail("Expected integration timeout, got \(error).")
+            }
+            XCTAssertEqual(seconds, 0.01, accuracy: 0.001)
+        } catch {
+            XCTFail("Expected integration timeout, got \(error).")
+        }
+    }
+
+    func testIntegrationTimeoutReturnsOperationResultBeforeDeadline() async throws {
+        let result = try await withLiveKitIntegrationTimeout(seconds: 1) {
+            "finished"
+        }
+
+        XCTAssertEqual(result, "finished")
+    }
+
+    func testIntegrationTimeoutPreservesOperationErrorBeforeDeadline() async {
+        do {
+            _ = try await withLiveKitIntegrationTimeout(seconds: 1) {
+                throw IntegrationTimeoutTestError.operationFailed
+            }
+            XCTFail("Expected operation error.")
+        } catch let error as IntegrationTimeoutTestError {
+            XCTAssertEqual(error, .operationFailed)
+        } catch {
+            XCTFail("Expected operation error, got \(error).")
+        }
+    }
+
     func testLiveKitServerConnectsAndDisconnects() async throws {
         let harness = try LiveKitIntegrationHarness.load()
         let roomName = harness.roomName(suffix: "connect")
@@ -195,6 +233,7 @@ final class IntegrationOptInTests: XCTestCase {
                 try await publisherRoom.localParticipant.publish(videoTrack: videoTrack)
             }
             _ = try await harness.waitForPublisherMediaStartup(publisherRoom, timeoutSeconds: 30)
+            _ = try await harness.waitForPublisherDataChannelInstalled(publisherRoom, timeoutSeconds: 10)
 
             _ = try await subscriberEvents.waitForTrackSubscribedOrRemoteVideoPublication(
                 publisherIdentity: publisherIdentity,
@@ -204,6 +243,7 @@ final class IntegrationOptInTests: XCTestCase {
             try await subscriberRoom.updateSubscription(trackSIDs: [videoPublication.sid], subscribe: true)
 
             _ = try await harness.waitForSubscriberMediaStartup(subscriberRoom, timeoutSeconds: 30)
+            _ = try await harness.waitForSubscriberDataChannelInstalled(subscriberRoom, timeoutSeconds: 10)
 
             let payload = Data("standards-sctp-ping".utf8)
             try await withLiveKitIntegrationTimeout(seconds: 10) {
@@ -212,6 +252,12 @@ final class IntegrationOptInTests: XCTestCase {
                     options: DataPublishOptions(reliable: true, topic: "chat")
                 )
             }
+            let publisherDataChannel = try await harness.waitForPublisherReliableDataChannelOpenAndFlushed(
+                publisherRoom,
+                timeoutSeconds: 10
+            )
+            XCTAssertTrue(publisherDataChannel.reliableOpen)
+            XCTAssertEqual(publisherDataChannel.pendingPlanCount, 0)
 
             let received = try await subscriberEvents.waitForDataReceived(
                 payload: payload,
@@ -231,6 +277,10 @@ final class IntegrationOptInTests: XCTestCase {
             throw error
         }
     }
+}
+
+private enum IntegrationTimeoutTestError: Error, Equatable {
+    case operationFailed
 }
 
 private func liveIntegrationRoomOptions() -> RoomOptions {
@@ -320,6 +370,12 @@ private func liveIntegrationHostCandidateAddresses(for liveKitURL: URL) -> [ICEI
     ]
 }
 
-private func liveIntegrationBindAddress(for _: URL) -> String {
-    "0.0.0.0"
+private func liveIntegrationBindAddress(for liveKitURL: URL) -> String {
+    guard let host = liveKitURL.host?.lowercased(),
+          ["localhost", "127.0.0.1"].contains(host)
+    else {
+        return "0.0.0.0"
+    }
+
+    return "127.0.0.1"
 }

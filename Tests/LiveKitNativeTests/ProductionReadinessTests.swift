@@ -9,6 +9,9 @@ final class ProductionReadinessTests: XCTestCase {
         XCTAssertFalse(readiness.isProductionReady)
         XCTAssertFalse(readiness.blockers.isEmpty)
         XCTAssertTrue(readiness.blockers.contains { $0.contains("DTLS-SRTP") })
+        XCTAssertTrue(readiness.blockers.contains { $0.contains("LiveKit DataPacket publish/receive smoke") })
+        XCTAssertTrue(readiness.blockers.contains { $0.contains("full standards-compliant SCTP association state") })
+        XCTAssertTrue(readiness.blockers.contains { $0.contains("promotion of live DataPacket coverage") })
     }
 
     func testAssertProductionReadyFailsUntilBlockersAreCleared() {

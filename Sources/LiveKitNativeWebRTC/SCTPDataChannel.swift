@@ -1436,6 +1436,7 @@ package actor DTLSSCTPAssociationDataChannelPacketTransport: SCTPDataChannelPack
     private var peerVerificationTag: UInt32?
     private var nextTSN: UInt32
     private var expectedPeerTSN: UInt32?
+    private var receivedPeerTSNs: Set<UInt32> = []
     private var nextStreamSequenceNumbers: [UInt16: UInt16] = [:]
     private var pendingReceivedPackets: [SCTPDataChannelPacket] = []
     private var receivePumpTask: Task<Void, Never>?
@@ -1633,6 +1634,7 @@ package actor DTLSSCTPAssociationDataChannelPacketTransport: SCTPDataChannelPack
         let initChunk = try SCTPInitChunk(chunk: chunk)
         peerVerificationTag = initChunk.initiateTag
         expectedPeerTSN = initChunk.initialTSN
+        receivedPeerTSNs.removeAll()
 
         let initAck = SCTPInitChunk(
             type: .initAck,
@@ -1659,6 +1661,7 @@ package actor DTLSSCTPAssociationDataChannelPacketTransport: SCTPDataChannelPack
         let initAck = try SCTPInitChunk(chunk: chunk)
         peerVerificationTag = initAck.initiateTag
         expectedPeerTSN = initAck.initialTSN
+        receivedPeerTSNs.removeAll()
         guard let stateCookie = initAck.parameters.first(where: { $0.type == SCTPParameterType.stateCookie })?.value else {
             throw SCTPDataChannelError.missingSCTPStateCookie
         }
@@ -1687,20 +1690,46 @@ package actor DTLSSCTPAssociationDataChannelPacketTransport: SCTPDataChannelPack
     private func acceptData(_ chunk: SCTPChunk, packet: SCTPPacket) async throws {
         try validateVerificationTag(packet.verificationTag, expected: configuration.localInitiateTag)
         let dataChunk = try SCTPDataChunk(chunk: chunk)
-        expectedPeerTSN = dataChunk.tsn &+ 1
+        let isNewTSN = markPeerTSNReceived(dataChunk.tsn)
+        let cumulativeTSNAck = expectedPeerTSN.map { $0 &- 1 } ?? dataChunk.tsn
 
         try await sendPacket(
             verificationTag: try requirePeerVerificationTag(),
             chunks: [
                 .sack(SCTPSACKChunk(
-                    cumulativeTSNAck: dataChunk.tsn,
+                    cumulativeTSNAck: cumulativeTSNAck,
                     advertisedReceiverWindowCredit: configuration.advertisedReceiverWindowCredit
                 )),
             ]
         )
+        guard isNewTSN else {
+            return
+        }
+
         if let packet = try fragmentReassembler.append(dataChunk) {
             pendingReceivedPackets.append(packet)
         }
+    }
+
+    private func markPeerTSNReceived(_ tsn: UInt32) -> Bool {
+        guard !receivedPeerTSNs.contains(tsn) else {
+            return false
+        }
+
+        receivedPeerTSNs.insert(tsn)
+        advanceExpectedPeerTSN()
+        return true
+    }
+
+    private func advanceExpectedPeerTSN() {
+        guard var nextTSN = expectedPeerTSN else {
+            return
+        }
+
+        while receivedPeerTSNs.contains(nextTSN) {
+            nextTSN &+= 1
+        }
+        expectedPeerTSN = nextTSN
     }
 
     private func dataChunks(

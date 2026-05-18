@@ -367,6 +367,38 @@ final class DTLSSRTPTests: XCTestCase {
         let receivedFragmented = try await serverFragmentedReceive
 
         XCTAssertEqual(receivedFragmented, fragmentedOutbound)
+
+        let duplicatePacket = SCTPDataChannelPacket(
+            streamID: 0,
+            ppid: .binary,
+            payload: Data([0xde, 0xad])
+        )
+        let freshPacketAfterDuplicate = SCTPDataChannelPacket(
+            streamID: 0,
+            ppid: .binary,
+            payload: Data([0xbe, 0xef])
+        )
+        let duplicateTSN = UInt32(0x0000_0105)
+        let freshTSN = UInt32(0x0000_0106)
+        try await clientDTLS.send(SCTPPacket(
+            verificationTag: 0x3333_4444,
+            chunks: [.data(duplicatePacket.dataChunk(
+                tsn: duplicateTSN,
+                streamSequenceNumber: 99,
+                unordered: false
+            ))]
+        ).encoded())
+        try await clientDTLS.send(SCTPPacket(
+            verificationTag: 0x3333_4444,
+            chunks: [.data(freshPacketAfterDuplicate.dataChunk(
+                tsn: freshTSN,
+                streamSequenceNumber: 100,
+                unordered: false
+            ))]
+        ).encoded())
+        let receivedAfterDuplicate = try await serverSCTP.receive()
+
+        XCTAssertEqual(receivedAfterDuplicate, freshPacketAfterDuplicate)
         await clientDTLS.close()
         await serverDTLS.close()
     }

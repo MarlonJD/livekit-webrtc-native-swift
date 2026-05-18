@@ -256,13 +256,17 @@ retransmission scheduling. Standards-shaped SCTP packet/chunk coverage now inclu
 INIT_ACK, COOKIE_ECHO, COOKIE_ACK, DATA, SACK, parameter padding, and CRC32C
 checksum validation, with a unit-tested OpenSSL DTLS application-data
 association bootstrap that can exchange SCTP DATA chunks, SACK responses, and
-reassemble fragmented SCTP DATA messages. The shared media/data binder and
-Room live-media startup helper can select that association transport in
-package-internal opt-in tests while the public default Room path continues to
-use the existing packet-envelope transport until LiveKit interop is complete.
-Data channel recovery now resets LiveKit channels after association restart, reopens
-DCEP on the next publish, and Room reconnect responses reset injected publisher
-data channels and receive loops before post-reconnect publish. A
+reassemble fragmented SCTP DATA messages, with duplicate DATA TSN suppression
+and contiguous cumulative SACK tracking. The shared media/data binder and Room
+live-media startup helper can select that association transport in
+package-internal opt-in tests, and the separately gated LiveKit integration
+harness now validates a two-client reliable `DataPacket` publish/receive path
+over that standards-shaped SCTP association transport. The public default Room
+path continues to use the existing packet-envelope transport until the remaining
+standards-compliant SCTP hardening is complete.
+Data channel recovery now resets LiveKit channels after association restart,
+reopens DCEP on the next publish, and Room reconnect responses reset injected
+publisher data channels and receive loops before post-reconnect publish. A
 shared WebRTC DTLS/SRTP datagram demux and media/data session binder can now
 keep the persistent OpenSSL DTLS application-data transport and SRTP media
 transport on the same selected ICE datagram path in unit tests, and the public
@@ -277,8 +281,9 @@ coverage, including selected ICE pair and default media/data session assertions,
 into full secure RTP/RTCP send/receive validation, TURN TCP/TLS, live
 quality-control wiring, real-device video display hardening,
 default-path DTLS-SCTP association receive-pump integration, LiveKit-validated
-data packet publish/receive, real-device audio session hardening, integration
-apps, and size gates.
+data-channel recovery, promoting the separately gated live data-packet
+publish/receive smoke into the default integration gate once standards SCTP is
+hardened, real-device audio session hardening, integration apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -452,8 +457,30 @@ policy, and end-to-end LiveKit tests are still open.
 Opt-in LiveKit integration tests are disabled unless a local or cloud LiveKit
 server is explicitly configured:
 
+When running the local Docker server for the loopback harness, make LiveKit
+advertise the host loopback address for ICE:
+
+```sh
+docker run --rm --name livekit-native-dev \
+  -p 7880:7880 -p 7881:7881 -p 7882:7882/udp \
+  livekit/livekit-server:v1.12.0 \
+  --dev --bind 0.0.0.0 --node-ip 127.0.0.1 --udp-port 7882
+```
+
 ```sh
 LIVEKIT_NATIVE_RUN_INTEGRATION=1 \
+LIVEKIT_NATIVE_LIVEKIT_URL=ws://127.0.0.1:7880 \
+LIVEKIT_NATIVE_API_KEY=devkey \
+LIVEKIT_NATIVE_API_SECRET=secret \
+swift test --filter LiveKitNativeIntegrationTests --jobs 1
+```
+
+The separately gated data-track and DataPacket live smoke path can be included
+when working on the DTLS-backed SCTP blocker:
+
+```sh
+LIVEKIT_NATIVE_RUN_INTEGRATION=1 \
+LIVEKIT_NATIVE_RUN_DATA_TRACK_INTEGRATION=1 \
 LIVEKIT_NATIVE_LIVEKIT_URL=ws://127.0.0.1:7880 \
 LIVEKIT_NATIVE_API_KEY=devkey \
 LIVEKIT_NATIVE_API_SECRET=secret \
@@ -466,8 +493,9 @@ connect/disconnect, two-client participant join/leave, and live OpenSSL
 DTLS-SRTP publisher/subscriber media startup on the socket-backed Room media
 path with one publisher H.264 RTP send attempt. The live data-track
 subscriber-handle and standards-shaped SCTP data-packet publish/receive tests
-are gated separately with `LIVEKIT_NATIVE_RUN_DATA_TRACK_INTEGRATION=1` until
-the DTLS-backed SCTP data channel transport blocker is closed. Strict production release mode now
+are passing but gated separately with
+`LIVEKIT_NATIVE_RUN_DATA_TRACK_INTEGRATION=1` until the DTLS-backed SCTP data
+channel transport blocker is closed. Strict production release mode now
 requires those integration variables so the future `productionReady` marker
 cannot pass while live tests are silently skipped.
 
