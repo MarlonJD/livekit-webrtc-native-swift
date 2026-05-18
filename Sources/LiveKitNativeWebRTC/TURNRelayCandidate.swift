@@ -60,6 +60,26 @@ package enum TURNRelayCandidateFactory {
         ).candidate
     }
 
+    package static func makeCandidate(
+        relayedAddress: STUNMappedAddress,
+        foundation: String,
+        localPreference: UInt16 = defaultLocalPreference
+    ) -> ICECandidate {
+        ICECandidate(
+            foundation: foundation,
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(
+                type: .relayed,
+                localPreference: localPreference,
+                componentID: .rtp
+            ).value,
+            address: relayedAddress.address,
+            port: relayedAddress.port,
+            type: .relayed
+        )
+    }
+
     private static func defaultFoundation(for channelBinding: TURNRelayChannelBinding) -> String {
         "turn-relay-\(channelBinding.channelNumber)"
     }

@@ -768,6 +768,88 @@ final class ICEPriorityTests: XCTestCase {
         XCTAssertEqual(checker.checkedPairs.map { $0.remote.foundation }, ["remote-bad", "remote-good"])
     }
 
+    func testICEAgentPrioritizesQueuedTriggeredCheck() async throws {
+        let local = iceCandidate(foundation: "local", address: "192.0.2.10", port: 50_000)
+        let remoteOrdinary = iceCandidate(
+            foundation: "remote-ordinary",
+            type: .serverReflexive,
+            localPreference: 65_535,
+            address: "203.0.113.10",
+            port: 60_000
+        )
+        let remoteTriggered = iceCandidate(
+            foundation: "remote-triggered",
+            type: .relayed,
+            localPreference: 100,
+            address: "203.0.113.20",
+            port: 60_001
+        )
+        let successfulResult = try iceConnectivityResult(address: "203.0.113.57", port: 40_003)
+        let checker = FakeICEConnectivityChecker { _, nominate in
+            XCTAssertTrue(nominate)
+            return successfulResult
+        }
+        let agent = ICEAgent(
+            localCandidates: [local],
+            remoteCandidates: [remoteOrdinary, remoteTriggered],
+            configuration: iceAgentConfiguration(),
+            checker: checker
+        )
+
+        await agent.enqueueTriggeredCheck(localFoundation: "local", remoteFoundation: "remote-triggered")
+        let summary = await agent.performConnectivityChecks(maxPairs: 1)
+
+        XCTAssertEqual(summary.state, .connected)
+        XCTAssertEqual(summary.checkedPairCount, 1)
+        XCTAssertEqual(summary.selectedPair?.remote.foundation, "remote-triggered")
+        XCTAssertEqual(checker.checkedPairs.map { $0.remote.foundation }, ["remote-triggered"])
+    }
+
+    func testICEAgentResolvesRoleConflictBySwitchingAndRecomputingPairPriority() async throws {
+        let local = iceCandidate(
+            foundation: "local",
+            type: .host,
+            localPreference: 65_535,
+            address: "192.0.2.10",
+            port: 50_000
+        )
+        let remote = iceCandidate(
+            foundation: "remote",
+            type: .serverReflexive,
+            localPreference: 100,
+            address: "203.0.113.10",
+            port: 60_000
+        )
+        let agent = ICEAgent(
+            localCandidates: [local],
+            remoteCandidates: [remote],
+            configuration: iceAgentConfiguration(role: .controlling, tieBreaker: 10),
+            checker: FakeICEConnectivityChecker { _, _ in
+                throw ICEConnectivityCheckError.missingMappedAddress
+            }
+        )
+        let initialChecklist = await agent.checklist
+        let initialPriority = try XCTUnwrap(initialChecklist.pairs.first?.priority)
+
+        let resolution = await agent.resolveRoleConflict(remoteAssertion: .controlling(tieBreaker: 20))
+        let updatedChecklist = await agent.checklist
+        let updatedPair = try XCTUnwrap(updatedChecklist.pairs.first)
+        let role = await agent.role
+
+        XCTAssertEqual(resolution.action, .switchRole(.controlled))
+        XCTAssertEqual(resolution.resolvedRole, .controlled)
+        XCTAssertEqual(role, .controlled)
+        XCTAssertEqual(
+            updatedPair.priority,
+            ICECandidatePriority.candidatePairPriority(
+                local: local.priority,
+                remote: remote.priority,
+                isControlling: false
+            )
+        )
+        XCTAssertNotEqual(updatedPair.priority, initialPriority)
+    }
+
     func testICEAgentAddsTrickledRemoteCandidateBeforeChecks() async throws {
         let local = iceCandidate(foundation: "local", address: "192.0.2.10", port: 50_000)
         let remote = iceCandidate(
@@ -848,15 +930,19 @@ final class ICEPriorityTests: XCTestCase {
 
     private func iceAgentConfiguration(
         transactionIDSeed: UInt8 = 11,
-        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful
+        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        role: ICEAgentRole = .controlling,
+        tieBreaker: UInt64? = nil,
+        connectivityCheckPacingPolicy: ICEConnectivityCheckPacingPolicy = .standard
     ) -> ICEAgentConfiguration {
         ICEAgentConfiguration(
             localCredentials: ICECredentials(usernameFragment: "local", password: "local-password"),
             remoteCredentials: ICECredentials(usernameFragment: "remote", password: "remote-password"),
-            role: .controlling,
-            tieBreaker: UInt64(transactionIDSeed),
+            role: role,
+            tieBreaker: tieBreaker ?? UInt64(transactionIDSeed),
             nominationPolicy: nominationPolicy,
-            retryPolicy: .once
+            retryPolicy: .once,
+            connectivityCheckPacingPolicy: connectivityCheckPacingPolicy
         )
     }
 

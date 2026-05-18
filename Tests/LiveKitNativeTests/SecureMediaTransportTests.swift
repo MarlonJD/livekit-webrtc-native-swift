@@ -399,6 +399,61 @@ final class SecureMediaTransportTests: XCTestCase {
         XCTAssertEqual(received, datagram)
     }
 
+    func testLocalICEUDPSocketCandidateStoreTracksTURNRelayContext() throws {
+        let socket = try LocalICEUDPSocket(
+            bindAddress: "127.0.0.1",
+            port: 0,
+            receiveTimeoutMilliseconds: 250
+        )
+        let hostCandidate = socket.hostCandidate(
+            foundation: "host",
+            advertisedAddress: "127.0.0.1"
+        )
+        let relayCandidate = TURNRelayCandidateFactory.makeCandidate(
+            relayedAddress: STUNMappedAddress(address: "198.51.100.44", port: 62_000),
+            foundation: "host-relay-1"
+        )
+        let relayContext = LocalICETURNRelayContext(
+            candidate: relayCandidate,
+            socket: socket,
+            endpoint: TURNServerEndpoint(
+                host: "turn.example.test",
+                port: 3_478,
+                transport: .udp,
+                isSecure: false,
+                username: "relay-user",
+                credential: "relay-password"
+            ),
+            credentials: TURNRelaySessionCredentials(
+                username: "relay-user",
+                realm: "turn.example.test",
+                nonce: "nonce-1",
+                password: "relay-password"
+            ),
+            allocation: TURNAllocationResult(
+                relayedAddress: STUNMappedAddress(address: "198.51.100.44", port: 62_000),
+                lifetimeSeconds: 600,
+                response: STUNMessage(type: .allocateSuccessResponse),
+                credentials: TURNRelaySessionCredentials(
+                    username: "relay-user",
+                    realm: "turn.example.test",
+                    nonce: "nonce-1",
+                    password: "relay-password"
+                )
+            ),
+            permissionLifetimeSeconds: 300
+        )
+        let store = LocalICEUDPSocketCandidateStore(candidates: [
+            LocalICEUDPSocketCandidate(candidate: hostCandidate, socket: socket),
+        ])
+
+        store.addTURNRelayContexts([relayContext])
+
+        XCTAssertTrue(store.socket(forFoundation: "host-relay-1") === socket)
+        XCTAssertTrue(store.turnRelayContext(forFoundation: "host-relay-1") === relayContext)
+        XCTAssertEqual(store.candidates.map(\.candidate.foundation), ["host", "host-relay-1"])
+    }
+
     func testLocalICEUDPSocketConnectivityCheckerUsesBoundSocketForSTUN() throws {
         let clientSocket = try LocalICEUDPSocket(
             bindAddress: "127.0.0.1",

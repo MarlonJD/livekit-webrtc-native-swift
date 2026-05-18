@@ -247,7 +247,11 @@ final class DTLSSRTPTests: XCTestCase {
 
         let clientSCTP = DTLSSCTPDataChannelPacketTransport(
             dtlsTransport: clientDTLS,
-            maxFragmentPayloadSize: 4
+            maxFragmentPayloadSize: 4,
+            retransmissionPolicy: SCTPDataChannelRetransmissionPolicy(
+                initialDelaySeconds: 0,
+                maxAttempts: 2
+            )
         )
         let serverSCTP = DTLSSCTPDataChannelPacketTransport(
             dtlsTransport: serverDTLS,
@@ -263,6 +267,18 @@ final class DTLSSRTPTests: XCTestCase {
         let received = try await serverSCTP.receive()
 
         XCTAssertEqual(received, packet)
+        let pendingRetransmissions = await clientSCTP.pendingRetransmissionCount
+        XCTAssertEqual(pendingRetransmissions, 4)
+
+        let dueFragments = try await clientSCTP.sendDueRetransmissions()
+        XCTAssertEqual(dueFragments.count, 4)
+        let retransmitted = try await serverSCTP.receive()
+        XCTAssertEqual(retransmitted, packet)
+
+        let messageID = try XCTUnwrap(dueFragments.first?.envelope.messageID)
+        await clientSCTP.markMessageAcknowledged(messageID: messageID)
+        let remainingRetransmissions = await clientSCTP.pendingRetransmissionCount
+        XCTAssertEqual(remainingRetransmissions, 0)
         await clientDTLS.close()
         await serverDTLS.close()
     }

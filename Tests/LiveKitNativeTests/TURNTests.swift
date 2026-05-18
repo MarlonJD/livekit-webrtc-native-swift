@@ -40,6 +40,7 @@ final class TURNTests: XCTestCase {
         XCTAssertEqual(result.relayedAddress, STUNMappedAddress(address: "192.0.2.44", port: 49_152))
         XCTAssertEqual(result.lifetimeSeconds, 1_200)
         XCTAssertEqual(result.response.type, .allocateSuccessResponse)
+        XCTAssertNil(result.credentials)
     }
 
     func testPerformsOneLongTermCredentialChallengeRoundTrip() throws {
@@ -111,6 +112,12 @@ final class TURNTests: XCTestCase {
 
         XCTAssertEqual(result.relayedAddress, STUNMappedAddress(address: "198.51.100.7", port: 61_000))
         XCTAssertEqual(result.lifetimeSeconds, 600)
+        XCTAssertEqual(result.credentials, TURNRelaySessionCredentials(
+            username: "relay-user",
+            realm: "turn.example.test",
+            nonce: "nonce-1",
+            password: "relay-password"
+        ))
         XCTAssertEqual(recorder.attemptCount, 2)
     }
 

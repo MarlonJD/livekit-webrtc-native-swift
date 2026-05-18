@@ -5,15 +5,18 @@ package struct TURNAllocationResult: Equatable, Sendable {
     package var relayedAddress: STUNMappedAddress
     package var lifetimeSeconds: UInt32
     package var response: STUNMessage
+    package var credentials: TURNRelaySessionCredentials?
 
     package init(
         relayedAddress: STUNMappedAddress,
         lifetimeSeconds: UInt32,
-        response: STUNMessage
+        response: STUNMessage,
+        credentials: TURNRelaySessionCredentials? = nil
     ) {
         self.relayedAddress = relayedAddress
         self.lifetimeSeconds = lifetimeSeconds
         self.response = response
+        self.credentials = credentials
     }
 }
 
@@ -648,10 +651,21 @@ package struct TURNAllocationClient: Sendable {
             throw TURNAllocationError.unexpectedResponseType(response.type.rawValue)
         }
 
-        return try allocationResult(from: response)
+        return try allocationResult(
+            from: response,
+            credentials: TURNRelaySessionCredentials(
+                username: username,
+                realm: realm,
+                nonce: nonce,
+                password: password
+            )
+        )
     }
 
-    private func allocationResult(from response: STUNMessage) throws -> TURNAllocationResult {
+    private func allocationResult(
+        from response: STUNMessage,
+        credentials: TURNRelaySessionCredentials? = nil
+    ) throws -> TURNAllocationResult {
         guard let relayedAddress = try response.firstAttribute(.xorRelayedAddress)?.xorRelayedAddressValue else {
             throw TURNAllocationError.missingRelayedAddress
         }
@@ -670,7 +684,8 @@ package struct TURNAllocationClient: Sendable {
         return TURNAllocationResult(
             relayedAddress: relayedAddress,
             lifetimeSeconds: lifetimeSeconds,
-            response: response
+            response: response,
+            credentials: credentials
         )
     }
 

@@ -136,6 +136,11 @@ actor LocalDataChannelPublisher {
         }
     }
 
+    func resetForRecovery() {
+        openedChannelStreamIDs.removeAll()
+        manager.resetChannelsForRecovery()
+    }
+
     func acceptControlPacket(_ packet: SCTPDataChannelPacket) async throws {
         _ = try await acceptInboundPacket(packet)
     }

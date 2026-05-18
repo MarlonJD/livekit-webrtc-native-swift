@@ -523,7 +523,11 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertTrue(syncState.hasAnswer)
         XCTAssertEqual(syncState.answer.type, answer.type)
         XCTAssertEqual(syncState.answer.id, answer.id)
-        XCTAssertEqual(syncState.answer.sdp, answer.sdp)
+        XCTAssertNotEqual(syncState.answer.sdp, answer.sdp)
+        XCTAssertNotEqual(
+            try XCTUnwrap(iceUfrag(in: syncState.answer.sdp)),
+            try XCTUnwrap(iceUfrag(in: answer.sdp))
+        )
 
         let events = await eventRecorder.waitForEventCount(6)
         XCTAssertEqual(events[4], .connectionStateChanged(.reconnecting))
@@ -573,7 +577,17 @@ final class RoomConnectTests: XCTestCase {
             )
         )
 
-        _ = await waitForSentFrameCount(2, transport: transport)
+        let publisherOfferFrames = await waitForSentFrameCount(2, transport: transport)
+        guard case let .binary(publisherOfferData) = publisherOfferFrames[1] else {
+            return XCTFail("Expected binary publisher offer request.")
+        }
+        let publisherOfferRequest = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: publisherOfferData)
+        guard case let .offer(publisherOffer)? = publisherOfferRequest.message else {
+            return XCTFail("Expected SignalRequest.offer.")
+        }
+        XCTAssertEqual(publisherOffer.id, 1)
+        XCTAssertTrue(publisherOffer.sdp.contains("a=msid:livekit TR_local_camera"))
+
         let publication = try await publishTask.value
         XCTAssertEqual(publication.sid, "TR_local_camera")
 
@@ -628,8 +642,12 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(syncState.publishTracks[0].track.source, .camera)
         XCTAssertTrue(syncState.hasOffer)
         XCTAssertEqual(syncState.offer.type, "offer")
-        XCTAssertEqual(syncState.offer.id, 1)
+        XCTAssertEqual(syncState.offer.id, 2)
         XCTAssertTrue(syncState.offer.sdp.contains("a=msid:livekit TR_local_camera"))
+        XCTAssertNotEqual(
+            try XCTUnwrap(iceUfrag(in: syncState.offer.sdp)),
+            try XCTUnwrap(iceUfrag(in: publisherOffer.sdp))
+        )
         XCTAssertEqual(syncState.publishDataTracks.count, 1)
         XCTAssertEqual(syncState.publishDataTracks[0].info.pubHandle, dataTrack.publisherHandle)
         XCTAssertEqual(syncState.publishDataTracks[0].info.sid, "DT_telemetry")
@@ -712,8 +730,12 @@ final class RoomConnectTests: XCTestCase {
             return XCTFail("Expected SignalRequest.syncState.")
         }
         XCTAssertTrue(syncState.hasOffer)
-        XCTAssertEqual(syncState.offer.id, 1)
+        XCTAssertEqual(syncState.offer.id, 2)
         XCTAssertTrue(syncState.offer.sdp.contains("a=msid:livekit TR_local_camera"))
+        XCTAssertNotEqual(
+            try XCTUnwrap(iceUfrag(in: syncState.offer.sdp)),
+            try XCTUnwrap(iceUfrag(in: videoOffer.sdp))
+        )
 
         let audioPublishTask = Task {
             try await room.localParticipant.publish(
@@ -754,7 +776,7 @@ final class RoomConnectTests: XCTestCase {
             return XCTFail("Expected SignalRequest.offer.")
         }
 
-        XCTAssertEqual(audioOffer.id, 2)
+        XCTAssertEqual(audioOffer.id, 3)
         XCTAssertTrue(audioOffer.sdp.contains("m=video 9 UDP/TLS/RTP/SAVPF 102"))
         XCTAssertTrue(audioOffer.sdp.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111"))
         XCTAssertTrue(audioOffer.sdp.contains("a=msid:livekit TR_local_camera"))
@@ -3430,9 +3452,13 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(syncState.publishTracks.count, 1)
         XCTAssertEqual(syncState.publishTracks[0].track.sid, "TR_local_microphone")
         XCTAssertTrue(syncState.hasOffer)
-        XCTAssertEqual(syncState.offer.id, 3)
+        XCTAssertEqual(syncState.offer.id, 4)
         XCTAssertFalse(syncState.offer.sdp.contains("a=msid:livekit TR_local_camera"))
         XCTAssertTrue(syncState.offer.sdp.contains("a=msid:livekit TR_local_microphone"))
+        XCTAssertNotEqual(
+            try XCTUnwrap(iceUfrag(in: syncState.offer.sdp)),
+            try XCTUnwrap(iceUfrag(in: unpublishOffer.sdp))
+        )
     }
 
     func testSetCameraDisabledSendsMuteRequestForPublishedCamera() async throws {
@@ -3903,6 +3929,71 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(dataPacket.user.topic, "chat")
         XCTAssertEqual(dataPacket.participantSid, "PA_local")
         XCTAssertEqual(dataPacket.participantIdentity, "marlon")
+    }
+
+    func testReconnectResetsInjectedDataChannelBeforeNextPublish() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let signalTransport = MockSignalTransport(incomingFrames: frames)
+        let dataTransport = RecordingSCTPDataChannelPacketTransport()
+        let dataChannelPublisher = LocalDataChannelPublisher(transport: dataTransport)
+        let room = Room(
+            signalConnection: SignalConnection(transport: signalTransport),
+            publisherDataChannel: dataChannelPublisher
+        )
+        let eventRecorder = RoomEventRecorder()
+        room.delegate = eventRecorder
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        try await room.localParticipant.publish(
+            data: Data("before".utf8),
+            options: DataPublishOptions(reliable: true, topic: "chat")
+        )
+
+        let reliableStreamID = await dataChannelPublisher.streamID(for: .reliable)
+        try await dataChannelPublisher.acceptControlPacket(
+            SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
+            )
+        )
+        XCTAssertEqual(dataTransport.sentPackets.count, 2)
+        XCTAssertEqual(dataTransport.sentPackets[1].ppid, .binary)
+
+        try await signalTransport.enqueueIncomingFrame(
+            .binary(SignalFrameCodec().encode(makeLeaveResponse(action: .resume)))
+        )
+        try await signalTransport.enqueueIncomingFrame(
+            .binary(SignalFrameCodec().encode(makeReconnectResponse()))
+        )
+        let events = await eventRecorder.waitForEventCount(6)
+        XCTAssertEqual(events[4], .connectionStateChanged(.reconnecting))
+        XCTAssertEqual(events[5], .connectionStateChanged(.connected))
+
+        try await room.localParticipant.publish(
+            data: Data("after".utf8),
+            options: DataPublishOptions(reliable: true, topic: "chat")
+        )
+
+        XCTAssertEqual(dataTransport.sentPackets.count, 3)
+        XCTAssertEqual(dataTransport.sentPackets[2].streamID, reliableStreamID)
+        XCTAssertEqual(dataTransport.sentPackets[2].ppid, .dataChannelControl)
+
+        try await dataChannelPublisher.acceptControlPacket(
+            SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
+            )
+        )
+
+        XCTAssertEqual(dataTransport.sentPackets.count, 4)
+        let dataPacket = try Livekit_DataPacket(serializedBytes: dataTransport.sentPackets[3].payload)
+        XCTAssertEqual(dataPacket.user.payload, Data("after".utf8))
+        XCTAssertEqual(dataPacket.user.topic, "chat")
     }
 
     func testInboundDataChannelPacketEmitsDataReceivedEvent() async throws {
@@ -4859,6 +4950,14 @@ private func publisherAnswerSDP() -> String {
     a=setup:active
     a=sctp-port:5000
     """
+}
+
+private func iceUfrag(in sdp: String) -> String? {
+    let prefix = "a=ice-ufrag:"
+    return sdp
+        .split(whereSeparator: \.isNewline)
+        .first { $0.hasPrefix(prefix) }
+        .map { String($0.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines) }
 }
 
 private func waitForSentFrameCount(_ expectedCount: Int, transport: MockSignalTransport) async -> [SignalTransportFrame] {

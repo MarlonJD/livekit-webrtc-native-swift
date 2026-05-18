@@ -190,6 +190,14 @@ package struct ICECandidatePair: Equatable, Sendable {
         self.state = state
         self.nominated = nominated
     }
+
+    package mutating func recomputePriority(isControlling: Bool) {
+        priority = ICECandidatePriority.candidatePairPriority(
+            local: local.priority,
+            remote: remote.priority,
+            isControlling: isControlling
+        )
+    }
 }
 
 package enum ICECandidatePairState: String, Equatable, Sendable {
@@ -234,6 +242,12 @@ package struct ICECandidateChecklist: Equatable, Sendable {
 
     package var nominatedPair: ICECandidatePair? {
         pairs.first { $0.nominated && $0.state == .succeeded }
+    }
+
+    package func pair(localFoundation: String, remoteFoundation: String) -> ICECandidatePair? {
+        pairs.first {
+            $0.local.foundation == localFoundation && $0.remote.foundation == remoteFoundation
+        }
     }
 
     package mutating func unfreezeInitialPairs() {
@@ -296,6 +310,13 @@ package struct ICECandidateChecklist: Equatable, Sendable {
                 ICECandidatePair(local: local, remote: candidate, isControlling: isControlling)
             }
         )
+        sortPairs()
+    }
+
+    package mutating func recomputePairPriorities(isControlling: Bool) {
+        for index in pairs.indices {
+            pairs[index].recomputePriority(isControlling: isControlling)
+        }
         sortPairs()
     }
 
@@ -791,6 +812,7 @@ package struct ICEAgentConfiguration: Equatable, Sendable {
     package var tieBreaker: UInt64
     package var nominationPolicy: ICEPairNominationPolicy
     package var retryPolicy: STUNBindingRetryPolicy
+    package var connectivityCheckPacingPolicy: ICEConnectivityCheckPacingPolicy
     package var requireResponseMessageIntegrity: Bool
     package var requireResponseFingerprint: Bool
 
@@ -801,6 +823,7 @@ package struct ICEAgentConfiguration: Equatable, Sendable {
         tieBreaker: UInt64,
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
         retryPolicy: STUNBindingRetryPolicy = .connectivityCheck,
+        connectivityCheckPacingPolicy: ICEConnectivityCheckPacingPolicy = .standard,
         requireResponseMessageIntegrity: Bool = false,
         requireResponseFingerprint: Bool = false
     ) {
@@ -810,6 +833,7 @@ package struct ICEAgentConfiguration: Equatable, Sendable {
         self.tieBreaker = tieBreaker
         self.nominationPolicy = nominationPolicy
         self.retryPolicy = retryPolicy
+        self.connectivityCheckPacingPolicy = connectivityCheckPacingPolicy
         self.requireResponseMessageIntegrity = requireResponseMessageIntegrity
         self.requireResponseFingerprint = requireResponseFingerprint
     }
@@ -1067,8 +1091,9 @@ package actor ICEAgent {
     package private(set) var state: ICEAgentState
     package private(set) var checklist: ICECandidateChecklist
 
-    private let configuration: ICEAgentConfiguration
+    private var configuration: ICEAgentConfiguration
     private let checker: any ICEConnectivityChecking
+    private var triggeredPairKeys: [ICECandidatePairKey]
 
     package init(
         localCandidates: [ICECandidate],
@@ -1084,10 +1109,15 @@ package actor ICEAgent {
         )
         self.configuration = configuration
         self.checker = checker
+        self.triggeredPairKeys = []
     }
 
     package var selectedCandidatePair: ICECandidatePair? {
         checklist.nominatedPair
+    }
+
+    package var role: ICEAgentRole {
+        configuration.role
     }
 
     package func addLocalCandidate(_ candidate: ICECandidate) {
@@ -1096,6 +1126,31 @@ package actor ICEAgent {
 
     package func addRemoteCandidate(_ candidate: ICECandidate) {
         checklist.addRemoteCandidate(candidate, isControlling: configuration.role == .controlling)
+    }
+
+    package func enqueueTriggeredCheck(localFoundation: String, remoteFoundation: String) {
+        let key = ICECandidatePairKey(localFoundation: localFoundation, remoteFoundation: remoteFoundation)
+        guard !triggeredPairKeys.contains(key) else {
+            return
+        }
+
+        triggeredPairKeys.append(key)
+    }
+
+    @discardableResult
+    package func resolveRoleConflict(remoteAssertion: ICERoleAssertion) -> ICERoleConflictResolution {
+        let resolution = ICERoleConflictResolver.resolve(
+            localRole: configuration.role,
+            localTieBreaker: configuration.tieBreaker,
+            remoteAssertion: remoteAssertion
+        )
+
+        if case let .switchRole(newRole) = resolution.action {
+            configuration.role = newRole
+            checklist.recomputePairPriorities(isControlling: newRole == .controlling)
+        }
+
+        return resolution
     }
 
     package func nominateSucceededPair(localFoundation: String, remoteFoundation: String) {
@@ -1123,11 +1178,18 @@ package actor ICEAgent {
         }
 
         state = .checking
-        let checkLimit = maxPairs ?? Int.max
+        let checkLimit = max(0, maxPairs ?? Int.max)
         var checkedPairCount = 0
         var failedPairCount = 0
+        let scheduler = ICEConnectivityCheckScheduler(policy: configuration.connectivityCheckPacingPolicy)
+        let schedule = scheduler.schedule(
+            checklist: checklist,
+            triggeredPairs: matchedTriggeredPairs(),
+            nominationPolicy: configuration.nominationPolicy
+        )
 
-        while checkedPairCount < checkLimit, let pair = checklist.nextWaitingPair {
+        for entry in schedule.prefix(checkLimit) {
+            let pair = entry.pair
             checklist.markInProgress(
                 localFoundation: pair.local.foundation,
                 remoteFoundation: pair.remote.foundation
@@ -1135,15 +1197,14 @@ package actor ICEAgent {
             checkedPairCount += 1
 
             do {
-                let shouldNominate = configuration.nominationPolicy == .nominateFirstSuccessful
-                _ = try checker.checkCandidatePair(pair, configuration: configuration, nominate: shouldNominate)
+                _ = try checker.checkCandidatePair(pair, configuration: configuration, nominate: entry.shouldNominate)
                 checklist.markSucceeded(
                     localFoundation: pair.local.foundation,
                     remoteFoundation: pair.remote.foundation,
-                    nominated: shouldNominate
+                    nominated: entry.shouldNominate
                 )
 
-                if shouldNominate {
+                if entry.shouldNominate {
                     state = .connected
                     return summary(checkedPairCount: checkedPairCount, failedPairCount: failedPairCount)
                 }
@@ -1168,6 +1229,26 @@ package actor ICEAgent {
         }
 
         return summary(checkedPairCount: checkedPairCount, failedPairCount: failedPairCount)
+    }
+
+    private func matchedTriggeredPairs() -> [ICECandidatePair] {
+        var matchedPairs: [ICECandidatePair] = []
+        var unresolvedKeys: [ICECandidatePairKey] = []
+
+        for key in triggeredPairKeys {
+            guard let pair = checklist.pair(
+                localFoundation: key.localFoundation,
+                remoteFoundation: key.remoteFoundation
+            ) else {
+                unresolvedKeys.append(key)
+                continue
+            }
+
+            matchedPairs.append(pair)
+        }
+
+        triggeredPairKeys = unresolvedKeys
+        return matchedPairs
     }
 
     private func summary(checkedPairCount: Int, failedPairCount: Int) -> ICEAgentCheckSummary {
@@ -1422,6 +1503,11 @@ package final class STUNUDPSocketTransport: STUNDatagramTransport, @unchecked Se
 private struct ICECandidatePairKey: Hashable {
     var localFoundation: String
     var remoteFoundation: String
+
+    init(localFoundation: String, remoteFoundation: String) {
+        self.localFoundation = localFoundation
+        self.remoteFoundation = remoteFoundation
+    }
 
     init(_ pair: ICECandidatePair) {
         self.localFoundation = pair.local.foundation

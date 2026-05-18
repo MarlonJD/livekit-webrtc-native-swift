@@ -35,7 +35,10 @@ publish/unpublish/update-subscription signaling. The 1.0 hardening path now
 adds queued local data publish flushing through an injected SCTP packet
 transport, inbound data-channel `DataPacket` event plumbing, and OpenSSL DTLS
 application-data packet transport coverage with deterministic packet
-fragmentation/reassembly and retransmission queue planning primitives. A
+fragmentation/reassembly and fragmented-packet retransmission scheduling. Data
+channel recovery can reset LiveKit channels after association restart and
+Room reconnect responses reset injected publisher data channels before
+post-reconnect publish. A
 shared WebRTC DTLS/SRTP datagram demux and media/data session binder can keep
 persistent OpenSSL DTLS application data and SRTP media on the same selected
 ICE datagram path in unit tests, and public default `Room` construction now
@@ -134,8 +137,8 @@ binding and closes the protected transport on consent expiry. A bounded
 RTP jitter buffer primitive can release contiguous packets, skip bounded gaps,
 report missing sequence numbers, drop duplicate/old packets, flush in sequence
 order, and preserve ordering across sequence-number wrap. `turn:` and `turns:`
-ICE server URLs are parsed with UDP/TCP/TLS intent and credentials retained for
-future relay allocation, and TURN Allocate
+ICE server URLs are parsed with UDP/TCP/TLS intent, default UDP TURN relay
+allocation now uses credentialed `turn:` entries, and TURN Allocate
 request primitives cover requested transport, lifetime, realm, nonce,
 `ERROR-CODE`, and relayed-address decoding. TURN allocation client groundwork
 can send Allocate requests over the STUN datagram transport abstraction, parse
@@ -158,24 +161,32 @@ URLs as UDP, TCP, then TLS while exposing the current UDP datagram-supported
 subset. A bounded TURN relay session composes allocation, permission creation,
 channel binding, relayed candidate planning, relay transport metadata, and
 deterministic maintenance execution over abstract transports, and a setup plan
-can create and execute that configured session deterministically. A ChannelData
+can create and execute that configured session deterministically. The default
+socket-backed Room media startup path now allocates supported UDP TURN relay
+candidates through the bound ICE socket, stores relay contexts, trickles the
+relayed candidates, and routes selected relayed ICE checks plus media datagrams
+through ChannelData bindings. A ChannelData
 relay transport can encode outbound payloads and decode inbound packets over
 an abstract media datagram transport while
 preserving partial stream remainder and peer endpoint metadata. ICE
 connectivity-check orchestration now has deterministic pacing, transaction
 timeout scheduling, triggered-check priority, STUN 487 role-conflict parsing,
-and tie-breaker based role-conflict resolution primitives. Fresh join,
+tie-breaker based role-conflict resolution, and `ICEAgent` integration for
+queued triggered checks plus role-switch priority recompute. Fresh join,
 reconnect, and disconnect boundaries now reset stale remote SDP/ICE negotiation
 state without replacing the local peer connection configuration, and regenerate
 local ICE credentials for the next negotiation.
-Resume reconnects now send LiveKit `SyncState` for retained media subscription
-preferences, disabled subscribed tracks, local media/data publications, and
-the latest negotiated subscriber answer / publisher offer SDP state at
+Resume reconnects now rebuild retained subscriber answer / publisher offer SDP
+with fresh local ICE credentials, send local trickle/final-trickle when media
+startup is configured, send LiveKit `SyncState` for retained media subscription
+preferences, disabled subscribed tracks, and local media/data publications at
 unit-test level, and keep publisher offer track state so a later local publish
 after resume still includes existing local media sections. LiveKit E2E
 verification for the OpenSSL DTLS-SRTP path, decoded subscriber render/playout,
-standards-compliant live SCTP association behavior, real-device media timing,
-quality adaptation, and reconnect media recovery remain part of production
+standards-compliant live SCTP association behavior, TURN TCP/TLS execution,
+real-device media timing, quality adaptation, LiveKit-validated data-channel
+recovery, and reconnect
+media recovery remain part of production
 hardening.
 
 Release-mode microbenchmarks are available with

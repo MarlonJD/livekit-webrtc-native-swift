@@ -40,14 +40,18 @@ open messages, decode inbound LiveKit `DataPacket` payloads into
 `RoomEvent.dataReceived`, and carry SCTP data-channel packet envelopes over a
 persistent OpenSSL DTLS application-data transport in unit tests. The DTLS
 packet-envelope transport can now optionally fragment large data-channel
-payloads, reassemble them on receive, and use deterministic retransmission
-queue planning in unit tests. A shared DTLS/SRTP datagram demux and media/data
+payloads, reassemble them on receive, and schedule fragmented-packet
+retransmissions on the DTLS-backed packet transport in unit tests. SCTP
+data-channel recovery can now reset
+LiveKit channels after association restart, reopen DCEP on the next publish,
+and Room reconnect responses reset injected publisher data channels and receive
+loops before post-reconnect publish. A shared DTLS/SRTP datagram demux and media/data
 session binder can now keep persistent OpenSSL DTLS application data and SRTP
 media on one selected ICE datagram path in unit tests, and public default
 `Room` initialization now selects that combined startup binder for live
 media/data transport construction. Full standards-compliant SCTP association
-state, congestion control, data-channel recovery, and LiveKit E2E hardening
-remain open.
+state, congestion control, LiveKit-validated data-channel recovery, and E2E
+hardening remain open.
 Server/SFU `TrackUnpublishedResponse` cleanup for local media publications also
 clears local publication state and cached publisher offer reconnect state so
 resume reconnects and later publisher offers do not replay removed media.
@@ -58,9 +62,10 @@ Server-provided `JoinResponse.ice_servers` and
 `ReconnectResponse.ice_servers` are now retained in the subscriber and
 publisher peer connection configurations. In the injected bound-socket media
 startup path, supported `stun:` UDP URLs can be queried for server-reflexive
-candidate discovery while preserving socket reuse. TURN ICE server URLs are
-also parsed from `turn:` and `turns:` entries with UDP/TCP/TLS intent and
-credentials retained for future relay allocation, and TURN Allocate, Refresh,
+candidate discovery while preserving socket reuse, and supported credentialed
+UDP `turn:` URLs can allocate relay candidates through the same bound ICE
+socket. TURN ICE server URLs are also parsed from `turn:` and `turns:` entries
+with UDP/TCP/TLS intent, and TURN Allocate, Refresh,
 CreatePermission, and ChannelBind request primitives now cover requested
 transport, lifetime, realm, nonce, `ERROR-CODE`, relayed-address decoding,
 IPv4 `XOR-PEER-ADDRESS`, and channel-number validation. TURN allocation,
@@ -81,7 +86,10 @@ datagram path. A bounded TURN relay session now composes allocation,
 permission creation, channel binding, relay candidate planning, relay
 transport metadata, and deterministic maintenance execution over abstract
 transports, and a setup plan can create and execute that configured session
-over scripted abstract transports. A ChannelData
+over scripted abstract transports. Default socket-backed media startup stores
+UDP TURN relay contexts, trickles relayed candidates, creates permissions and
+ChannelBind state for selected relay pairs, and routes relayed ICE checks plus
+media datagrams through TURN ChannelData. A ChannelData
 relay transport can encode outbound payloads and decode inbound packets over an
 abstract media datagram transport with partial stream remainder handling.
 Deterministic ICE consent freshness planning now models selected-pair consent
@@ -90,15 +98,18 @@ clamped jitter without a wall-clock dependency, and an injectable consent
 freshness executor can advance success/failure/expiry state in unit tests.
 Connectivity-check orchestration now has deterministic pacing, transaction
 timeout scheduling, triggered-check priority, STUN 487 role-conflict parsing,
-and tie-breaker based role-conflict resolution primitives in unit tests.
+and tie-breaker based role-conflict resolution in unit tests, and `ICEAgent`
+now consumes that scheduler for queued triggered checks and applies role switch
+plus candidate-pair priority recompute after role-conflict resolution.
 Injected Room media startup now starts a selected-pair consent freshness loop
 after secure transport binding and closes the protected transport when consent
 expires. Public `Room` initialization now installs default socket-backed
 subscriber and publisher media-data startup configurations backed by the local
 OpenSSL DTLS-SRTP identity and shared datagram demux, so the live path can
 gather host candidates lazily, add supported STUN server-reflexive candidates,
-send local trickle/final-trickle signaling, reuse the bound ICE socket for
-checks/media datagrams, negotiate WebRTC `use_srtp`, export SRTP keying
+allocate supported UDP TURN relay candidates, send local trickle/final-trickle
+signaling, reuse the bound ICE socket for checks/media/TURN relay datagrams,
+negotiate WebRTC `use_srtp`, export SRTP keying
 material, and bind secure RTP/RTCP plus DTLS application-data packet transport
 when the remote peer completes the same DTLS-SRTP path. A shared WebRTC
 datagram classifier/demux can now split DTLS application
@@ -111,11 +122,13 @@ join, reconnect, and disconnect paths now
 reset stale
 remote SDP, ICE candidate, and final-trickle state and regenerate local ICE
 credentials without replacing the rest of the local peer connection
-configuration. Resume reconnect `SyncState` now includes
-retained subscription preferences, disabled track SIDs, local media/data
-publications, and the latest negotiated subscriber answer / publisher offer SDP
-state at unit-test level, while publisher offer track state is preserved so
-later publishes after resume do not drop existing local media sections.
+configuration. Resume reconnect now rebuilds the retained subscriber answer and
+publisher offer SDP with fresh local ICE credentials, sends local
+trickle/final-trickle when media startup is configured, and sends `SyncState`
+with retained subscription preferences, disabled track SIDs, and local
+media/data publications at unit-test level, while publisher offer track state
+is preserved so later publishes after resume do not drop existing local media
+sections.
 Room-level publisher RTP sending can now hand packets to a started injected
 secure media transport in tests, and stateful Opus/H.264 publisher RTP bridges
 keep packetizer sequence and timestamp state across packets/frames before that
@@ -297,9 +310,10 @@ The old binary WebRTC dependency path has been removed from the package model.
 - Resume reconnects send LiveKit `SyncState` for retained media subscription
   preferences, disabled subscribed track SIDs, local media publications, and
   local data-track publications at unit-test level.
-- Resume reconnects include the latest negotiated subscriber answer and
-  publisher offer SDP state in `SyncState` when those descriptions were sent
-  before reconnecting.
+- Resume reconnects rebuild the retained subscriber answer and publisher offer
+  SDP with fresh local ICE credentials before including that state in
+  `SyncState`, and re-send local ICE trickle/final-trickle when media startup
+  is configured.
 - Resume reconnects preserve publisher offer track state so a later local media
   publish generates a publisher offer that still includes pre-reconnect local
   publications.
@@ -427,6 +441,9 @@ The old binary WebRTC dependency path has been removed from the package model.
     carries nomination intent
   - STUN 487 role-conflict response parsing plus tie-breaker based ICE role
     conflict resolution primitives
+  - `ICEAgent` consumes the deterministic scheduler for queued triggered
+    checks, carries nomination intent from the schedule, and recomputes pair
+    priority order after role-conflict role switching
   - injected Room publisher/subscriber media startup can run a selected-pair
     consent freshness loop and close the protected transport on expiry
   - bounded RTP jitter buffer primitive for contiguous release, duplicate/old
@@ -554,7 +571,8 @@ The old binary WebRTC dependency path has been removed from the package model.
     candidates and final trickle markers when media startup has supplied local
     candidates
   - `turn:` and `turns:` ICE server URL parsing retains host, port, UDP/TCP/TLS
-    transport intent, username, and credential for future relay allocation
+    transport intent, username, and credential, and the default UDP TURN relay
+    startup path now consumes credentialed `turn:` entries
   - RFC 3711 AES-CM session key derivation for SRTP/SRTCP encryption,
     authentication, and salting keys
   - client/server DTLS-SRTP packet-protection context that maps local/remote
@@ -704,8 +722,14 @@ The old binary WebRTC dependency path has been removed from the package model.
     envelope transport over the persistent DTLS record layer
   - deterministic SCTP data-channel packet fragmentation and reassembly
     envelopes for the DTLS application-data packet transport
-  - deterministic SCTP data-channel retransmission queue planning with
-    per-fragment acknowledgement and bounded retry attempts
+  - deterministic SCTP data-channel retransmission scheduling on the
+    DTLS-backed packet transport with per-fragment acknowledgement and bounded
+    retry attempts
+  - SCTP data-channel recovery reset that moves LiveKit channels back to
+    connecting state, clears sent DCEP-open tracking, and sends a fresh DCEP
+    open before the next post-recovery publish
+  - Room reconnect responses reset injected publisher data channels and their
+    receive loop before post-reconnect local data publish
   - shared DTLS/SRTP demux session coverage that carries fragmented
     data-channel packets and SRTP media on the same underlying datagram
     transport
@@ -725,7 +749,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 432 tests passed
+  - 437 tests passed
   - 1 test skipped by opt-in guard
 - Release-mode benchmark smoke:
   - `swift run -c release LiveKitNativeBenchmarks`
@@ -734,7 +758,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,713,417 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,740,420 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -753,33 +777,32 @@ The following checks passed after the latest implementation pass:
 - Transceiver negotiation and LiveKit integration coverage for AddTrack
   publishes beyond unit-level publisher offer signaling, default
   capture/encode-to-RTP startup, and injected RTP bridge coverage.
-- Production-hardened reconnect across live media recovery, data channel
-  recovery, and server migration beyond the current local ICE credential
-  restart plus signal `SyncState` unit coverage for state and SDP recovery.
+- Production-hardened reconnect across live media recovery,
+  LiveKit-validated data-channel recovery, and server migration beyond the
+  current local ICE credential restart, rebuilt reconnect SDP/trickle state,
+  injected data-channel reset, and signal `SyncState` unit coverage.
 - Request-response coverage for remaining client-originated signaling commands
   beyond participant metadata/name/attribute updates, AddTrack publishes,
   local mute/unpublish, local publisher track updates, and data-track
   publish/unpublish.
-- Default Room creation and lifecycle management for subscriber/publisher local
-  ICE candidate sockets from public options.
+- LiveKit server validation for the default subscriber/publisher local ICE
+  socket lifecycle under reconnect, migration, and long-running calls.
 
 ### ICE and Networking
 
 - Binding the socket-backed `ICEAgent` path into default subscriber/publisher
   peer connection startup against a real LiveKit server.
-- Consuming the stored signaling-provided STUN/TURN server list from public
-  Room options for default candidate gathering and TURN relay allocation.
-- Full ICE restart signaling against LiveKit and live `ICEAgent` integration
-  for the deterministic connectivity-check pacing, transaction timeout,
-  triggered-check, and role-conflict primitives.
-- Consent freshness execution over default ICEAgent selected pairs.
-- Full TURN relay client behavior beyond the current Allocate, Refresh,
-  CreatePermission, ChannelBind, ChannelData framing, abstract relay transport,
-  deterministic maintenance scheduler/executor, relayed candidate planning,
-  fallback planning, bounded relay session orchestration, and deterministic
-  setup-plan execution primitives: default relay allocation and socket
-  lifecycle integration, TCP/TLS transport execution, and ICE relay candidate
-  integration.
+- LiveKit E2E validation for ICE restart signaling, refreshed local
+  trickle/final-trickle, and live `ICEAgent` integration for deterministic
+  connectivity-check pacing, transaction timeout, triggered-check, and
+  role-conflict behavior.
+- Consent freshness execution over real LiveKit-selected default ICE pairs.
+- Full TURN relay client behavior beyond the current UDP default allocation,
+  CreatePermission, ChannelBind, ChannelData relay checks/media, abstract relay
+  transport, deterministic maintenance scheduler/executor, relayed candidate
+  planning, fallback planning, bounded relay session orchestration, and
+  deterministic setup-plan execution: TCP/TLS transport execution, TURN
+  maintenance loop binding in default Room, and TURN-only LiveKit E2E tests.
 
 ### DTLS, SRTP, RTP, and RTCP
 
@@ -843,7 +866,7 @@ The following checks passed after the latest implementation pass:
   deterministic DTLS data-channel packet envelope and fragmentation/reassembly
   primitive plus shared DTLS/SRTP media-data demux.
 - SCTP association state and congestion control beyond the current
-  deterministic retransmission queue planning.
+  deterministic fragmented-packet retransmission scheduling.
 - LiveKit-validated data-channel recovery over the default shared media/data
   startup path.
 - Text streams, byte streams, and RPC APIs.

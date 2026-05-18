@@ -259,6 +259,12 @@ package final class SCTPDataChannel: @unchecked Sendable {
         }
     }
 
+    package func resetForRecovery() {
+        lock.withCriticalSection {
+            mutableState = .connecting
+        }
+    }
+
     package func makeBinaryPacket(_ payload: Data) throws -> SCTPDataChannelPacket {
         let state = lock.withCriticalSection {
             mutableState
@@ -357,6 +363,14 @@ package final class SCTPDataChannelManager: @unchecked Sendable {
             }
 
             return channel
+        }
+    }
+
+    package func resetChannelsForRecovery() {
+        lock.withCriticalSection {
+            for channel in channelsByStreamID.values {
+                channel.resetForRecovery()
+            }
         }
     }
 
@@ -745,26 +759,39 @@ package struct SCTPDataChannelRetransmissionQueue: Sendable {
 package actor DTLSSCTPDataChannelPacketTransport: SCTPDataChannelPacketTransceiver {
     private let dtlsTransport: OpenSSLDTLSApplicationDataTransport
     private let codec: SCTPDataChannelPacketEnvelopeCodec
+    private let retransmissionPolicy: SCTPDataChannelRetransmissionPolicy
     private var fragmenter: SCTPDataChannelFragmenter?
     private var reassembler: SCTPDataChannelReassembler
+    private var retransmissionQueue: SCTPDataChannelRetransmissionQueue
 
     package init(
         dtlsTransport: OpenSSLDTLSApplicationDataTransport,
         codec: SCTPDataChannelPacketEnvelopeCodec = SCTPDataChannelPacketEnvelopeCodec(),
-        maxFragmentPayloadSize: Int? = nil
+        maxFragmentPayloadSize: Int? = nil,
+        retransmissionPolicy: SCTPDataChannelRetransmissionPolicy = SCTPDataChannelRetransmissionPolicy()
     ) {
         self.dtlsTransport = dtlsTransport
         self.codec = codec
+        self.retransmissionPolicy = retransmissionPolicy
         self.fragmenter = maxFragmentPayloadSize.map {
             SCTPDataChannelFragmenter(maxFragmentPayloadSize: $0)
         }
         self.reassembler = SCTPDataChannelReassembler()
+        self.retransmissionQueue = SCTPDataChannelRetransmissionQueue()
+    }
+
+    package var pendingRetransmissionCount: Int {
+        retransmissionQueue.pendingCount
     }
 
     package func send(_ packet: SCTPDataChannelPacket) async throws {
         if var fragmenter {
             let envelopes = try fragmenter.fragment(packet)
             self.fragmenter = fragmenter
+            retransmissionQueue.enqueue(
+                envelopes,
+                at: Date().timeIntervalSince1970 + retransmissionPolicy.initialDelaySeconds
+            )
             for envelope in envelopes {
                 try await dtlsTransport.send(envelope.encoded())
             }
@@ -786,6 +813,31 @@ package actor DTLSSCTPDataChannelPacketTransport: SCTPDataChannelPacketTransceiv
                 return packet
             }
         }
+    }
+
+    @discardableResult
+    package func sendDueRetransmissions(
+        at now: TimeInterval = Date().timeIntervalSince1970
+    ) async throws -> [SCTPDataChannelScheduledFragment] {
+        let dueFragments = try retransmissionQueue.dueFragments(
+            at: now,
+            policy: retransmissionPolicy
+        )
+        for fragment in dueFragments {
+            try await dtlsTransport.send(fragment.envelope.encoded())
+        }
+        return dueFragments
+    }
+
+    package func markFragmentAcknowledged(messageID: UInt32, fragmentIndex: UInt16) {
+        retransmissionQueue.markAcknowledged(
+            messageID: messageID,
+            fragmentIndex: fragmentIndex
+        )
+    }
+
+    package func markMessageAcknowledged(messageID: UInt32) {
+        retransmissionQueue.markMessageAcknowledged(messageID: messageID)
     }
 }
 

@@ -201,14 +201,177 @@ package struct LocalICEUDPSocketCandidate: Sendable {
             LocalICEUDPSocketCandidate(candidate: reflexiveCandidate, socket: socket)
         }
     }
+
+    package func turnRelayContexts(
+        iceServers: [ICEServer],
+        localPreference: UInt16 = TURNRelayCandidateFactory.defaultLocalPreference
+    ) -> [LocalICETURNRelayContext] {
+        guard candidate.type == .host else {
+            return []
+        }
+
+        return Self.supportedTURNRelayEndpoints(from: iceServers).enumerated().compactMap { index, endpoint in
+            guard let username = endpoint.username, let password = endpoint.credential else {
+                return nil
+            }
+
+            do {
+                let allocation = try TURNAllocationClient(
+                    transport: LocalICEUDPSocketSTUNServerTransport(
+                        socket: socket,
+                        endpoint: STUNServerEndpoint(host: endpoint.host, port: endpoint.port)
+                    )
+                ).allocate(
+                    username: username,
+                    password: password,
+                    transactionID: .random(),
+                    authenticatedTransactionID: .random(),
+                    staleNonceRetryTransactionID: .random(),
+                    requireResponseFingerprint: false
+                )
+                guard let credentials = allocation.credentials else {
+                    return nil
+                }
+
+                let relayCandidate = TURNRelayCandidateFactory.makeCandidate(
+                    relayedAddress: allocation.relayedAddress,
+                    foundation: "\(candidate.foundation)-relay-\(index + 1)",
+                    localPreference: localPreference
+                )
+                return LocalICETURNRelayContext(
+                    candidate: relayCandidate,
+                    socket: socket,
+                    endpoint: endpoint,
+                    credentials: credentials,
+                    allocation: allocation,
+                    permissionLifetimeSeconds: TURNMaintenancePolicy.defaultPermissionLifetimeSeconds
+                )
+            } catch {
+                return nil
+            }
+        }
+    }
+
+    private static func supportedTURNRelayEndpoints(from iceServers: [ICEServer]) -> [TURNServerEndpoint] {
+        TURNServerEndpoint.endpoints(from: iceServers)
+            .filter {
+                $0.transport == .udp &&
+                $0.isSecure == false &&
+                ($0.username?.isEmpty == false) &&
+                ($0.credential?.isEmpty == false)
+            }
+    }
+}
+
+package final class LocalICETURNRelayContext: @unchecked Sendable {
+    package let candidate: ICECandidate
+    package let socket: LocalICEUDPSocket
+    package let endpoint: TURNServerEndpoint
+    package let credentials: TURNRelaySessionCredentials
+    package let allocation: TURNAllocationResult
+    package let permissionLifetimeSeconds: UInt32
+
+    private let lock = NSLock()
+    private var mutableChannelBinding: TURNRelayChannelBinding?
+
+    package init(
+        candidate: ICECandidate,
+        socket: LocalICEUDPSocket,
+        endpoint: TURNServerEndpoint,
+        credentials: TURNRelaySessionCredentials,
+        allocation: TURNAllocationResult,
+        permissionLifetimeSeconds: UInt32
+    ) {
+        self.candidate = candidate
+        self.socket = socket
+        self.endpoint = endpoint
+        self.credentials = credentials
+        self.allocation = allocation
+        self.permissionLifetimeSeconds = permissionLifetimeSeconds
+    }
+
+    package var channelBinding: TURNRelayChannelBinding? {
+        lock.withLock {
+            mutableChannelBinding
+        }
+    }
+
+    package func ensureChannelBinding(
+        peerAddress: STUNMappedAddress,
+        channelNumber: UInt16 = 0x4000,
+        includeFingerprint: Bool = true,
+        requireResponseMessageIntegrity: Bool = false,
+        requireResponseFingerprint: Bool = false
+    ) throws -> TURNRelayChannelBinding {
+        if let existing = channelBinding, existing.peerAddress == peerAddress {
+            return existing
+        }
+
+        let binding = try TURNRelayChannelBinding(
+            channelNumber: channelNumber,
+            peerAddress: peerAddress
+        )
+        let stunTransport = LocalICEUDPSocketSTUNServerTransport(
+            socket: socket,
+            endpoint: STUNServerEndpoint(host: endpoint.host, port: endpoint.port)
+        )
+        _ = try TURNCreatePermissionClient(transport: stunTransport).createPermission(
+            peerAddresses: [peerAddress],
+            username: credentials.username,
+            realm: credentials.realm,
+            nonce: credentials.nonce,
+            password: credentials.password,
+            includeFingerprint: includeFingerprint,
+            requireResponseMessageIntegrity: requireResponseMessageIntegrity,
+            requireResponseFingerprint: requireResponseFingerprint
+        )
+        _ = try TURNChannelBindClient(transport: stunTransport).channelBind(
+            channelNumber: binding.channelNumber,
+            peerAddress: peerAddress,
+            username: credentials.username,
+            realm: credentials.realm,
+            nonce: credentials.nonce,
+            password: credentials.password,
+            includeFingerprint: includeFingerprint,
+            requireResponseMessageIntegrity: requireResponseMessageIntegrity,
+            requireResponseFingerprint: requireResponseFingerprint
+        )
+
+        lock.withLock {
+            mutableChannelBinding = binding
+        }
+        return binding
+    }
+
+    package func makeSTUNTransport(peerCandidate: ICECandidate) throws -> any STUNDatagramTransport {
+        let peerAddress = STUNMappedAddress(address: peerCandidate.address, port: peerCandidate.port)
+        let binding = try ensureChannelBinding(peerAddress: peerAddress)
+        return TURNRelaySocketSTUNTransport(
+            socket: socket,
+            endpoint: endpoint,
+            channelBinding: binding
+        )
+    }
+
+    package func makeMediaDatagramTransport(peerCandidate: ICECandidate) throws -> any MediaDatagramTransport {
+        let peerAddress = STUNMappedAddress(address: peerCandidate.address, port: peerCandidate.port)
+        let binding = try ensureChannelBinding(peerAddress: peerAddress)
+        return TURNRelaySocketMediaDatagramTransport(
+            socket: socket,
+            endpoint: endpoint,
+            channelBinding: binding
+        )
+    }
 }
 
 package final class LocalICEUDPSocketCandidateStore: @unchecked Sendable {
     private let lock = NSLock()
     private var candidatesByFoundation: [String: LocalICEUDPSocketCandidate]
+    private var turnRelayContextsByFoundation: [String: LocalICETURNRelayContext]
 
     package init(candidates: [LocalICEUDPSocketCandidate]) {
         self.candidatesByFoundation = Self.makeCandidateMap(candidates)
+        self.turnRelayContextsByFoundation = [:]
     }
 
     package var candidates: [LocalICEUDPSocketCandidate] {
@@ -227,15 +390,51 @@ package final class LocalICEUDPSocketCandidateStore: @unchecked Sendable {
         }
     }
 
+    package func addTURNRelayContexts(_ contexts: [LocalICETURNRelayContext]) {
+        lock.withLock {
+            for context in contexts {
+                turnRelayContextsByFoundation[context.candidate.foundation] = context
+                candidatesByFoundation[context.candidate.foundation] = LocalICEUDPSocketCandidate(
+                    candidate: context.candidate,
+                    socket: context.socket
+                )
+            }
+        }
+    }
+
     package func replace(with candidates: [LocalICEUDPSocketCandidate]) {
+        replace(with: candidates, turnRelayContexts: [])
+    }
+
+    package func replace(
+        with candidates: [LocalICEUDPSocketCandidate],
+        turnRelayContexts: [LocalICETURNRelayContext]
+    ) {
         lock.withLock {
             candidatesByFoundation = Self.makeCandidateMap(candidates)
+            turnRelayContextsByFoundation = Dictionary(
+                uniqueKeysWithValues: turnRelayContexts.map {
+                    ($0.candidate.foundation, $0)
+                }
+            )
+            for context in turnRelayContexts {
+                candidatesByFoundation[context.candidate.foundation] = LocalICEUDPSocketCandidate(
+                    candidate: context.candidate,
+                    socket: context.socket
+                )
+            }
         }
     }
 
     package func socket(forFoundation foundation: String) -> LocalICEUDPSocket? {
         lock.withLock {
             candidatesByFoundation[foundation]?.socket
+        }
+    }
+
+    package func turnRelayContext(forFoundation foundation: String) -> LocalICETURNRelayContext? {
+        lock.withLock {
+            turnRelayContextsByFoundation[foundation]
         }
     }
 
@@ -458,6 +657,7 @@ package final class LocalICEUDPSocket: @unchecked Sendable {
 
 package struct LocalICEUDPSocketConnectivityChecker: ICEConnectivityChecking {
     private var socketForFoundation: @Sendable (String) -> LocalICEUDPSocket?
+    private var turnRelayContextForFoundation: @Sendable (String) -> LocalICETURNRelayContext?
 
     package init(candidates: [LocalICEUDPSocketCandidate]) {
         var mutableSocketsByFoundation: [String: LocalICEUDPSocket] = [:]
@@ -468,11 +668,15 @@ package struct LocalICEUDPSocketConnectivityChecker: ICEConnectivityChecking {
         self.socketForFoundation = { foundation in
             socketsByFoundation[foundation]
         }
+        self.turnRelayContextForFoundation = { _ in nil }
     }
 
     package init(candidateStore: LocalICEUDPSocketCandidateStore) {
         self.socketForFoundation = { foundation in
             candidateStore.socket(forFoundation: foundation)
+        }
+        self.turnRelayContextForFoundation = { foundation in
+            candidateStore.turnRelayContext(forFoundation: foundation)
         }
     }
 
@@ -483,15 +687,21 @@ package struct LocalICEUDPSocketConnectivityChecker: ICEConnectivityChecking {
     ) throws -> ICEConnectivityCheckResult {
         try validateCandidateEndpoint(pair.local)
         try validateCandidateEndpoint(pair.remote)
-        guard let socket = socketForFoundation(pair.local.foundation) else {
-            throw SecureMediaTransportError.missingLocalCandidateSocket(pair.local.foundation)
-        }
-
-        return try STUNBindingClient(
-            transport: LocalICEUDPSocketSTUNTransport(
+        let stunTransport: any STUNDatagramTransport
+        if let relayContext = turnRelayContextForFoundation(pair.local.foundation) {
+            stunTransport = try relayContext.makeSTUNTransport(peerCandidate: pair.remote)
+        } else {
+            guard let socket = socketForFoundation(pair.local.foundation) else {
+                throw SecureMediaTransportError.missingLocalCandidateSocket(pair.local.foundation)
+            }
+            stunTransport = LocalICEUDPSocketSTUNTransport(
                 socket: socket,
                 remoteCandidate: pair.remote
             )
+        }
+
+        return try STUNBindingClient(
+            transport: stunTransport
         ).requestServerReflexiveAddress(
             localCredentials: configuration.localCredentials,
             remoteCredentials: configuration.remoteCredentials,
@@ -508,6 +718,7 @@ package struct LocalICEUDPSocketConnectivityChecker: ICEConnectivityChecking {
 
 package struct LocalICEUDPSocketMediaDatagramTransportFactory: MediaDatagramTransportFactory {
     private var socketForFoundation: @Sendable (String) -> LocalICEUDPSocket?
+    private var turnRelayContextForFoundation: @Sendable (String) -> LocalICETURNRelayContext?
 
     package init(candidates: [LocalICEUDPSocketCandidate]) {
         var mutableSocketsByFoundation: [String: LocalICEUDPSocket] = [:]
@@ -518,16 +729,24 @@ package struct LocalICEUDPSocketMediaDatagramTransportFactory: MediaDatagramTran
         self.socketForFoundation = { foundation in
             socketsByFoundation[foundation]
         }
+        self.turnRelayContextForFoundation = { _ in nil }
     }
 
     package init(candidateStore: LocalICEUDPSocketCandidateStore) {
         self.socketForFoundation = { foundation in
             candidateStore.socket(forFoundation: foundation)
         }
+        self.turnRelayContextForFoundation = { foundation in
+            candidateStore.turnRelayContext(forFoundation: foundation)
+        }
     }
 
     package func makeTransport(selectedCandidatePair: ICECandidatePair) throws -> any MediaDatagramTransport {
         try UDPMediaDatagramTransport.validateCandidatePair(selectedCandidatePair)
+        if let relayContext = turnRelayContextForFoundation(selectedCandidatePair.local.foundation) {
+            return try relayContext.makeMediaDatagramTransport(peerCandidate: selectedCandidatePair.remote)
+        }
+
         guard let socket = socketForFoundation(selectedCandidatePair.local.foundation) else {
             throw SecureMediaTransportError.missingLocalCandidateSocket(
                 selectedCandidatePair.local.foundation
@@ -556,6 +775,66 @@ package struct LocalICEUDPSocketMediaDatagramTransport: MediaDatagramTransport {
 
     package func receive() async throws -> Data {
         try socket.receive()
+    }
+}
+
+private struct TURNRelaySocketSTUNTransport: STUNDatagramTransport {
+    var socket: LocalICEUDPSocket
+    var endpoint: TURNServerEndpoint
+    var channelBinding: TURNRelayChannelBinding
+
+    func send(_ data: Data) throws -> Data {
+        let frame = try TURNChannelDataFrame(
+            channelNumber: channelBinding.channelNumber,
+            payload: data
+        )
+        try socket.send(frame.encoded(), toHost: endpoint.host, port: endpoint.port)
+
+        for _ in 0..<8 {
+            let response = try socket.receive(maxByteCount: 1_500)
+            guard response.isTURNChannelDataFrame else {
+                continue
+            }
+
+            let relayFrame = try TURNChannelDataFrame(decoding: response)
+            guard relayFrame.channelNumber == channelBinding.channelNumber else {
+                continue
+            }
+
+            return relayFrame.payload
+        }
+
+        throw SecureMediaTransportError.socketReceiveFailed(ETIMEDOUT)
+    }
+}
+
+private struct TURNRelaySocketMediaDatagramTransport: MediaDatagramTransport {
+    var socket: LocalICEUDPSocket
+    var endpoint: TURNServerEndpoint
+    var channelBinding: TURNRelayChannelBinding
+
+    func send(_ datagram: Data) async throws {
+        let frame = try TURNChannelDataFrame(
+            channelNumber: channelBinding.channelNumber,
+            payload: datagram
+        )
+        try socket.send(frame.encoded(), toHost: endpoint.host, port: endpoint.port)
+    }
+
+    func receive() async throws -> Data {
+        while true {
+            let datagram = try socket.receive()
+            guard datagram.isTURNChannelDataFrame else {
+                continue
+            }
+
+            let frame = try TURNChannelDataFrame(decoding: datagram)
+            guard frame.channelNumber == channelBinding.channelNumber else {
+                continue
+            }
+
+            return frame.payload
+        }
     }
 }
 
@@ -1148,4 +1427,17 @@ private func makeIPv4SocketAddress(address: String, port: UInt16) throws -> sock
         sin_addr: ipv4Address,
         sin_zero: (0, 0, 0, 0, 0, 0, 0, 0)
     )
+}
+
+private extension Data {
+    var isTURNChannelDataFrame: Bool {
+        guard count >= 4 else {
+            return false
+        }
+
+        let first = self[startIndex]
+        let second = self[index(after: startIndex)]
+        let channelNumber = (UInt16(first) << 8) | UInt16(second)
+        return (0x4000 ... 0x7FFF).contains(channelNumber)
+    }
 }

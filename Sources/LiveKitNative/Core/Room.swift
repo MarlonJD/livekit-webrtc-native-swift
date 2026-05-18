@@ -75,8 +75,14 @@ struct RoomMediaStartupConfiguration: Sendable {
                 let serverReflexiveCandidates = localCandidateSockets.flatMap {
                     $0.serverReflexiveCandidates(iceServers: iceServers)
                 }
-                let allCandidates = localCandidateSockets + serverReflexiveCandidates
-                candidateStore.replace(with: allCandidates)
+                let turnRelayContexts = localCandidateSockets.prefix(1).flatMap {
+                    $0.turnRelayContexts(iceServers: iceServers)
+                }
+                let turnRelayCandidates = turnRelayContexts.map {
+                    LocalICEUDPSocketCandidate(candidate: $0.candidate, socket: $0.socket)
+                }
+                let allCandidates = localCandidateSockets + serverReflexiveCandidates + turnRelayCandidates
+                candidateStore.replace(with: allCandidates, turnRelayContexts: turnRelayContexts)
                 return allCandidates.map(\.candidate)
             },
             iceRole: iceRole,
@@ -241,8 +247,14 @@ private final class DefaultRoomMediaStartupLocalCandidateProvider: @unchecked Se
             let serverReflexiveCandidates = hostCandidates.flatMap {
                 $0.serverReflexiveCandidates(iceServers: iceServers)
             }
-            let candidates = hostCandidates + serverReflexiveCandidates
-            candidateStore.replace(with: candidates)
+            let turnRelayContexts = hostCandidates.prefix(1).flatMap {
+                $0.turnRelayContexts(iceServers: iceServers)
+            }
+            let turnRelayCandidates = turnRelayContexts.map {
+                LocalICEUDPSocketCandidate(candidate: $0.candidate, socket: $0.socket)
+            }
+            let candidates = hostCandidates + serverReflexiveCandidates + turnRelayCandidates
+            candidateStore.replace(with: candidates, turnRelayContexts: turnRelayContexts)
             return candidates.map(\.candidate)
         }
     }
@@ -327,6 +339,7 @@ public final class Room: @unchecked Sendable {
     private var dataChannelReceiveLoopID: UInt64 = 0
     private var reconnectSubscribedTrackSIDs: Set<String> = []
     private var reconnectDisabledTrackSIDs: Set<String> = []
+    private var reconnectSubscriberOffer: Livekit_SessionDescription?
     private var reconnectSubscriberAnswer: Livekit_SessionDescription?
     private var reconnectPublisherOffer: Livekit_SessionDescription?
 
@@ -1107,6 +1120,7 @@ public final class Room: @unchecked Sendable {
         var request = Livekit_SignalRequest()
         request.answer = answer
         try await signalConnection.send(request)
+        storeReconnectSubscriberOffer(offer)
         storeReconnectSubscriberAnswer(answer)
         try await sendSubscriberLocalICETrickleCandidates()
         startSubscriberMediaTransportIfReady()
@@ -1547,8 +1561,11 @@ public final class Room: @unchecked Sendable {
             try await applyInitialSignalResponse(response)
         case let .reconnect(reconnectResponse)?:
             resetPeerConnectionNegotiationState(restartICE: true, preservePublisherOfferState: true)
+            await resetPublisherDataChannelForRecovery()
+            try rebuildReconnectSessionDescriptionsAfterICERestart()
             applyICEServers(reconnectResponse.iceServers)
             try await sendReconnectSyncStateIfNeeded()
+            try await sendReconnectLocalICETrickleIfNeeded()
             await transition(to: .connected)
         default:
             let expected = reconnect ? "ReconnectResponse or JoinResponse" : "JoinResponse"
@@ -1623,6 +1640,42 @@ public final class Room: @unchecked Sendable {
         publisherPeerConnection.updateICEServers(nativeICEServers)
     }
 
+    private func resetPublisherDataChannelForRecovery() async {
+        guard let publisherDataChannel else {
+            return
+        }
+
+        stopDataChannelReceiveLoop()
+        await publisherDataChannel.resetForRecovery()
+        startDataChannelReceiveLoopIfReady()
+    }
+
+    private func rebuildReconnectSessionDescriptionsAfterICERestart() throws {
+        let subscriberOffer = reconnectSessionDescriptionLock.withLock {
+            reconnectSubscriberOffer
+        }
+        if let subscriberOffer {
+            var answer = Livekit_SessionDescription()
+            answer.type = "answer"
+            answer.id = subscriberOffer.id
+            answer.sdp = try subscriberPeerConnection.makeSubscriberAnswer(for: subscriberOffer.sdp)
+            storeReconnectSubscriberAnswer(answer)
+        }
+
+        let publisherTracks = publisherOfferLock.withLock {
+            publisherOfferTracks
+        }
+        guard !publisherTracks.isEmpty else {
+            return
+        }
+
+        var offer = Livekit_SessionDescription()
+        offer.type = "offer"
+        offer.id = nextPublisherOfferIdentifier()
+        offer.sdp = try publisherPeerConnection.makePublisherOffer(for: publisherTracks)
+        storeReconnectPublisherOffer(offer)
+    }
+
     private func resetPeerConnectionNegotiationState(
         restartICE: Bool = false,
         preservePublisherOfferState: Bool = false
@@ -1669,6 +1722,23 @@ public final class Room: @unchecked Sendable {
         var request = Livekit_SignalRequest()
         request.syncState = syncState
         try await signalConnection.send(request)
+    }
+
+    private func sendReconnectLocalICETrickleIfNeeded() async throws {
+        let sessionDescriptions = reconnectSessionDescriptionLock.withLock {
+            (
+                subscriberAnswer: reconnectSubscriberAnswer,
+                publisherOffer: reconnectPublisherOffer
+            )
+        }
+
+        if sessionDescriptions.subscriberAnswer != nil {
+            try await sendSubscriberLocalICETrickleCandidates()
+        }
+
+        if sessionDescriptions.publisherOffer != nil {
+            try await sendPublisherLocalICETrickleCandidates()
+        }
     }
 
     private func reconnectSyncState() -> Livekit_SyncState? {
@@ -1957,6 +2027,12 @@ public final class Room: @unchecked Sendable {
         pipelines.1.forEach { $0.stop() }
     }
 
+    private func storeReconnectSubscriberOffer(_ offer: Livekit_SessionDescription) {
+        reconnectSessionDescriptionLock.withLock {
+            reconnectSubscriberOffer = offer
+        }
+    }
+
     private func storeReconnectSubscriberAnswer(_ answer: Livekit_SessionDescription) {
         reconnectSessionDescriptionLock.withLock {
             reconnectSubscriberAnswer = answer
@@ -1977,6 +2053,7 @@ public final class Room: @unchecked Sendable {
 
     private func clearReconnectSessionDescriptionState() {
         reconnectSessionDescriptionLock.withLock {
+            reconnectSubscriberOffer = nil
             reconnectSubscriberAnswer = nil
             reconnectPublisherOffer = nil
         }

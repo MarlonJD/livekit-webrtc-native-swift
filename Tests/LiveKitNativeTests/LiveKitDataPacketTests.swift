@@ -143,6 +143,48 @@ final class LiveKitDataPacketTests: XCTestCase {
         )
     }
 
+    func testLocalDataChannelPublisherReopensChannelAfterRecoveryReset() async throws {
+        let transport = RecordingSCTPDataChannelPacketTransport()
+        let publisher = LocalDataChannelPublisher(transport: transport)
+        let firstPlan = try LocalDataPublishPlan(data: Data([0x01]), options: DataPublishOptions(reliable: true))
+        let secondPlan = try LocalDataPublishPlan(data: Data([0x02]), options: DataPublishOptions(reliable: true))
+
+        try await publisher.publish(firstPlan)
+        let reliableStreamID = await publisher.streamID(for: .reliable)
+        try await publisher.acceptControlPacket(
+            SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
+            )
+        )
+
+        await publisher.resetForRecovery()
+        try await publisher.publish(secondPlan)
+
+        XCTAssertEqual(transport.sentPackets.count, 3)
+        XCTAssertEqual(transport.sentPackets[2].streamID, reliableStreamID)
+        XCTAssertEqual(transport.sentPackets[2].ppid, .dataChannelControl)
+        XCTAssertEqual(
+            try SCTPDataChannelControlMessage(decoding: transport.sentPackets[2].payload),
+            .open(SCTPDataChannelOpenMessage(reliability: .reliable, label: LiveKitSCTPDataChannelLabel.reliable))
+        )
+
+        try await publisher.acceptControlPacket(
+            SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
+            )
+        )
+
+        XCTAssertEqual(transport.sentPackets.count, 4)
+        XCTAssertEqual(
+            transport.sentPackets[3],
+            SCTPDataChannelPacket(streamID: reliableStreamID, ppid: .binary, payload: secondPlan.encodedPacket)
+        )
+    }
+
     func testLocalDataChannelPublisherUsesManagerStreamIDsWhenFlushing() async throws {
         let transport = RecordingSCTPDataChannelPacketTransport()
         let manager = SCTPDataChannelManager(firstLocalStreamID: 1)
