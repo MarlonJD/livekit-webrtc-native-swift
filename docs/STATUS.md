@@ -128,8 +128,12 @@ when the remote peer completes the same DTLS-SRTP path. A shared WebRTC
 datagram classifier/demux can now split DTLS application
 data from SRTP/SRTCP media over the same underlying datagram transport for the
 media/data session binder; default public Room construction now uses that
-combined media/data startup configuration, while LiveKit server E2E
-verification remains open.
+combined media/data startup configuration. The opt-in LiveKit integration
+harness now covers live OpenSSL DTLS-SRTP publisher and subscriber media
+startup on the socket-backed Room media path, including selected ICE pairs
+reaching `.connected` and one publisher H.264 RTP send attempt; broader LiveKit
+RTP/RTCP receive/render, DTLS-backed SCTP data channels, recovery, TURN-only,
+and hardening verification remain open.
 Fresh
 join, reconnect, and disconnect paths now
 reset stale
@@ -843,12 +847,14 @@ The old binary WebRTC dependency path has been removed from the package model.
 
 The following checks passed after the latest implementation pass:
 
-- `swift test`
-  - 485 tests passed
-  - 4 tests skipped by opt-in guard
+- `swift test --jobs 1`
+  - 491 tests selected
+  - 6 tests skipped by opt-in guard
 - `swift test --filter LiveKitNativeIntegrationTests --jobs 1`
-  - 6 integration tests selected
-  - 4 live tests skipped by opt-in guard without LiveKit environment variables
+  - 8 integration tests selected
+  - 6 live tests skipped by opt-in guard without LiveKit environment variables
+- `LIVEKIT_NATIVE_RELEASE_RUN_TESTS=0 LIVEKIT_NATIVE_RELEASE_RUN_BENCHMARKS=0 LIVEKIT_NATIVE_RELEASE_RUN_SIZE_GATE=0 scripts/check_release_readiness.sh`
+  - release-shape check passed with tests, benchmarks, and size gate disabled
 - `swift build --target LiveKitNativeWebRTC --jobs 1 --disable-index-store -debug-info-format none`
   - target build passed
 - `xcodebuild build -scheme LiveKitNative -destination 'generic/platform=iOS Simulator'`
@@ -988,10 +994,12 @@ The following checks passed after the latest implementation pass:
 
 - Expand the current opt-in LiveKit integration harness beyond one-client
   connect/disconnect, two-client participant join/leave, generated `lknative-`
-  room prefixes, short-lived room-scoped tokens, and two-client data-track
-  subscriber-handle signaling.
+  room prefixes, short-lived room-scoped tokens, the separately gated
+  two-client data-track subscriber-handle signaling test, and live OpenSSL
+  DTLS-SRTP publisher/subscriber media startup.
 - Data packet publish/receive over standards-compliant SCTP.
-- Publish path.
+- Full RTP/RTCP publish/subscribe media validation beyond startup and one H.264
+  RTP send attempt.
 - Reconnect integration test.
 - Multi-participant meeting tests with simultaneous publish/subscribe.
 - Weak-network tests with packet loss, jitter, bandwidth changes, and recovery
@@ -1006,9 +1014,9 @@ The following checks passed after the latest implementation pass:
 
 ## Next Recommended Work
 
-1. Continue `1.0.0` hardening by running the new OpenSSL-backed DTLS-SRTP
-   default Room path against a local LiveKit server, then capture the result in
-   an opt-in integration test and validate the OpenSSL packaging story for iOS
+1. Continue `1.0.0` hardening by extending the new live OpenSSL-backed
+   DTLS-SRTP default Room startup coverage into full RTP/RTCP media
+   send/receive validation, then validate the OpenSSL packaging story for iOS
    release builds.
 2. Replace the current DTLS data-channel packet envelope and deterministic
    fragment/retry primitive with a standards-compliant SCTP association,

@@ -25,6 +25,74 @@ final class SCTPDataChannelTests: XCTestCase {
         XCTAssertEqual(decoded, message)
     }
 
+    func testSCTPPacketEncodesCommonHeaderChecksumAndChunks() throws {
+        let supportedAddressTypes = SCTPParameter(type: 0x000c, value: Data([0x00, 0x05, 0x00]))
+        let initChunk = SCTPInitChunk(
+            initiateTag: 0x1122_3344,
+            advertisedReceiverWindowCredit: 131_072,
+            outboundStreams: 1_024,
+            inboundStreams: 1_024,
+            initialTSN: 0x5566_7788,
+            parameters: [supportedAddressTypes]
+        )
+        let packet = SCTPPacket(
+            sourcePort: 5_000,
+            destinationPort: 5_000,
+            verificationTag: 0,
+            chunks: [
+                .initChunk(initChunk),
+                .cookieAck,
+            ]
+        )
+
+        let encoded = packet.encoded()
+        let decoded = try SCTPPacket(decoding: encoded)
+        let decodedInitChunk = try XCTUnwrap(decoded.chunks.first)
+        let decodedInit = try SCTPInitChunk(chunk: decodedInitChunk)
+
+        XCTAssertEqual(encoded.count % 4, 0)
+        XCTAssertEqual(Data(encoded[8..<12]), Data([0x14, 0x0d, 0xfb, 0xbe]))
+        XCTAssertEqual(decoded, packet)
+        XCTAssertEqual(decodedInit, initChunk)
+
+        var tampered = encoded
+        tampered[16] = tampered[16] ^ 0x01
+
+        XCTAssertThrowsError(try SCTPPacket(decoding: tampered)) { error in
+            guard case .invalidSCTPChecksum = error as? SCTPDataChannelError else {
+                return XCTFail("Expected invalid SCTP checksum, got \(error)")
+            }
+        }
+    }
+
+    func testSCTPDataChunkMapsDataChannelPacketPPIDAndPayload() throws {
+        let packet = SCTPDataChannelPacket(
+            streamID: 4,
+            ppid: .binary,
+            payload: Data([0xde, 0xad, 0xbe, 0xef, 0x00])
+        )
+        let dataChunk = packet.dataChunk(
+            tsn: 0x0102_0304,
+            streamSequenceNumber: 7,
+            unordered: true
+        )
+        let sctpPacket = SCTPPacket(
+            verificationTag: 0x9988_7766,
+            chunks: [.data(dataChunk)]
+        )
+
+        let decodedPacket = try SCTPPacket(decoding: sctpPacket.encoded())
+        let decodedChunk = try SCTPDataChunk(chunk: try XCTUnwrap(decodedPacket.chunks.first))
+        let decodedDataChannelPacket = try SCTPDataChannelPacket(dataChunk: decodedChunk)
+
+        XCTAssertTrue(decodedChunk.unordered)
+        XCTAssertTrue(decodedChunk.beginning)
+        XCTAssertTrue(decodedChunk.ending)
+        XCTAssertEqual(decodedChunk.tsn, 0x0102_0304)
+        XCTAssertEqual(decodedChunk.streamSequenceNumber, 7)
+        XCTAssertEqual(decodedDataChannelPacket, packet)
+    }
+
     func testAcknowledgementOpensChannel() throws {
         let channel = SCTPDataChannel(streamID: 0, label: LiveKitSCTPDataChannelLabel.reliable, reliability: .reliable)
         XCTAssertEqual(channel.state, .connecting)

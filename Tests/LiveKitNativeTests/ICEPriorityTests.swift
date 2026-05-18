@@ -479,12 +479,23 @@ final class ICEPriorityTests: XCTestCase {
         )
 
         XCTAssertEqual(candidates.count, 2)
-        XCTAssertEqual(candidates.map(\.foundation), ["local-srflx-1", "local-srflx-2"])
+        XCTAssertEqual(candidates.map(\.foundation), ["localsrflx1", "localsrflx2"])
         XCTAssertEqual(candidates.map(\.address), ["203.0.113.30", "203.0.113.31"])
         XCTAssertEqual(candidates.map(\.port), [3_478, 5_349])
         XCTAssertEqual(candidates.map(\.type), [.serverReflexive, .serverReflexive])
         XCTAssertEqual(candidates[0].localPreference, local.localPreference)
         XCTAssertLessThan(candidates[0].priority, local.priority)
+    }
+
+    func testDerivedICECandidateFoundationUsesServerCompatibleTokenCharacters() {
+        XCTAssertEqual(
+            ICECandidateFoundation.derived(from: "1-srflx/host", label: "relay-tcp", index: 2),
+            "1srflxhostrelaytcp2"
+        )
+        XCTAssertEqual(
+            ICECandidateFoundation.derived(from: "-/", label: "-/", index: 0),
+            "ff1"
+        )
     }
 
     func testSTUNBindingClientSendsAuthenticatedRequestAndValidatesAuthenticatedResponse() throws {

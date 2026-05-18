@@ -1,7 +1,8 @@
 import CryptoKit
 import Foundation
-import LiveKitNative
+import LiveKitNativeWebRTC
 import XCTest
+@testable import LiveKitNative
 
 struct LiveKitIntegrationHarness: Sendable {
     static let runIntegrationKey = "LIVEKIT_NATIVE_RUN_INTEGRATION"
@@ -80,6 +81,30 @@ struct LiveKitIntegrationHarness: Sendable {
         }
     }
 
+    func waitForPublisherMediaStartup(
+        _ room: Room,
+        timeoutSeconds: TimeInterval = 30
+    ) async throws -> PeerConnectionMediaStartupResult {
+        try await waitForMediaStartup(
+            role: "publisher",
+            timeoutSeconds: timeoutSeconds,
+            result: { room.lastPublisherMediaStartupResult },
+            error: { room.lastPublisherMediaStartupError }
+        )
+    }
+
+    func waitForSubscriberMediaStartup(
+        _ room: Room,
+        timeoutSeconds: TimeInterval = 30
+    ) async throws -> PeerConnectionMediaStartupResult {
+        try await waitForMediaStartup(
+            role: "subscriber",
+            timeoutSeconds: timeoutSeconds,
+            result: { room.lastSubscriberMediaStartupResult },
+            error: { room.lastSubscriberMediaStartupError }
+        )
+    }
+
     private static func requiredValue(_ name: String, in environment: [String: String]) throws -> String {
         let value = environment[name]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !value.isEmpty else {
@@ -87,6 +112,39 @@ struct LiveKitIntegrationHarness: Sendable {
         }
 
         return value
+    }
+
+    private func waitForMediaStartup(
+        role: String,
+        timeoutSeconds: TimeInterval,
+        result: @escaping @Sendable () -> PeerConnectionMediaStartupResult?,
+        error: @escaping @Sendable () -> (any Error)?
+    ) async throws -> PeerConnectionMediaStartupResult {
+        try await withLiveKitIntegrationTimeout(seconds: timeoutSeconds) {
+            while !Task.isCancelled {
+                if let error = error() {
+                    throw LiveKitIntegrationHarnessError.mediaStartupFailed(
+                        role: role,
+                        reason: String(describing: error)
+                    )
+                }
+
+                if let result = result() {
+                    guard result.iceSummary.state == .connected else {
+                        throw LiveKitIntegrationHarnessError.unexpectedMediaStartupICEState(
+                            role: role,
+                            state: result.iceSummary.state.rawValue
+                        )
+                    }
+
+                    return result
+                }
+
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+
+            throw CancellationError()
+        }
     }
 }
 
@@ -147,6 +205,46 @@ final class LiveKitIntegrationEventRecorder: RoomDelegate, @unchecked Sendable {
                 if case let .dataTrackSubscriberHandlesChanged(handles) = event,
                    let handle = handles.handles.first(where: { $0.publisherIdentity == publisherIdentity }) {
                     return handle
+                }
+            }
+
+            return nil
+        }
+    }
+
+    func waitForTrackSubscribed(
+        trackSID: String? = nil,
+        timeoutSeconds: TimeInterval = 10
+    ) async throws -> TrackSubscribedInfo {
+        try await wait(timeoutSeconds: timeoutSeconds) { events in
+            for event in events.reversed() {
+                if case let .trackSubscribed(info) = event,
+                   trackSID == nil || info.trackSID == trackSID {
+                    return info
+                }
+            }
+
+            return nil
+        }
+    }
+
+    func waitForTrackSubscribedOrRemoteVideoPublication(
+        publisherIdentity: String,
+        trackSID: String,
+        timeoutSeconds: TimeInterval = 10
+    ) async throws -> String {
+        try await wait(timeoutSeconds: timeoutSeconds) { events in
+            for event in events.reversed() {
+                switch event {
+                case let .trackSubscribed(info) where info.trackSID == trackSID:
+                    return "trackSubscribed"
+                case let .trackPublished(publication, participant)
+                    where participant.identity == publisherIdentity &&
+                    publication.sid == trackSID &&
+                    publication.kind == .video:
+                    return "remoteVideoPublication"
+                default:
+                    continue
                 }
             }
 
@@ -255,6 +353,8 @@ enum LiveKitIntegrationHarnessError: Error, CustomStringConvertible {
     case missingEnvironmentValue(String)
     case invalidEnvironmentValue(name: String, value: String, reason: String)
     case invalidTokenInput(String)
+    case mediaStartupFailed(role: String, reason: String)
+    case unexpectedMediaStartupICEState(role: String, state: String)
     case timeout(seconds: TimeInterval)
 
     var description: String {
@@ -265,6 +365,10 @@ enum LiveKitIntegrationHarnessError: Error, CustomStringConvertible {
             "Invalid integration environment variable \(name)=\(value): \(reason)."
         case let .invalidTokenInput(reason):
             "Invalid LiveKit integration token input: \(reason)."
+        case let .mediaStartupFailed(role, reason):
+            "LiveKit integration \(role) media startup failed: \(reason)."
+        case let .unexpectedMediaStartupICEState(role, state):
+            "LiveKit integration \(role) media startup ICE state was \(state), expected connected."
         case let .timeout(seconds):
             "LiveKit integration operation timed out after \(seconds) seconds."
         }

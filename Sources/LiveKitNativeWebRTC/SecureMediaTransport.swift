@@ -235,7 +235,11 @@ package struct LocalICEUDPSocketCandidate: Sendable {
 
                 let relayCandidate = TURNRelayCandidateFactory.makeCandidate(
                     relayedAddress: allocation.relayedAddress,
-                    foundation: "\(candidate.foundation)-relay-\(index + 1)",
+                    foundation: ICECandidateFoundation.derived(
+                        from: candidate.foundation,
+                        label: "relay",
+                        index: index + 1
+                    ),
                     localPreference: localPreference
                 )
                 return LocalICETURNRelayContext(
@@ -449,6 +453,68 @@ package final class LocalICEUDPSocketCandidateStore: @unchecked Sendable {
     }
 }
 
+package enum LocalICEUDPSocketInboundSTUNResponder {
+    package static func start(
+        candidates: [LocalICEUDPSocketCandidate],
+        localCredentials: ICECredentials
+    ) -> Task<Void, Never>? {
+        let sockets = uniqueSockets(from: candidates)
+        guard !sockets.isEmpty else {
+            return nil
+        }
+
+        return Task.detached {
+            await withTaskGroup(of: Void.self) { group in
+                for socket in sockets {
+                    group.addTask {
+                        respond(on: socket, localCredentials: localCredentials)
+                    }
+                }
+            }
+        }
+    }
+
+    package static func start(
+        candidateStore: LocalICEUDPSocketCandidateStore,
+        localCredentials: ICECredentials
+    ) -> Task<Void, Never>? {
+        start(candidates: candidateStore.candidates, localCredentials: localCredentials)
+    }
+
+    private static func respond(
+        on socket: LocalICEUDPSocket,
+        localCredentials: ICECredentials
+    ) {
+        let responder = ICEBindingRequestResponder(localCredentials: localCredentials)
+        while !Task.isCancelled {
+            do {
+                let datagram = try socket.receiveDatagram(maxByteCount: 1_500)
+                _ = try responder.respondIfNeeded(to: datagram, using: socket)
+            } catch SecureMediaTransportError.socketReceiveFailed(let code)
+                where code == ETIMEDOUT || code == EAGAIN || code == EWOULDBLOCK {
+                continue
+            } catch {
+                continue
+            }
+        }
+    }
+
+    private static func uniqueSockets(
+        from candidates: [LocalICEUDPSocketCandidate]
+    ) -> [LocalICEUDPSocket] {
+        var sockets: [LocalICEUDPSocket] = []
+        var seen = Set<ObjectIdentifier>()
+        for candidate in candidates {
+            let identifier = ObjectIdentifier(candidate.socket)
+            guard seen.insert(identifier).inserted else {
+                continue
+            }
+            sockets.append(candidate.socket)
+        }
+        return sockets
+    }
+}
+
 package final class LocalICEUDPSocket: @unchecked Sendable {
     package let bindAddress: String
     package let localPort: UInt16
@@ -626,15 +692,39 @@ package final class LocalICEUDPSocket: @unchecked Sendable {
     }
 
     fileprivate func receive(maxByteCount: Int = Int(UInt16.max)) throws -> Data {
+        try receiveDatagram(maxByteCount: maxByteCount).data
+    }
+
+    fileprivate func receiveDatagram(
+        maxByteCount: Int = Int(UInt16.max)
+    ) throws -> LocalICEUDPSocketReceivedDatagram {
         var buffer = [UInt8](repeating: 0, count: maxByteCount)
 
         return try lock.withLock {
-            let receivedCount = Darwin.recv(socketDescriptor, &buffer, buffer.count, 0)
+            var sourceStorage = sockaddr_storage()
+            var sourceLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
+            let receivedCount = withUnsafeMutablePointer(to: &sourceStorage) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sourceAddress in
+                    Darwin.recvfrom(
+                        socketDescriptor,
+                        &buffer,
+                        buffer.count,
+                        0,
+                        sourceAddress,
+                        &sourceLength
+                    )
+                }
+            }
             guard receivedCount > 0 else {
                 throw SecureMediaTransportError.socketReceiveFailed(errno)
             }
 
-            return Data(buffer.prefix(receivedCount))
+            let source = Self.ipv4SocketAddress(from: sourceStorage)
+            return LocalICEUDPSocketReceivedDatagram(
+                data: Data(buffer.prefix(receivedCount)),
+                sourceAddress: try Self.ipv4String(from: source.sin_addr),
+                sourcePort: UInt16(bigEndian: source.sin_port)
+            )
         }
     }
 
@@ -653,6 +743,31 @@ package final class LocalICEUDPSocket: @unchecked Sendable {
 
         return UInt16(bigEndian: address.sin_port)
     }
+
+    private static func ipv4SocketAddress(from storage: sockaddr_storage) -> sockaddr_in {
+        var storage = storage
+        return withUnsafePointer(to: &storage) { pointer in
+            pointer.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+        }
+    }
+
+    private static func ipv4String(from address: in_addr) throws -> String {
+        var address = address
+        var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        guard inet_ntop(AF_INET, &address, &buffer, socklen_t(buffer.count)) != nil else {
+            throw SecureMediaTransportError.unsupportedCandidateAddress("")
+        }
+
+        let endIndex = buffer.firstIndex(of: 0) ?? buffer.endIndex
+        let bytes = buffer[..<endIndex].map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+}
+
+fileprivate struct LocalICEUDPSocketReceivedDatagram: Sendable {
+    var data: Data
+    var sourceAddress: String
+    var sourcePort: UInt16
 }
 
 package struct LocalICEUDPSocketConnectivityChecker: ICEConnectivityChecking {
@@ -696,7 +811,8 @@ package struct LocalICEUDPSocketConnectivityChecker: ICEConnectivityChecking {
             }
             stunTransport = LocalICEUDPSocketSTUNTransport(
                 socket: socket,
-                remoteCandidate: pair.remote
+                remoteCandidate: pair.remote,
+                localCredentials: configuration.localCredentials
             )
         }
 
@@ -719,8 +835,12 @@ package struct LocalICEUDPSocketConnectivityChecker: ICEConnectivityChecking {
 package struct LocalICEUDPSocketMediaDatagramTransportFactory: MediaDatagramTransportFactory {
     private var socketForFoundation: @Sendable (String) -> LocalICEUDPSocket?
     private var turnRelayContextForFoundation: @Sendable (String) -> LocalICETURNRelayContext?
+    private var localCredentials: @Sendable () -> ICECredentials?
 
-    package init(candidates: [LocalICEUDPSocketCandidate]) {
+    package init(
+        candidates: [LocalICEUDPSocketCandidate],
+        localCredentials: @escaping @Sendable () -> ICECredentials? = { nil }
+    ) {
         var mutableSocketsByFoundation: [String: LocalICEUDPSocket] = [:]
         for candidate in candidates {
             mutableSocketsByFoundation[candidate.candidate.foundation] = candidate.socket
@@ -730,15 +850,20 @@ package struct LocalICEUDPSocketMediaDatagramTransportFactory: MediaDatagramTran
             socketsByFoundation[foundation]
         }
         self.turnRelayContextForFoundation = { _ in nil }
+        self.localCredentials = localCredentials
     }
 
-    package init(candidateStore: LocalICEUDPSocketCandidateStore) {
+    package init(
+        candidateStore: LocalICEUDPSocketCandidateStore,
+        localCredentials: @escaping @Sendable () -> ICECredentials? = { nil }
+    ) {
         self.socketForFoundation = { foundation in
             candidateStore.socket(forFoundation: foundation)
         }
         self.turnRelayContextForFoundation = { foundation in
             candidateStore.turnRelayContext(forFoundation: foundation)
         }
+        self.localCredentials = localCredentials
     }
 
     package func makeTransport(selectedCandidatePair: ICECandidatePair) throws -> any MediaDatagramTransport {
@@ -755,7 +880,8 @@ package struct LocalICEUDPSocketMediaDatagramTransportFactory: MediaDatagramTran
 
         return LocalICEUDPSocketMediaDatagramTransport(
             socket: socket,
-            remoteCandidate: selectedCandidatePair.remote
+            remoteCandidate: selectedCandidatePair.remote,
+            localCredentials: localCredentials()
         )
     }
 }
@@ -763,10 +889,16 @@ package struct LocalICEUDPSocketMediaDatagramTransportFactory: MediaDatagramTran
 package struct LocalICEUDPSocketMediaDatagramTransport: MediaDatagramTransport {
     package var socket: LocalICEUDPSocket
     package var remoteCandidate: ICECandidate
+    package var localCredentials: ICECredentials?
 
-    package init(socket: LocalICEUDPSocket, remoteCandidate: ICECandidate) {
+    package init(
+        socket: LocalICEUDPSocket,
+        remoteCandidate: ICECandidate,
+        localCredentials: ICECredentials? = nil
+    ) {
         self.socket = socket
         self.remoteCandidate = remoteCandidate
+        self.localCredentials = localCredentials
     }
 
     package func send(_ datagram: Data) async throws {
@@ -774,7 +906,13 @@ package struct LocalICEUDPSocketMediaDatagramTransport: MediaDatagramTransport {
     }
 
     package func receive() async throws -> Data {
-        try socket.receive()
+        let responder = ICEBindingRequestResponder(localCredentials: localCredentials)
+        while true {
+            let datagram = try socket.receiveDatagram()
+            guard try responder.respondIfNeeded(to: datagram, using: socket) else {
+                return datagram.data
+            }
+        }
     }
 }
 
@@ -838,13 +976,102 @@ private struct TURNRelaySocketMediaDatagramTransport: MediaDatagramTransport {
     }
 }
 
+private struct ICEBindingRequestResponder {
+    var localCredentials: ICECredentials?
+
+    func respondIfNeeded(
+        to datagram: LocalICEUDPSocketReceivedDatagram,
+        using socket: LocalICEUDPSocket
+    ) throws -> Bool {
+        guard WebRTCDatagramClassifier.classify(datagram.data) == .stun else {
+            return false
+        }
+        guard let request = try? STUNMessage(decoding: datagram.data) else {
+            return false
+        }
+        guard request.type == .bindingRequest else {
+            return false
+        }
+
+        guard requestMatchesLocalCredentials(request) else {
+            return true
+        }
+        guard requestValidatesAuthentication(request) else {
+            return true
+        }
+
+        let response = STUNMessage(
+            type: .bindingSuccessResponse,
+            transactionID: request.transactionID,
+            attributes: [
+                try .xorMappedAddressIPv4(
+                    address: datagram.sourceAddress,
+                    port: datagram.sourcePort,
+                    transactionID: request.transactionID
+                ),
+            ]
+        )
+        let includeFingerprint = request.firstAttribute(.fingerprint) != nil
+        let responseData: Data
+        if request.firstAttribute(.messageIntegrity) != nil,
+           let localCredentials {
+            responseData = try response.encoded(
+                messageIntegrityKey: localCredentials.password,
+                includeFingerprint: includeFingerprint
+            )
+        } else {
+            responseData = try response.encoded(includeFingerprint: includeFingerprint)
+        }
+        try socket.send(responseData, toHost: datagram.sourceAddress, port: datagram.sourcePort)
+        return true
+    }
+
+    private func requestMatchesLocalCredentials(_ request: STUNMessage) -> Bool {
+        guard let localCredentials,
+              let username = try? request.firstAttribute(.username)?.stringValue
+        else {
+            return true
+        }
+
+        guard let usernameFragment = username.split(separator: ":", maxSplits: 1).first else {
+            return false
+        }
+        return String(usernameFragment) == localCredentials.usernameFragment
+    }
+
+    private func requestValidatesAuthentication(_ request: STUNMessage) -> Bool {
+        if request.firstAttribute(.fingerprint) != nil,
+           (try? request.validatesFingerprint()) != true {
+            return false
+        }
+
+        guard request.firstAttribute(.messageIntegrity) != nil else {
+            return true
+        }
+        guard let localCredentials else {
+            return false
+        }
+
+        return (try? request.validatesMessageIntegrity(key: localCredentials.password)) == true
+    }
+}
+
 private struct LocalICEUDPSocketSTUNTransport: STUNDatagramTransport {
     var socket: LocalICEUDPSocket
     var remoteCandidate: ICECandidate
+    var localCredentials: ICECredentials?
 
     func send(_ data: Data) throws -> Data {
         try socket.send(data, to: remoteCandidate)
-        return try socket.receive(maxByteCount: 1_500)
+        let responder = ICEBindingRequestResponder(localCredentials: localCredentials)
+        for _ in 0..<8 {
+            let datagram = try socket.receiveDatagram(maxByteCount: 1_500)
+            guard try responder.respondIfNeeded(to: datagram, using: socket) else {
+                return datagram.data
+            }
+        }
+
+        throw SecureMediaTransportError.socketReceiveFailed(ETIMEDOUT)
     }
 }
 

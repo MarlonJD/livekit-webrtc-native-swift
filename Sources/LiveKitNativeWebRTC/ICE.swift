@@ -156,6 +156,26 @@ package struct ICECandidate: Equatable, Sendable {
     }
 }
 
+package enum ICECandidateFoundation {
+    package static func derived(
+        from base: String,
+        label: String,
+        index: Int
+    ) -> String {
+        "\(sanitized(base))\(sanitized(label))\(max(1, index))"
+    }
+
+    private static func sanitized(_ value: String) -> String {
+        let bytes = value.utf8.filter { byte in
+            (48 ... 57).contains(byte) ||
+                (65 ... 90).contains(byte) ||
+                (97 ... 122).contains(byte)
+        }
+        let sanitized = String(decoding: bytes, as: UTF8.self)
+        return sanitized.isEmpty ? "f" : sanitized
+    }
+}
+
 package enum ICECandidateSDPError: Error, Equatable, Sendable {
     case missingCandidatePrefix
     case malformedCandidate
@@ -738,7 +758,11 @@ package struct STUNServerReflexiveCandidateGatherer: Sendable {
 
                 candidates.append(
                     ICECandidate(
-                        foundation: "\(localCandidate.foundation)-srflx-\(index + 1)",
+                        foundation: ICECandidateFoundation.derived(
+                            from: localCandidate.foundation,
+                            label: "srflx",
+                            index: index + 1
+                        ),
                         componentID: localCandidate.componentID,
                         transport: .udp,
                         priority: ICECandidatePriority(

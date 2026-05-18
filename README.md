@@ -262,10 +262,10 @@ media/data transport construction.
 Media section requirements and data-track subscriber handles are retained as
 latest-value Room state and emitted as typed room events.
 
-The active implementation focus is now `1.0.0` hardening: validating the
-OpenSSL-backed DTLS-SRTP `use_srtp` handshake/exporter against LiveKit,
-completing LiveKit-validated default secure media transport, TURN TCP/TLS,
-live quality-control wiring, real-device video display hardening,
+The active implementation focus is now `1.0.0` hardening: expanding the new
+opt-in LiveKit-validated OpenSSL DTLS-SRTP publisher/subscriber media startup
+coverage into full secure RTP/RTCP send/receive validation, TURN TCP/TLS, live
+quality-control wiring, real-device video display hardening,
 standards-compliant DTLS-SCTP association behavior, real-device audio session
 hardening, integration apps, and size gates.
 
@@ -446,13 +446,17 @@ LIVEKIT_NATIVE_RUN_INTEGRATION=1 \
 LIVEKIT_NATIVE_LIVEKIT_URL=ws://127.0.0.1:7880 \
 LIVEKIT_NATIVE_API_KEY=devkey \
 LIVEKIT_NATIVE_API_SECRET=secret \
-swift test --filter LiveKitNativeIntegrationTests
+swift test --filter LiveKitNativeIntegrationTests --jobs 1
 ```
 
 The harness generates per-run room names with an `lknative-` prefix and
 short-lived room-scoped participant tokens. It currently covers one-client
-connect/disconnect, two-client participant join/leave, and two-client
-data-track subscriber-handle signaling. Strict production release mode now
+connect/disconnect, two-client participant join/leave, and live OpenSSL
+DTLS-SRTP publisher/subscriber media startup on the socket-backed Room media
+path with one publisher H.264 RTP send attempt. The live data-track
+subscriber-handle test is gated separately with
+`LIVEKIT_NATIVE_RUN_DATA_TRACK_INTEGRATION=1` until the DTLS-backed SCTP data
+channel transport blocker is closed. Strict production release mode now
 requires those integration variables so the future `productionReady` marker
 cannot pass while live tests are silently skipped.
 

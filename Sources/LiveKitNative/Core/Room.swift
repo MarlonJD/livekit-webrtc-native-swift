@@ -11,6 +11,7 @@ struct RoomMediaStartupConfiguration: Sendable {
     var checker: any ICEConnectivityChecking
     var binder: DTLSSRTPMediaSessionBinder
     var mediaDataBinder: DTLSSRTPMediaDataSessionBinder?
+    var inboundSTUNResponder: (@Sendable (ICECredentials) -> Task<Void, Never>?)?
     var consentFreshnessPolicy: ICEConsentFreshnessPolicy
     var consentFreshnessRetryPolicy: STUNBindingRetryPolicy
 
@@ -22,6 +23,7 @@ struct RoomMediaStartupConfiguration: Sendable {
         checker: any ICEConnectivityChecking = STUNICEConnectivityChecker(),
         binder: DTLSSRTPMediaSessionBinder,
         mediaDataBinder: DTLSSRTPMediaDataSessionBinder? = nil,
+        inboundSTUNResponder: (@Sendable (ICECredentials) -> Task<Void, Never>?)? = nil,
         consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
         consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
     ) {
@@ -33,6 +35,7 @@ struct RoomMediaStartupConfiguration: Sendable {
             checker: checker,
             binder: binder,
             mediaDataBinder: mediaDataBinder,
+            inboundSTUNResponder: inboundSTUNResponder,
             consentFreshnessPolicy: consentFreshnessPolicy,
             consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
         )
@@ -46,6 +49,7 @@ struct RoomMediaStartupConfiguration: Sendable {
         checker: any ICEConnectivityChecking = STUNICEConnectivityChecker(),
         binder: DTLSSRTPMediaSessionBinder,
         mediaDataBinder: DTLSSRTPMediaDataSessionBinder? = nil,
+        inboundSTUNResponder: (@Sendable (ICECredentials) -> Task<Void, Never>?)? = nil,
         consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
         consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
     ) {
@@ -56,6 +60,7 @@ struct RoomMediaStartupConfiguration: Sendable {
         self.checker = checker
         self.binder = binder
         self.mediaDataBinder = mediaDataBinder
+        self.inboundSTUNResponder = inboundSTUNResponder
         self.consentFreshnessPolicy = consentFreshnessPolicy
         self.consentFreshnessRetryPolicy = consentFreshnessRetryPolicy
     }
@@ -65,6 +70,7 @@ struct RoomMediaStartupConfiguration: Sendable {
         iceRole: ICEAgentRole = .controlling,
         tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        localCredentials: @escaping @Sendable () -> ICECredentials? = { nil },
         handshaker: any DTLSSRTPHandshaking,
         consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
         consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
@@ -91,11 +97,18 @@ struct RoomMediaStartupConfiguration: Sendable {
             checker: LocalICEUDPSocketConnectivityChecker(candidateStore: candidateStore),
             binder: DTLSSRTPMediaSessionBinder(
                 datagramTransportFactory: LocalICEUDPSocketMediaDatagramTransportFactory(
-                    candidateStore: candidateStore
+                    candidateStore: candidateStore,
+                    localCredentials: localCredentials
                 ),
                 handshaker: handshaker
             ),
             mediaDataBinder: nil,
+            inboundSTUNResponder: { credentials in
+                LocalICEUDPSocketInboundSTUNResponder.start(
+                    candidateStore: candidateStore,
+                    localCredentials: credentials
+                )
+            },
             consentFreshnessPolicy: consentFreshnessPolicy,
             consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
         )
@@ -108,6 +121,7 @@ struct RoomMediaStartupConfiguration: Sendable {
         iceRole: ICEAgentRole = .controlling,
         tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        localCredentials: @escaping @Sendable () -> ICECredentials? = { nil },
         handshaker: any DTLSSRTPHandshaking,
         consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
         consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
@@ -121,6 +135,7 @@ struct RoomMediaStartupConfiguration: Sendable {
             iceRole: iceRole,
             tieBreaker: tieBreaker,
             nominationPolicy: nominationPolicy,
+            localCredentials: localCredentials,
             handshaker: handshaker,
             consentFreshnessPolicy: consentFreshnessPolicy,
             consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
@@ -136,6 +151,7 @@ struct RoomMediaStartupConfiguration: Sendable {
         iceRole: ICEAgentRole = .controlling,
         tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        localCredentials: @escaping @Sendable () -> ICECredentials? = { nil },
         handshaker: any DTLSSRTPHandshaking = OpenSSLDTLSSRTPHandshaker(),
         consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
         consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
@@ -158,11 +174,18 @@ struct RoomMediaStartupConfiguration: Sendable {
             checker: LocalICEUDPSocketConnectivityChecker(candidateStore: candidateStore),
             binder: DTLSSRTPMediaSessionBinder(
                 datagramTransportFactory: LocalICEUDPSocketMediaDatagramTransportFactory(
-                    candidateStore: candidateStore
+                    candidateStore: candidateStore,
+                    localCredentials: localCredentials
                 ),
                 handshaker: handshaker
             ),
             mediaDataBinder: nil,
+            inboundSTUNResponder: { credentials in
+                LocalICEUDPSocketInboundSTUNResponder.start(
+                    candidateStore: candidateStore,
+                    localCredentials: credentials
+                )
+            },
             consentFreshnessPolicy: consentFreshnessPolicy,
             consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
         )
@@ -177,6 +200,7 @@ struct RoomMediaStartupConfiguration: Sendable {
         iceRole: ICEAgentRole = .controlling,
         tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        localCredentials: @escaping @Sendable () -> ICECredentials? = { nil },
         identity: DTLSSRTPIdentity = .generated(),
         receiveAttemptLimit: Int = 64,
         maxDataChannelFragmentPayloadSize: Int? = nil,
@@ -191,7 +215,8 @@ struct RoomMediaStartupConfiguration: Sendable {
             receiveTimeoutMilliseconds: receiveTimeoutMilliseconds
         )
         let datagramFactory = LocalICEUDPSocketMediaDatagramTransportFactory(
-            candidateStore: candidateStore
+            candidateStore: candidateStore,
+            localCredentials: localCredentials
         )
 
         return Self(
@@ -327,6 +352,7 @@ public final class Room: @unchecked Sendable {
     private var subscriberMediaStartupTask: Task<Void, Never>?
     private var subscriberMediaStartupResult: PeerConnectionMediaStartupResult?
     private var subscriberMediaStartupError: (any Error)?
+    private var subscriberInboundSTUNResponderTask: Task<Void, Never>?
     private var subscriberICEConsentFreshnessTask: Task<Void, Never>?
     private var subscriberRTCPHandler: (@Sendable (RTCPPacket) async -> Void)?
     private var subscriberRTCPReceiveTask: Task<Void, Never>?
@@ -651,25 +677,33 @@ public final class Room: @unchecked Sendable {
     public convenience init(options: RoomOptions = .init()) {
         let subscriberDTLSIdentity = DTLSSRTPIdentity.generated()
         let publisherDTLSIdentity = DTLSSRTPIdentity.generated()
+        let subscriberPeerConnection = PeerConnectionCoordinator(
+            configuration: NativeWebRTCConfiguration(
+                role: .subscriber,
+                dtlsIdentity: subscriberDTLSIdentity
+            )
+        )
+        let publisherPeerConnection = PeerConnectionCoordinator(
+            configuration: NativeWebRTCConfiguration(
+                role: .publisher,
+                dtlsIdentity: publisherDTLSIdentity
+            )
+        )
         self.init(
             options: options,
             signalConnection: SignalConnection(),
-            subscriberPeerConnection: PeerConnectionCoordinator(
-                configuration: NativeWebRTCConfiguration(
-                    role: .subscriber,
-                    dtlsIdentity: subscriberDTLSIdentity
-                )
-            ),
-            publisherPeerConnection: PeerConnectionCoordinator(
-                configuration: NativeWebRTCConfiguration(
-                    role: .publisher,
-                    dtlsIdentity: publisherDTLSIdentity
-                )
-            ),
+            subscriberPeerConnection: subscriberPeerConnection,
+            publisherPeerConnection: publisherPeerConnection,
             subscriberMediaStartupConfiguration: .defaultLiveMediaData(
+                localCredentials: {
+                    subscriberPeerConnection.configuration.iceCredentials
+                },
                 identity: subscriberDTLSIdentity
             ),
             publisherMediaStartupConfiguration: .defaultLiveMediaData(
+                localCredentials: {
+                    publisherPeerConnection.configuration.iceCredentials
+                },
                 identity: publisherDTLSIdentity
             )
         )
@@ -994,7 +1028,14 @@ public final class Room: @unchecked Sendable {
     }
 
     func applyRemoteParticipantSnapshots(_ participantSnapshots: [ParticipantSnapshot]) async {
-        let result = await actor.applyParticipantUpdates(participantSnapshots)
+        let localParticipant = snapshots.localParticipant
+        let remoteParticipantSnapshots = participantSnapshots.filter { snapshot in
+            if !snapshot.sid.isEmpty, snapshot.sid == localParticipant.sid {
+                return false
+            }
+            return snapshot.identity != localParticipant.identity
+        }
+        let result = await actor.applyParticipantUpdates(remoteParticipantSnapshots)
         snapshots.replace(with: result.0)
 
         for event in result.1 {
@@ -2343,6 +2384,23 @@ public final class Room: @unchecked Sendable {
             return
         }
 
+        let localCandidates = subscriberLocalICECandidates()
+        guard !localCandidates.isEmpty else {
+            storeSubscriberMediaStartupError(
+                PeerConnectionNegotiationError.missingSelectedICECandidatePair
+            )
+            return
+        }
+
+        guard subscriberMediaStartupConfiguration.mediaDataBinder != nil ||
+              subscriberPeerConnection.remoteDescriptionContainsRTPMedia
+        else {
+            startSubscriberInboundSTUNResponderIfNeeded(
+                configuration: subscriberMediaStartupConfiguration
+            )
+            return
+        }
+
         let shouldStart = subscriberMediaStartupLock.withLock {
             guard !subscriberMediaStartupStarted else {
                 return false
@@ -2356,13 +2414,12 @@ public final class Room: @unchecked Sendable {
             return
         }
 
-        let localCandidates = subscriberLocalICECandidates()
-        guard !localCandidates.isEmpty else {
-            storeSubscriberMediaStartupError(
-                PeerConnectionNegotiationError.missingSelectedICECandidatePair
-            )
-            return
+        let inboundResponderTask = subscriberMediaStartupLock.withLock {
+            let task = subscriberInboundSTUNResponderTask
+            subscriberInboundSTUNResponderTask = nil
+            return task
         }
+        inboundResponderTask?.cancel()
 
         let task = Task { [weak self, subscriberPeerConnection, subscriberMediaStartupConfiguration, localCandidates] in
             do {
@@ -2476,6 +2533,34 @@ public final class Room: @unchecked Sendable {
         }
     }
 
+    private func startSubscriberInboundSTUNResponderIfNeeded(
+        configuration: RoomSubscriberMediaStartupConfiguration
+    ) {
+        guard let inboundSTUNResponder = configuration.inboundSTUNResponder else {
+            return
+        }
+
+        let shouldStart = subscriberMediaStartupLock.withLock {
+            subscriberInboundSTUNResponderTask == nil
+        }
+        guard shouldStart else {
+            return
+        }
+
+        guard let task = inboundSTUNResponder(subscriberPeerConnection.configuration.iceCredentials) else {
+            return
+        }
+
+        let existingTask = subscriberMediaStartupLock.withLock {
+            if subscriberInboundSTUNResponderTask == nil {
+                subscriberInboundSTUNResponderTask = task
+                return nil as Task<Void, Never>?
+            }
+            return task
+        }
+        existingTask?.cancel()
+    }
+
     private func installPublisherDataChannelIfAvailable(from result: PeerConnectionMediaStartupResult) {
         guard !publisherDataChannelIsInjected,
               publisherDataChannel == nil,
@@ -2494,23 +2579,26 @@ public final class Room: @unchecked Sendable {
             let result = subscriberMediaStartupResult
             let rtcpReceiveTask = subscriberRTCPReceiveTask
             let receiverReportTask = subscriberRTCPReceiverReportTask
+            let inboundSTUNResponderTask = subscriberInboundSTUNResponderTask
             let consentFreshnessTask = subscriberICEConsentFreshnessTask
             subscriberMediaStartupStarted = false
             subscriberMediaStartupTask = nil
             subscriberMediaStartupResult = nil
             subscriberMediaStartupError = nil
+            subscriberInboundSTUNResponderTask = nil
             subscriberICEConsentFreshnessTask = nil
             subscriberRTCPReceiveTask = nil
             subscriberRTCPReceiverReportTask = nil
             subscriberLocalCandidatesGathered = false
             subscriberLocalCandidates = []
-            return (task, result, rtcpReceiveTask, receiverReportTask, consentFreshnessTask)
+            return (task, result, rtcpReceiveTask, receiverReportTask, inboundSTUNResponderTask, consentFreshnessTask)
         }
 
         cleared.0?.cancel()
         cleared.2?.cancel()
         cleared.3?.cancel()
         cleared.4?.cancel()
+        cleared.5?.cancel()
         subscriberMediaReceivePipeline.reset()
         subscriberRTCPBandwidthEstimates.reset()
         clearSubscriberAdaptiveTrackSettingsState()

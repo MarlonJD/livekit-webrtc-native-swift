@@ -394,6 +394,49 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(closeCalls.count, 1)
     }
 
+    func testSignalLoopIgnoresLocalParticipantEchoInParticipantUpdate() async throws {
+        var localEcho = Livekit_ParticipantInfo()
+        localEcho.sid = "PA_local"
+        localEcho.identity = "marlon"
+        localEcho.name = "Marlon"
+
+        var remoteParticipant = Livekit_ParticipantInfo()
+        remoteParticipant.sid = "PA_bob"
+        remoteParticipant.identity = "bob"
+        remoteParticipant.name = "Bob"
+        remoteParticipant.tracks = [makeRemoteMicrophoneTrack()]
+
+        var update = Livekit_ParticipantUpdate()
+        update.participants = [localEcho, remoteParticipant]
+
+        var updateResponse = Livekit_SignalResponse()
+        updateResponse.update = update
+
+        let frames = try [
+            makeJoinResponse(),
+            updateResponse,
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let eventRecorder = RoomEventRecorder()
+        room.delegate = eventRecorder
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+
+        let events = await eventRecorder.waitForEventCount(5)
+
+        XCTAssertEqual(room.remoteParticipants.map(\.identity).sorted(), ["alice", "bob"])
+        XCTAssertFalse(room.remoteParticipants.contains { $0.identity == "marlon" })
+        XCTAssertFalse(events.contains { event in
+            if case let .participantConnected(participant) = event {
+                return participant.identity == "marlon"
+            }
+            return false
+        })
+
+        await room.disconnect()
+    }
+
     func testLeaveResumeReconnectsWithReconnectQueryAndAppliesReconnectResponse() async throws {
         let frames = try [
             makeJoinResponse(),

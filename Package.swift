@@ -90,6 +90,7 @@ let package = Package(
             name: "LiveKitNativeIntegrationTests",
             dependencies: [
                 "LiveKitNative",
+                "LiveKitNativeWebRTC",
             ]
         ),
     ],

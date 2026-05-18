@@ -497,6 +497,120 @@ final class SecureMediaTransportTests: XCTestCase {
         XCTAssertEqual(responder.waitForSourcePort(), clientSocket.localPort)
     }
 
+    func testLocalICEUDPSocketConnectivityCheckerRespondsToInboundBindingRequest() throws {
+        let clientSocket = try LocalICEUDPSocket(
+            bindAddress: "127.0.0.1",
+            port: 0,
+            receiveTimeoutMilliseconds: 250
+        )
+        let clientCandidate = clientSocket.hostCandidate(
+            foundation: "client",
+            advertisedAddress: "127.0.0.1"
+        )
+        let localCredentials = ICECredentials(usernameFragment: "local", password: "local-pass")
+        let remoteCredentials = ICECredentials(usernameFragment: "remote", password: "remote-pass")
+        let responder = try STUNResponderSocket(
+            interleavedBindingRequest: STUNResponderSocket.InterleavedBindingRequest(
+                username: "local:remote",
+                messageIntegrityKey: localCredentials.password
+            )
+        )
+        responder.start()
+        let remoteCandidate = loopbackCandidate(
+            foundation: "stun",
+            port: responder.port
+        )
+        let checker = LocalICEUDPSocketConnectivityChecker(
+            candidates: [
+                LocalICEUDPSocketCandidate(candidate: clientCandidate, socket: clientSocket),
+            ]
+        )
+
+        let result = try checker.checkCandidatePair(
+            ICECandidatePair(
+                local: clientCandidate,
+                remote: remoteCandidate,
+                isControlling: true
+            ),
+            configuration: ICEAgentConfiguration(
+                localCredentials: localCredentials,
+                remoteCredentials: remoteCredentials,
+                role: .controlling,
+                tieBreaker: 7,
+                retryPolicy: .once
+            ),
+            nominate: true
+        )
+
+        let inboundResponse = responder.waitForInterleavedResponse()
+        XCTAssertEqual(result.mappedAddress.port, clientSocket.localPort)
+        XCTAssertEqual(inboundResponse?.type, .bindingSuccessResponse)
+        XCTAssertEqual(try inboundResponse?.validatesMessageIntegrity(key: localCredentials.password), true)
+        XCTAssertEqual(try inboundResponse?.validatesFingerprint(), true)
+        XCTAssertEqual(
+            try inboundResponse?.firstAttribute(.xorMappedAddress)?.xorMappedAddressValue,
+            STUNMappedAddress(address: "127.0.0.1", port: responder.port)
+        )
+    }
+
+    func testLocalICEUDPSocketMediaTransportRespondsToInboundBindingRequest() async throws {
+        let clientSocket = try LocalICEUDPSocket(
+            bindAddress: "127.0.0.1",
+            port: 0,
+            receiveTimeoutMilliseconds: 250
+        )
+        let serverSocket = try LocalICEUDPSocket(
+            bindAddress: "127.0.0.1",
+            port: 0,
+            receiveTimeoutMilliseconds: 250
+        )
+        let clientCandidate = clientSocket.hostCandidate(
+            foundation: "client",
+            advertisedAddress: "127.0.0.1"
+        )
+        let serverCandidate = serverSocket.hostCandidate(
+            foundation: "server",
+            advertisedAddress: "127.0.0.1"
+        )
+        let localCredentials = ICECredentials(usernameFragment: "local", password: "local-pass")
+        let clientTransport = LocalICEUDPSocketMediaDatagramTransport(
+            socket: clientSocket,
+            remoteCandidate: serverCandidate,
+            localCredentials: localCredentials
+        )
+        let serverTransport = LocalICEUDPSocketMediaDatagramTransport(
+            socket: serverSocket,
+            remoteCandidate: clientCandidate
+        )
+        let request = STUNMessage(
+            type: .bindingRequest,
+            attributes: [
+                .username("local:remote"),
+                .priority(123),
+            ]
+        )
+        let requestData = try request.encoded(
+            messageIntegrityKey: localCredentials.password,
+            includeFingerprint: true
+        )
+        let mediaDatagram = Data([0x80, 0x60, 0x00, 0x01, 0x02, 0x03])
+
+        let receiveTask = Task {
+            try await clientTransport.receive()
+        }
+        try await serverTransport.send(requestData)
+        let responseData = try await serverTransport.receive()
+        let response = try STUNMessage(decoding: responseData)
+        try await serverTransport.send(mediaDatagram)
+        let received = try await receiveTask.value
+
+        XCTAssertEqual(response.type, .bindingSuccessResponse)
+        XCTAssertEqual(response.transactionID, request.transactionID)
+        XCTAssertEqual(try response.validatesMessageIntegrity(key: localCredentials.password), true)
+        XCTAssertEqual(try response.validatesFingerprint(), true)
+        XCTAssertEqual(received, mediaDatagram)
+    }
+
     func testLocalICEUDPSocketCandidateGathersServerReflexiveCandidateWithBoundSocket() throws {
         let clientSocket = try LocalICEUDPSocket(
             bindAddress: "127.0.0.1",
@@ -934,13 +1048,20 @@ private enum MockMediaDatagramTransportError: Error {
 }
 
 private final class STUNResponderSocket: @unchecked Sendable {
+    struct InterleavedBindingRequest {
+        var username: String
+        var messageIntegrityKey: String
+    }
+
     let port: UInt16
 
     private let socketDescriptor: Int32
+    private let interleavedBindingRequest: InterleavedBindingRequest?
     private let lock = NSLock()
     private var mutableSourcePort: UInt16?
+    private var mutableInterleavedResponse: STUNMessage?
 
-    init() throws {
+    init(interleavedBindingRequest: InterleavedBindingRequest? = nil) throws {
         let descriptor = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         guard descriptor >= 0 else {
             throw SecureMediaTransportError.socketCreationFailed(errno)
@@ -976,6 +1097,7 @@ private final class STUNResponderSocket: @unchecked Sendable {
 
             self.port = try Self.boundPort(socketDescriptor: descriptor)
             self.socketDescriptor = descriptor
+            self.interleavedBindingRequest = interleavedBindingRequest
         } catch {
             Darwin.close(descriptor)
             throw error
@@ -1004,9 +1126,27 @@ private final class STUNResponderSocket: @unchecked Sendable {
         return sourcePort
     }
 
+    func waitForInterleavedResponse(timeout: TimeInterval = 1) -> STUNMessage? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let interleavedResponse {
+                return interleavedResponse
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+
+        return interleavedResponse
+    }
+
     private var sourcePort: UInt16? {
         lock.withLock {
             mutableSourcePort
+        }
+    }
+
+    private var interleavedResponse: STUNMessage? {
+        lock.withLock {
+            mutableInterleavedResponse
         }
     }
 
@@ -1038,6 +1178,10 @@ private final class STUNResponderSocket: @unchecked Sendable {
         }
 
         let request = try STUNMessage(decoding: Data(buffer.prefix(receivedCount)))
+        if let interleavedBindingRequest {
+            try sendInterleavedBindingRequest(interleavedBindingRequest, to: source)
+        }
+
         let response = STUNMessage(
             type: .bindingSuccessResponse,
             transactionID: request.transactionID,
@@ -1068,6 +1212,62 @@ private final class STUNResponderSocket: @unchecked Sendable {
         guard sentCount == responseData.count else {
             throw SecureMediaTransportError.socketSendFailed(errno)
         }
+    }
+
+    private func sendInterleavedBindingRequest(
+        _ interleavedRequest: InterleavedBindingRequest,
+        to source: sockaddr_in
+    ) throws {
+        let request = STUNMessage(
+            type: .bindingRequest,
+            attributes: [
+                .username(interleavedRequest.username),
+                .priority(123),
+            ]
+        )
+        let requestData = try request.encoded(
+            messageIntegrityKey: interleavedRequest.messageIntegrityKey,
+            includeFingerprint: true
+        )
+        var requestAddress = source
+        let sentCount = requestData.withUnsafeBytes { requestBuffer in
+            withUnsafePointer(to: &requestAddress) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                    Darwin.sendto(
+                        socketDescriptor,
+                        requestBuffer.baseAddress,
+                        requestData.count,
+                        0,
+                        socketAddress,
+                        socklen_t(MemoryLayout<sockaddr_in>.size)
+                    )
+                }
+            }
+        }
+        guard sentCount == requestData.count else {
+            throw SecureMediaTransportError.socketSendFailed(errno)
+        }
+
+        for _ in 0..<4 {
+            var buffer = [UInt8](repeating: 0, count: 1_500)
+            let receivedCount = Darwin.recv(socketDescriptor, &buffer, buffer.count, 0)
+            guard receivedCount > 0 else {
+                throw SecureMediaTransportError.socketReceiveFailed(errno)
+            }
+
+            guard let response = try? STUNMessage(decoding: Data(buffer.prefix(receivedCount))),
+                  response.transactionID == request.transactionID
+            else {
+                continue
+            }
+
+            lock.withLock {
+                mutableInterleavedResponse = response
+            }
+            return
+        }
+
+        throw SecureMediaTransportError.socketReceiveFailed(ETIMEDOUT)
     }
 
     private static func boundPort(socketDescriptor: Int32) throws -> UInt16 {

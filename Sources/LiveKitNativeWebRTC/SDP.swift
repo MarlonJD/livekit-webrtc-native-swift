@@ -130,6 +130,12 @@ package struct SDPSessionDescription: Equatable, Sendable {
         firstAttributeValue(prefix: "setup:").flatMap(SDPDTLSSetupRole.init(rawValue:))
     }
 
+    package var containsRTPMedia: Bool {
+        mediaSections.contains { section in
+            section.mediaLine.hasPrefix("audio ") || section.mediaLine.hasPrefix("video ")
+        }
+    }
+
     package func serialized() -> String {
         lines.map(\.serialized).joined(separator: "\r\n") + "\r\n"
     }

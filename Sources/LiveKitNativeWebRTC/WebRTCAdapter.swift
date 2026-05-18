@@ -343,6 +343,7 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
     private var mutableRemoteICECredentials: ICECredentials?
     private var mutableRemoteDTLSFingerprint: DTLSSignature?
     private var mutableRemoteDTLSSetupRole: SDPDTLSSetupRole?
+    private var mutableRemoteDescriptionContainsRTPMedia = false
 
     package init(configuration: NativeWebRTCConfiguration) {
         self.mutableConfiguration = configuration
@@ -371,6 +372,7 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         mutableRemoteICECredentials = nil
         mutableRemoteDTLSFingerprint = nil
         mutableRemoteDTLSSetupRole = nil
+        mutableRemoteDescriptionContainsRTPMedia = false
         remoteDescriptionLock.unlock()
 
         state = .new
@@ -424,6 +426,12 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         remoteDescriptionLock.lock()
         defer { remoteDescriptionLock.unlock() }
         return mutableRemoteDTLSSetupRole
+    }
+
+    package var remoteDescriptionContainsRTPMedia: Bool {
+        remoteDescriptionLock.lock()
+        defer { remoteDescriptionLock.unlock() }
+        return mutableRemoteDescriptionContainsRTPMedia
     }
 
     package var localCapabilities: [SDPCodecCapability] {
@@ -514,6 +522,7 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
             setRemoteICECredentials(credentials)
         }
         setRemoteDTLSParameters(from: offer)
+        setRemoteDescriptionContainsRTPMedia(offer.containsRTPMedia)
 
         return try SubscriberSDPAnswerFactory(
             mediaProfile: configuration.mediaProfile,
@@ -548,6 +557,7 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         mutableRemoteICECredentials = answer.iceCredentials
         mutableRemoteDTLSFingerprint = answer.dtlsFingerprint
         mutableRemoteDTLSSetupRole = answer.dtlsSetupRole
+        mutableRemoteDescriptionContainsRTPMedia = answer.containsRTPMedia
         mutableRemoteAnswer = RemoteSessionDescription(type: type, sdp: sdp, id: id)
         state = .connected
     }
@@ -648,6 +658,12 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         defer { remoteDescriptionLock.unlock() }
         mutableRemoteDTLSFingerprint = description.dtlsFingerprint
         mutableRemoteDTLSSetupRole = description.dtlsSetupRole
+    }
+
+    private func setRemoteDescriptionContainsRTPMedia(_ containsRTPMedia: Bool) {
+        remoteDescriptionLock.lock()
+        defer { remoteDescriptionLock.unlock() }
+        mutableRemoteDescriptionContainsRTPMedia = containsRTPMedia
     }
 
     private func localDTLSRole(forRemoteSetupRole setupRole: SDPDTLSSetupRole) throws -> DTLSSRTPRole {

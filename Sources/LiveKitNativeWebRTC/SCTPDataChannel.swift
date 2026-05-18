@@ -1,6 +1,15 @@
 import Foundation
 
 package enum SCTPDataChannelError: Error, Equatable, Sendable {
+    case truncatedSCTPPacket
+    case invalidSCTPChecksum(expected: UInt32, actual: UInt32)
+    case truncatedSCTPChunk
+    case invalidSCTPChunkLength(UInt16)
+    case invalidSCTPParameterLength(UInt16)
+    case invalidSCTPDataChunkType(UInt8)
+    case invalidSCTPDataChunkLength(Int)
+    case invalidSCTPInitChunkType(UInt8)
+    case invalidSCTPInitChunkLength(Int)
     case truncatedControlMessage
     case truncatedPacketEnvelope
     case invalidControlMessageType(UInt8)
@@ -92,6 +101,328 @@ package enum SCTPDataChannelPPID: UInt32, Equatable, Sendable {
     case binaryEmpty = 57
 }
 
+package enum SCTPChunkType: UInt8, Equatable, Sendable {
+    case data = 0
+    case initChunk = 1
+    case initAck = 2
+    case sack = 3
+    case heartbeat = 4
+    case heartbeatAck = 5
+    case abort = 6
+    case shutdown = 7
+    case shutdownAck = 8
+    case error = 9
+    case cookieEcho = 10
+    case cookieAck = 11
+}
+
+package struct SCTPParameter: Equatable, Sendable {
+    package var type: UInt16
+    package var value: Data
+
+    package init(type: UInt16, value: Data) {
+        self.type = type
+        self.value = value
+    }
+
+    fileprivate init(decoding data: Data, offset: inout Int) throws {
+        guard data.count - offset >= 4 else {
+            throw SCTPDataChannelError.invalidSCTPParameterLength(UInt16(data.count - offset))
+        }
+
+        self.type = data.uint16(at: offset)
+        let length = Int(data.uint16(at: offset + 2))
+        guard length >= 4 else {
+            throw SCTPDataChannelError.invalidSCTPParameterLength(UInt16(length))
+        }
+        guard offset + length <= data.count else {
+            throw SCTPDataChannelError.invalidSCTPParameterLength(UInt16(length))
+        }
+
+        self.value = Data(data[(offset + 4)..<(offset + length)])
+        offset += Self.paddedLength(length)
+    }
+
+    fileprivate func encoded() -> Data {
+        let length = 4 + value.count
+        var data = Data()
+        data.append(type.bigEndianBytes)
+        data.append(UInt16(length).bigEndianBytes)
+        data.append(value)
+        data.appendPadding(toMultipleOfFourFrom: length)
+        return data
+    }
+
+    private static func paddedLength(_ length: Int) -> Int {
+        length + ((4 - (length % 4)) % 4)
+    }
+}
+
+package struct SCTPDataChunk: Equatable, Sendable {
+    package var unordered: Bool
+    package var beginning: Bool
+    package var ending: Bool
+    package var tsn: UInt32
+    package var streamID: UInt16
+    package var streamSequenceNumber: UInt16
+    package var payloadProtocolIdentifier: UInt32
+    package var userData: Data
+
+    package init(
+        unordered: Bool = false,
+        beginning: Bool = true,
+        ending: Bool = true,
+        tsn: UInt32,
+        streamID: UInt16,
+        streamSequenceNumber: UInt16,
+        payloadProtocolIdentifier: UInt32,
+        userData: Data
+    ) {
+        self.unordered = unordered
+        self.beginning = beginning
+        self.ending = ending
+        self.tsn = tsn
+        self.streamID = streamID
+        self.streamSequenceNumber = streamSequenceNumber
+        self.payloadProtocolIdentifier = payloadProtocolIdentifier
+        self.userData = userData
+    }
+
+    package init(chunk: SCTPChunk) throws {
+        guard chunk.rawType == SCTPChunkType.data.rawValue else {
+            throw SCTPDataChannelError.invalidSCTPDataChunkType(chunk.rawType)
+        }
+        guard chunk.value.count >= 12 else {
+            throw SCTPDataChannelError.invalidSCTPDataChunkLength(chunk.value.count)
+        }
+
+        self.unordered = (chunk.flags & 0x04) != 0
+        self.beginning = (chunk.flags & 0x02) != 0
+        self.ending = (chunk.flags & 0x01) != 0
+        self.tsn = chunk.value.uint32(at: 0)
+        self.streamID = chunk.value.uint16(at: 4)
+        self.streamSequenceNumber = chunk.value.uint16(at: 6)
+        self.payloadProtocolIdentifier = chunk.value.uint32(at: 8)
+        self.userData = Data(chunk.value.dropFirst(12))
+    }
+
+    fileprivate var flags: UInt8 {
+        (unordered ? 0x04 : 0) |
+            (beginning ? 0x02 : 0) |
+            (ending ? 0x01 : 0)
+    }
+
+    fileprivate func chunk() -> SCTPChunk {
+        var value = Data()
+        value.append(tsn.bigEndianBytes)
+        value.append(streamID.bigEndianBytes)
+        value.append(streamSequenceNumber.bigEndianBytes)
+        value.append(payloadProtocolIdentifier.bigEndianBytes)
+        value.append(userData)
+        return SCTPChunk(type: .data, flags: flags, value: value)
+    }
+}
+
+package struct SCTPInitChunk: Equatable, Sendable {
+    package var type: SCTPChunkType
+    package var initiateTag: UInt32
+    package var advertisedReceiverWindowCredit: UInt32
+    package var outboundStreams: UInt16
+    package var inboundStreams: UInt16
+    package var initialTSN: UInt32
+    package var parameters: [SCTPParameter]
+
+    package init(
+        type: SCTPChunkType = .initChunk,
+        initiateTag: UInt32,
+        advertisedReceiverWindowCredit: UInt32,
+        outboundStreams: UInt16,
+        inboundStreams: UInt16,
+        initialTSN: UInt32,
+        parameters: [SCTPParameter] = []
+    ) {
+        self.type = type
+        self.initiateTag = initiateTag
+        self.advertisedReceiverWindowCredit = advertisedReceiverWindowCredit
+        self.outboundStreams = outboundStreams
+        self.inboundStreams = inboundStreams
+        self.initialTSN = initialTSN
+        self.parameters = parameters
+    }
+
+    package init(chunk: SCTPChunk) throws {
+        guard chunk.rawType == SCTPChunkType.initChunk.rawValue ||
+              chunk.rawType == SCTPChunkType.initAck.rawValue
+        else {
+            throw SCTPDataChannelError.invalidSCTPInitChunkType(chunk.rawType)
+        }
+        guard chunk.value.count >= 16 else {
+            throw SCTPDataChannelError.invalidSCTPInitChunkLength(chunk.value.count)
+        }
+
+        self.type = SCTPChunkType(rawValue: chunk.rawType) ?? .initChunk
+        self.initiateTag = chunk.value.uint32(at: 0)
+        self.advertisedReceiverWindowCredit = chunk.value.uint32(at: 4)
+        self.outboundStreams = chunk.value.uint16(at: 8)
+        self.inboundStreams = chunk.value.uint16(at: 10)
+        self.initialTSN = chunk.value.uint32(at: 12)
+
+        var offset = 16
+        var parameters: [SCTPParameter] = []
+        while offset < chunk.value.count {
+            parameters.append(try SCTPParameter(decoding: chunk.value, offset: &offset))
+        }
+        self.parameters = parameters
+    }
+
+    fileprivate func chunk() -> SCTPChunk {
+        var value = Data()
+        value.append(initiateTag.bigEndianBytes)
+        value.append(advertisedReceiverWindowCredit.bigEndianBytes)
+        value.append(outboundStreams.bigEndianBytes)
+        value.append(inboundStreams.bigEndianBytes)
+        value.append(initialTSN.bigEndianBytes)
+        for parameter in parameters {
+            value.append(parameter.encoded())
+        }
+        return SCTPChunk(type: type, flags: 0, value: value)
+    }
+}
+
+package struct SCTPChunk: Equatable, Sendable {
+    package var rawType: UInt8
+    package var flags: UInt8
+    package var value: Data
+
+    package init(rawType: UInt8, flags: UInt8 = 0, value: Data = Data()) {
+        self.rawType = rawType
+        self.flags = flags
+        self.value = value
+    }
+
+    package init(type: SCTPChunkType, flags: UInt8 = 0, value: Data = Data()) {
+        self.init(rawType: type.rawValue, flags: flags, value: value)
+    }
+
+    package static func data(_ chunk: SCTPDataChunk) -> SCTPChunk {
+        chunk.chunk()
+    }
+
+    package static func initChunk(_ chunk: SCTPInitChunk) -> SCTPChunk {
+        chunk.chunk()
+    }
+
+    package static func cookieEcho(_ cookie: Data) -> SCTPChunk {
+        SCTPChunk(type: .cookieEcho, value: cookie)
+    }
+
+    package static var cookieAck: SCTPChunk {
+        SCTPChunk(type: .cookieAck)
+    }
+
+    package var type: SCTPChunkType? {
+        SCTPChunkType(rawValue: rawType)
+    }
+
+    fileprivate init(decoding data: Data, offset: inout Int) throws {
+        guard data.count - offset >= 4 else {
+            throw SCTPDataChannelError.truncatedSCTPChunk
+        }
+
+        self.rawType = data.byte(at: offset)
+        self.flags = data.byte(at: offset + 1)
+        let length = Int(data.uint16(at: offset + 2))
+        guard length >= 4 else {
+            throw SCTPDataChannelError.invalidSCTPChunkLength(UInt16(length))
+        }
+        guard offset + length <= data.count else {
+            throw SCTPDataChannelError.truncatedSCTPChunk
+        }
+
+        self.value = Data(data[(offset + 4)..<(offset + length)])
+        offset += Self.paddedLength(length)
+    }
+
+    fileprivate func encoded() -> Data {
+        let length = 4 + value.count
+        var data = Data()
+        data.append(rawType)
+        data.append(flags)
+        data.append(UInt16(length).bigEndianBytes)
+        data.append(value)
+        data.appendPadding(toMultipleOfFourFrom: length)
+        return data
+    }
+
+    private static func paddedLength(_ length: Int) -> Int {
+        length + ((4 - (length % 4)) % 4)
+    }
+}
+
+package struct SCTPPacket: Equatable, Sendable {
+    package var sourcePort: UInt16
+    package var destinationPort: UInt16
+    package var verificationTag: UInt32
+    package var chunks: [SCTPChunk]
+
+    package init(
+        sourcePort: UInt16 = 5_000,
+        destinationPort: UInt16 = 5_000,
+        verificationTag: UInt32,
+        chunks: [SCTPChunk]
+    ) {
+        self.sourcePort = sourcePort
+        self.destinationPort = destinationPort
+        self.verificationTag = verificationTag
+        self.chunks = chunks
+    }
+
+    package init(decoding data: Data, validateChecksum: Bool = true) throws {
+        guard data.count >= 12 else {
+            throw SCTPDataChannelError.truncatedSCTPPacket
+        }
+
+        if validateChecksum {
+            let expectedChecksum = data.uint32(at: 8)
+            let actualChecksum = SCTPCRC32C.checksum(data.zeroingSCTPChecksum())
+            guard expectedChecksum == actualChecksum else {
+                throw SCTPDataChannelError.invalidSCTPChecksum(
+                    expected: expectedChecksum,
+                    actual: actualChecksum
+                )
+            }
+        }
+
+        self.sourcePort = data.uint16(at: 0)
+        self.destinationPort = data.uint16(at: 2)
+        self.verificationTag = data.uint32(at: 4)
+
+        var offset = 12
+        var chunks: [SCTPChunk] = []
+        while offset < data.count {
+            chunks.append(try SCTPChunk(decoding: data, offset: &offset))
+        }
+        self.chunks = chunks
+    }
+
+    package func encoded(includeChecksum: Bool = true) -> Data {
+        var data = Data()
+        data.append(sourcePort.bigEndianBytes)
+        data.append(destinationPort.bigEndianBytes)
+        data.append(verificationTag.bigEndianBytes)
+        data.append(UInt32.zero.bigEndianBytes)
+        for chunk in chunks {
+            data.append(chunk.encoded())
+        }
+
+        if includeChecksum {
+            let checksum = SCTPCRC32C.checksum(data)
+            data.replaceSubrange(8..<12, with: checksum.bigEndianBytes)
+        }
+        return data
+    }
+}
+
 package struct SCTPDataChannelPacket: Equatable, Sendable {
     package var streamID: UInt16
     package var ppid: SCTPDataChannelPPID
@@ -105,6 +436,35 @@ package struct SCTPDataChannelPacket: Equatable, Sendable {
 
     package var isControl: Bool {
         ppid == .dataChannelControl
+    }
+
+    package init(dataChunk: SCTPDataChunk) throws {
+        guard let ppid = SCTPDataChannelPPID(rawValue: dataChunk.payloadProtocolIdentifier) else {
+            throw SCTPDataChannelError.invalidPacketEnvelopePPID(dataChunk.payloadProtocolIdentifier)
+        }
+
+        self.init(
+            streamID: dataChunk.streamID,
+            ppid: ppid,
+            payload: dataChunk.userData
+        )
+    }
+
+    package func dataChunk(
+        tsn: UInt32,
+        streamSequenceNumber: UInt16 = 0,
+        unordered: Bool = false
+    ) -> SCTPDataChunk {
+        SCTPDataChunk(
+            unordered: unordered,
+            beginning: true,
+            ending: true,
+            tsn: tsn,
+            streamID: streamID,
+            streamSequenceNumber: streamSequenceNumber,
+            payloadProtocolIdentifier: ppid.rawValue,
+            userData: payload
+        )
     }
 }
 
@@ -841,7 +1201,43 @@ package actor DTLSSCTPDataChannelPacketTransport: SCTPDataChannelPacketTransceiv
     }
 }
 
+private enum SCTPCRC32C {
+    private static let table: [UInt32] = {
+        let polynomial: UInt32 = 0x82F63B78
+        return (0..<256).map { index in
+            var crc = UInt32(index)
+            for _ in 0..<8 {
+                crc = (crc & 1) == 1 ? (crc >> 1) ^ polynomial : crc >> 1
+            }
+            return crc
+        }
+    }()
+
+    static func checksum(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xffff_ffff
+        for byte in data {
+            let index = Int((crc ^ UInt32(byte)) & 0xff)
+            crc = (crc >> 8) ^ table[index]
+        }
+        return (~crc).byteSwapped
+    }
+}
+
 private extension Data {
+    mutating func appendPadding(toMultipleOfFourFrom length: Int) {
+        let paddingByteCount = (4 - (length % 4)) % 4
+        guard paddingByteCount > 0 else { return }
+        append(Data(repeating: 0, count: paddingByteCount))
+    }
+
+    func zeroingSCTPChecksum() -> Data {
+        guard count >= 12 else { return self }
+
+        var data = self
+        data.replaceSubrange(8..<12, with: Data(repeating: 0, count: 4))
+        return data
+    }
+
     func byte(at offset: Int) -> UInt8 {
         self[index(startIndex, offsetBy: offset)]
     }
