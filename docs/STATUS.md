@@ -22,9 +22,12 @@ soak/performance tests, and end-to-end LiveKit compatibility testing.
 Publisher `AddTrackRequest` signaling is now wired for local audio/video
 publishes, publisher SDP offers are generated and sent after
 `TrackPublishedResponse`, and publisher answers and publisher-targeted trickle
-candidates are routed into the publisher peer connection adapter, but media
-sender capture/encode pipeline and end-to-end live media transport are still
-open.
+candidates are routed into the publisher peer connection adapter. Native
+camera-backed tracks can now feed VideoToolbox H.264 encoded frames into the
+stored publisher RTP sender after secure publisher media startup, and native
+microphone-backed tracks can feed AudioToolbox Opus packets into the same
+publisher RTP/SRTP path. LiveKit E2E media validation, decoded subscriber
+render/playout, and production timing/backpressure policy are still open.
 Data-track publish/unpublish/update-subscription signaling is also wired at
 unit-test level, including server/SFU data-track unpublish cleanup for local
 publication and reconnect state; full standards-compliant SCTP behavior remains
@@ -105,20 +108,21 @@ and local CID after successful publish, removes only the unpublished sender
 after successful unpublish, preserves remaining local sender state for resume
 reconnect, and clears sender state on full publisher offer reset. Encoded Opus
 packets and H.264 frames can now be sent through the stored publisher senders
-by published SID, publisher RTCP packets can be handed to the injected secure
-media transport, inbound publisher RTCP can be decoded through a registered
-handler loop, subscriber RTCP packets can be handed to the injected secure
-media transport, and inbound subscriber RTCP can be decoded through a registered
-handler loop. A deterministic RTCP feedback policy primitive can now build
-Generic NACK and PLI packets from subscriber-side packet-loss/keyframe needs,
-and a subscriber feedback planner maps H.264/VP8 RTP sequence gaps plus
-explicit keyframe requests into bounded RTCP feedback packets that Room can
-dispatch through the injected subscriber RTCP transport. A bounded RTP jitter
-buffer primitive can release contiguous packets, skip bounded gaps, report
-missing sequence numbers, drop duplicate/old packets, flush in sequence order,
-and preserve ordering across sequence-number wrap; the default capture/encode
-loop, default subscriber jitter-buffer integration, and subscriber-pipeline
-feedback dispatch remain open.
+by published SID, native camera/microphone-backed local tracks can start
+capture/encode pipelines once the publisher secure media transport is ready,
+publisher RTCP packets can be handed to the injected secure media transport,
+inbound publisher RTCP can be decoded through a registered handler loop,
+subscriber RTCP packets can be handed to the injected secure media transport,
+and inbound subscriber RTCP can be decoded through a registered handler loop.
+A deterministic RTCP feedback policy primitive can now build Generic NACK and
+PLI packets from subscriber-side packet-loss/keyframe needs, and a subscriber
+feedback planner maps H.264/VP8 RTP sequence gaps plus explicit keyframe
+requests into bounded RTCP feedback packets that Room can dispatch through the
+injected subscriber RTCP transport. The default subscriber RTP receive pipeline
+now runs inbound RTP through bounded jitter buffers, assembles H.264 access
+units or Opus packets, and emits NACK/PLI feedback through subscriber RTCP
+when packet loss or keyframe requirements are detected; decoded video render,
+decoded audio playout, RTCP reports, and adaptive recovery policy remain open.
 
 The repository now has one public SwiftPM product, `LiveKitNative`, with
 internal targets for LiveKit protobuf code and the tiny Swift WebRTC engine.
@@ -492,8 +496,8 @@ The old binary WebRTC dependency path has been removed from the package model.
     SDP and final ICE trickle, so runtime signaling can now reach the
     coordinator-run ICE + media binder path in tests
   - `Room` can send publisher RTP packets through a started injected secure
-    media transport, giving the future capture/encode loop a tested bridge
-    into protected SRTP sending
+    media transport, giving the default camera/microphone capture and encode
+    pipelines a tested bridge into protected SRTP sending
   - stateful publisher Opus and H.264 RTP bridge helpers keep packetizer
     sequence/timestamp state across packets and frames before handing RTP
     packets to the secure publisher transport sink
@@ -519,6 +523,10 @@ The old binary WebRTC dependency path has been removed from the package model.
     explicit keyframe requests into bounded NACK/PLI packet plans
   - `Room` can dispatch subscriber feedback plans through the injected
     subscriber RTCP transport and preserves NACK/PLI ordering
+  - default subscriber RTP receive loop consumes protected RTP packets from the
+    started secure media transport, routes them through per-SSRC jitter
+    buffers, assembles H.264 access units or Opus packets, and sends bounded
+    NACK/PLI feedback when loss or missing keyframe state is detected
   - publisher offer and subscriber answer signaling can send encoded local ICE
     candidates and final trickle markers when media startup has supplied local
     candidates
@@ -602,7 +610,12 @@ The old binary WebRTC dependency path has been removed from the package model.
   - `CameraCaptureOptions` carries position, resolution, and frame-rate intent
   - `LocalVideoTrack.createCameraTrack` creates a native camera-backed track
   - `AVCaptureSession` camera source scaffold with sample-buffer sink
-  - VideoToolbox H.264 encoder configuration scaffold
+  - VideoToolbox H.264 encoder configuration, frame encode, AVCC NAL-unit
+    extraction, keyframe SPS/PPS extraction, RTP timestamp mapping, and
+    hardware-acceleration signal capture where the OS exposes it
+  - native camera publish pipeline that starts after publisher secure media
+    transport startup and sends encoded H.264 frames through the stored
+    publisher RTP sender
   - H.264 encoded-frame to RTP packetization
   - LiveKit `AddTrackRequest` builder for H.264 camera publishes
   - room-connected publish signaling through `AddTrackRequest` and
@@ -615,11 +628,16 @@ The old binary WebRTC dependency path has been removed from the package model.
   - `AVAudioEngine` microphone source scaffold with frame-sink callback
   - Opus voice profile defaults for 48 kHz, 20 ms, mono, payload type 111
   - Opus TOC parsing and packet-duration calculation
+  - AudioToolbox Opus encoder/decoder adapters that avoid a vendored `libopus`
+    dependency while producing real Opus packets in smoke coverage
   - Opus RTP packetization and depacketization
   - subscribe-side Opus packet pipeline with payload type validation and packet
     loss accounting
   - native audio playout scaffold using `AVAudioEngine` and
     `AVAudioPlayerNode`
+  - native microphone publish pipeline that starts after publisher secure media
+    transport startup and sends AudioToolbox Opus packets through the stored
+    publisher RTP sender
   - LiveKit `AddTrackRequest` builder for Opus microphone publishes
   - room-connected publish signaling through `AddTrackRequest` and
     `TrackPublishedResponse`
@@ -670,7 +688,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 415 tests passed
+  - 419 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -683,7 +701,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,537,112 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,648,163 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -699,9 +717,9 @@ The following checks passed after the latest implementation pass:
 
 ### LiveKit Signaling
 
-- Transceiver negotiation, default capture/encode-to-RTP sender pipeline, and
-  LiveKit integration coverage for AddTrack publishes beyond unit-level
-  publisher offer signaling and injected RTP bridge coverage.
+- Transceiver negotiation and LiveKit integration coverage for AddTrack
+  publishes beyond unit-level publisher offer signaling, default
+  capture/encode-to-RTP startup, and injected RTP bridge coverage.
 - Production-hardened reconnect across live media recovery, data channel
   recovery, and server migration beyond the current local ICE credential
   restart plus signal `SyncState` unit coverage for state and SDP recovery.
@@ -735,28 +753,25 @@ The following checks passed after the latest implementation pass:
   default live Room path.
 - Apple-platform OpenSSL packaging/signing validation for iOS and macOS release
   builds.
-- Completing default live RTP/RTCP media send/receive integration on top of the
-  handshaker-backed secure media session binder.
-- Connecting the tested Room publisher RTP bridge, sender registry, and
-  stateful packetizer helpers to the default camera/audio capture and encode
-  loops.
-- Live RTCP feedback/report integration, retransmission/keyframe-request
-  dispatch from subscriber pipelines beyond the current publisher/subscriber
-  RTCP send/receive hooks plus deterministic bounded NACK/PLI packet builder,
-  subscriber feedback planner, and Room subscriber feedback send helper.
+- LiveKit E2E verification for default live RTP/RTCP media send/receive on top
+  of the handshaker-backed secure media session binder.
+- Production hardening for the default camera/audio capture and encode loops,
+  including permission UX, restart behavior, pacing, and bounded queues.
+- Live RTCP report integration, retransmission/keyframe-request behavior
+  against real LiveKit senders, and recovery policy beyond the current
+  publisher/subscriber RTCP send/receive hooks, bounded NACK/PLI packet
+  builder, subscriber feedback planner, default subscriber RTP jitter-buffer
+  receive loop, and Room subscriber feedback dispatch.
 - TWCC, REMB, or congestion control.
-- Default subscriber jitter-buffer integration beyond the current bounded RTP
-  jitter buffer primitive.
-- Packet-loss recovery beyond basic RTP/RTCP packet primitives.
+- Packet-loss recovery beyond default subscriber jitter buffering, NACK/PLI
+  feedback dispatch, and basic RTP/RTCP packet primitives.
 - Adaptive quality control driven by estimated bandwidth, packet loss, CPU,
   and subscriber preferences.
 - RTP timestamp and jitter tracking beyond packet encode/decode.
 
 ### Media
 
-- Full device camera permission UX and runtime capture integration.
-- Full VideoToolbox H.264 encoded sample extraction using real
-  `VTCompressionSessionEncodeFrame` output.
+- Full device camera permission UX and production runtime capture integration.
 - Full VideoToolbox H.264 decode/render path using `VTDecompressionSession`.
 - Production H.264 hardware-acceleration verification where the OS exposes
   `UsingHardwareAcceleratedVideoEncoder` / `UsingHardwareAcceleratedVideoDecoder`
@@ -778,7 +793,8 @@ The following checks passed after the latest implementation pass:
   thermal measurements, and cross-client compatibility coverage before they can
   be enabled.
 - Full Swift VP8 pixel reconstruction and renderer handoff.
-- Full CELT/SILK Swift Opus encode/decode implementation.
+- Production policy for platforms where AudioToolbox Opus encode/decode is not
+  available; a vendored `libopus` dependency remains intentionally excluded.
 - Meeting-grade iOS audio session management, capture/playout timing, echo
   cancellation, noise suppression strategy, automatic gain behavior, route
   changes, Bluetooth behavior, interruptions, and background/foreground
@@ -830,7 +846,7 @@ The following checks passed after the latest implementation pass:
 5. Add adaptive video quality support with multi-layer simulcast/SVC publish
    presets, bandwidth-aware layer selection, Dynacast-style layer pausing, and
    manual subscriber quality controls for low/medium/high video reception.
-6. Complete VideoToolbox-backed H.264 encode/decode, hardware-path detection,
+6. Complete VideoToolbox-backed H.264 decode/render, hardware-path detection,
    and fallback policy before production readiness.
 7. Track H.265/HEVC as a post-`1.0.0` optional Apple-focused codec profile,
    gated by hardware/fallback behavior, LiveKit negotiation, and cross-client
@@ -841,9 +857,8 @@ The following checks passed after the latest implementation pass:
 9. Make meeting-grade audio, jitter buffering, packet-loss recovery,
    congestion control, adaptive quality, TURN-only operation, reconnect media
    recovery, and real-device iOS soak/performance testing production blockers.
-10. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
-   publisher transceiver negotiation, default capture/encode startup into the
-   tested RTP sender bridge, LiveKit E2E secure RTP/RTCP verification, and
+10. Keep full VP8 pixel reconstruction, publisher transceiver negotiation,
+   LiveKit E2E secure RTP/RTCP verification, real-device media timing, and
    Apple-platform OpenSSL packaging validation as the hardening path before a
    usable end-to-end release.
 

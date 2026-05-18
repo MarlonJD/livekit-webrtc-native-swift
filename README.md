@@ -198,16 +198,18 @@ fresh join/reconnect/disconnect boundaries, RTCP
 sender/receiver report and bounded PLI/NACK subscriber feedback planning,
 H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
-assembly, native camera track scaffolding, VideoToolbox H.264 encoder
-configuration, H.264 publish RTP packetization, LiveKit `AddTrackRequest`
-construction, `TrackPublishedResponse` correlation, local video publication
-state, and mock transport tests.
+assembly, native camera track scaffolding, VideoToolbox H.264 encode output,
+H.264 publish RTP packetization, LiveKit `AddTrackRequest` construction,
+`TrackPublishedResponse` correlation, local video publication state, default
+camera publish pipeline startup, and mock transport tests.
 
 The audio groundwork now includes native microphone track scaffolding,
-AVAudioEngine capture and playout adapters, Opus voice profile defaults, Opus
-TOC parsing, Opus RTP packetization/depacketization, subscribe-side packet loss
-accounting, LiveKit `AddTrackRequest` construction for microphone publishes,
-`TrackPublishedResponse` correlation, and local audio publication state.
+AVAudioEngine capture and playout adapters, AudioToolbox Opus encode/decode
+adapters, Opus voice profile defaults, Opus TOC parsing, Opus RTP
+packetization/depacketization, subscribe-side packet loss accounting, LiveKit
+`AddTrackRequest` construction for microphone publishes, `TrackPublishedResponse`
+correlation, default microphone publish pipeline startup, and local audio
+publication state.
 
 VP8 subscribe groundwork now includes RTP payload descriptor parsing, PictureID
 and layer metadata parsing, VP8 frame assembly from single-packet and fragmented
@@ -228,10 +230,9 @@ latest-value Room state and emitted as typed room events.
 
 The active implementation focus is now `1.0.0` hardening: validating the
 OpenSSL-backed DTLS-SRTP `use_srtp` handshake/exporter against LiveKit,
-completing default live secure media transport, reconnect, TURN, quality
-controls, default capture/encode startup into the tested RTP sender bridge,
-standards-compliant DTLS-SCTP association behavior, integration apps, and size
-gates.
+completing LiveKit-validated default secure media transport, reconnect, TURN,
+quality controls, decoded subscriber render/playout, standards-compliant
+DTLS-SCTP association behavior, integration apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -272,18 +273,20 @@ later publisher offers do not replay removed tracks. When the last local media
 track is unpublished, the injected publisher media transport is closed and its
 startup state is cleared so stale SRTP transports cannot keep sending.
 Room can also send publisher RTP packets through the started injected secure
-media transport in tests, establishing the handoff point for the future
-capture/encode loop. A stateful publisher RTP bridge now keeps Opus and
-H.264 packetizer state across packets/frames before handing RTP packets to that
-sink, and Room now stores publisher audio/video RTP sender state by published
-SID and local CID so unpublish removes only the matching sender while preserving
-remaining local sender state for resume reconnect. Encoded Opus packets, H.264
-frames, publisher RTCP packets, and subscriber RTCP packets can now be handed
-through those tested Room-level media hooks. Registered publisher and subscriber
+media transport in tests, establishing the handoff point now used by the
+default camera/microphone capture and encode pipelines. A stateful publisher
+RTP bridge keeps Opus and H.264 packetizer state across packets/frames before
+handing RTP packets to that sink, and Room stores publisher audio/video RTP
+sender state by published SID and local CID so unpublish removes only the
+matching sender while preserving remaining local sender state for resume
+reconnect. Native camera-backed tracks can encode H.264 through VideoToolbox,
+native microphone-backed tracks can encode Opus through AudioToolbox without a
+vendored `libopus`, and those packets flow into the stored publisher RTP/SRTP
+send path after publisher media startup. Registered publisher and subscriber
 RTCP handlers can also receive decoded inbound RTCP from the injected secure
-media transport, and deterministic feedback planning can map H.264/VP8
-subscriber packet-loss and keyframe-request signals into bounded NACK/PLI RTCP
-packets that Room can send through the injected subscriber RTCP transport.
+media transport, and the default subscriber RTP receive loop now feeds
+protected RTP through jitter buffering, H.264/Opus packet assembly, and
+bounded NACK/PLI feedback dispatch.
 Server-initiated mute messages update local/remote track publication state and emit
 `RoomEvent.trackMuteChanged`. Room-level media subscription and subscribed
 track settings requests are available through `Room.updateSubscription` and
@@ -301,12 +304,12 @@ for reconnect state, injected publisher transport teardown, consent-freshness
 execution primitives plus the media-startup consent loop, RTP jitter-buffer
 primitives, default socket-backed Room ICE trickle startup, queued data publish
 flush after data-channel DCEP ack, inbound data-channel event plumbing, DTLS
-application-data packet transport, and matching `RequestResponse` failure
-mapping are unit-tested, while real default secure media transport completion,
-default live consent execution after DTLS, standards-compliant live SCTP
-association behavior, subscriber jitter-buffer integration, capture/encode
-loop startup, media recovery, and end-to-end reconnect hardening are still
-open.
+application-data packet transport, VideoToolbox H.264 encode smoke coverage,
+AudioToolbox Opus encode/decode smoke coverage, subscriber RTP
+jitter-buffer/feedback behavior, and matching `RequestResponse` failure
+mapping are unit-tested, while LiveKit E2E media validation, decoded subscriber
+render/playout, standards-compliant live SCTP association behavior, media
+recovery, and end-to-end reconnect hardening are still open.
 
 ## Benchmarks
 
@@ -355,9 +358,9 @@ unit/integration opt-in tests, benchmark smoke, and the compressed release
 binary size proxy. The strict gate additionally requires
 `LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
 That strict gate intentionally fails today because LiveKit E2E secure RTP/RTCP
-verification, full ICE/TURN hardening, publisher capture/encode startup,
-subscriber-pipeline RTCP feedback dispatch, standards-compliant live SCTP,
-Apple-platform OpenSSL packaging validation, and end-to-end LiveKit tests are
+verification, full ICE/TURN hardening, decoded subscriber render/playout,
+standards-compliant live SCTP, Apple-platform OpenSSL packaging validation,
+meeting-grade audio/network quality policy, and end-to-end LiveKit tests are
 still open.
 
 ## Requirements

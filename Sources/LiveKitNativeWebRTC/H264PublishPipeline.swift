@@ -187,7 +187,11 @@ package struct H264EncodedFrame: Equatable, Sendable {
 
 package final class H264VideoToolboxEncoder: @unchecked Sendable {
     package let settings: H264EncoderSettings
+    private let lock = NSLock()
     private var compressionSession: VTCompressionSession?
+    private var outputHandler: (@Sendable (H264EncodedFrame) -> Void)?
+    private var mutableUsesHardwareAcceleration: Bool?
+    private var mutableLastEncodingError: (any Error)?
 
     package init(settings: H264EncoderSettings) {
         self.settings = settings
@@ -197,7 +201,23 @@ package final class H264VideoToolboxEncoder: @unchecked Sendable {
         compressionSession != nil
     }
 
-    package func configure() throws {
+    package var usesHardwareAcceleration: Bool? {
+        lock.withLock {
+            mutableUsesHardwareAcceleration
+        }
+    }
+
+    package var lastEncodingError: (any Error)? {
+        lock.withLock {
+            mutableLastEncodingError
+        }
+    }
+
+    package func configure(outputHandler: (@Sendable (H264EncodedFrame) -> Void)? = nil) throws {
+        lock.withLock {
+            self.outputHandler = outputHandler
+            self.mutableLastEncodingError = nil
+        }
         guard compressionSession == nil else {
             return
         }
@@ -211,8 +231,8 @@ package final class H264VideoToolboxEncoder: @unchecked Sendable {
             encoderSpecification: nil,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
-            outputCallback: nil,
-            refcon: nil,
+            outputCallback: h264VideoToolboxEncoderOutputCallback,
+            refcon: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()),
             compressionSessionOut: &session
         )
 
@@ -221,8 +241,14 @@ package final class H264VideoToolboxEncoder: @unchecked Sendable {
         }
 
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: settings.profileLevel.videoToolboxValue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: settings.bitrate as CFNumber)
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+            value: max(1, Int(settings.framesPerSecond * 2)) as CFNumber
+        )
         VTSessionSetProperty(
             session,
             key: kVTCompressionPropertyKey_ExpectedFrameRate,
@@ -230,6 +256,60 @@ package final class H264VideoToolboxEncoder: @unchecked Sendable {
         )
         VTCompressionSessionPrepareToEncodeFrames(session)
         compressionSession = session
+        updateHardwareAccelerationState(session)
+    }
+
+    package func encode(_ sampleBuffer: CMSampleBuffer) throws {
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            throw H264VideoToolboxEncoderError.sampleBufferMissingImageBuffer
+        }
+
+        try encode(
+            pixelBuffer: imageBuffer,
+            presentationTimeStamp: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+            duration: CMSampleBufferGetDuration(sampleBuffer)
+        )
+    }
+
+    package func encode(
+        pixelBuffer: CVImageBuffer,
+        presentationTimeStamp: CMTime,
+        duration: CMTime = .invalid
+    ) throws {
+        guard let compressionSession else {
+            try configure()
+            guard let compressionSession else {
+                throw H264VideoToolboxEncoderError.encoderNotConfigured
+            }
+
+            return try encode(
+                pixelBuffer: pixelBuffer,
+                presentationTimeStamp: presentationTimeStamp,
+                duration: duration,
+                session: compressionSession
+            )
+        }
+
+        try encode(
+            pixelBuffer: pixelBuffer,
+            presentationTimeStamp: presentationTimeStamp,
+            duration: duration,
+            session: compressionSession
+        )
+    }
+
+    package func completeFrames(until presentationTimeStamp: CMTime = .invalid) throws {
+        guard let compressionSession else {
+            return
+        }
+
+        let status = VTCompressionSessionCompleteFrames(
+            compressionSession,
+            untilPresentationTimeStamp: presentationTimeStamp
+        )
+        guard status == noErr else {
+            throw H264VideoToolboxEncoderError.encodingFailed(status)
+        }
     }
 
     package func invalidate() {
@@ -239,11 +319,329 @@ package final class H264VideoToolboxEncoder: @unchecked Sendable {
 
         VTCompressionSessionInvalidate(compressionSession)
         self.compressionSession = nil
+        lock.withLock {
+            outputHandler = nil
+            mutableUsesHardwareAcceleration = nil
+        }
+    }
+
+    private func encode(
+        pixelBuffer: CVImageBuffer,
+        presentationTimeStamp: CMTime,
+        duration: CMTime,
+        session: VTCompressionSession
+    ) throws {
+        let status = VTCompressionSessionEncodeFrame(
+            session,
+            imageBuffer: pixelBuffer,
+            presentationTimeStamp: presentationTimeStamp,
+            duration: duration,
+            frameProperties: nil,
+            sourceFrameRefcon: nil,
+            infoFlagsOut: nil
+        )
+        guard status == noErr else {
+            throw H264VideoToolboxEncoderError.encodingFailed(status)
+        }
+    }
+
+    fileprivate func handleOutput(status: OSStatus, sampleBuffer: CMSampleBuffer?) {
+        do {
+            guard status == noErr else {
+                throw H264VideoToolboxEncoderError.encodingFailed(status)
+            }
+            guard let sampleBuffer, CMSampleBufferDataIsReady(sampleBuffer) else {
+                throw H264VideoToolboxEncoderError.encodedSampleBufferDataUnavailable
+            }
+
+            let frame = try H264EncodedFrame(sampleBuffer: sampleBuffer)
+            let handler = lock.withLock {
+                mutableLastEncodingError = nil
+                return outputHandler
+            }
+            handler?(frame)
+        } catch {
+            lock.withLock {
+                mutableLastEncodingError = error
+            }
+        }
+    }
+
+    private func updateHardwareAccelerationState(_ session: VTCompressionSession) {
+        var property: CFTypeRef?
+        let status = withUnsafeMutablePointer(to: &property) { propertyPointer in
+            VTSessionCopyProperty(
+                session,
+                key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+                allocator: kCFAllocatorDefault,
+                valueOut: propertyPointer
+            )
+        }
+        guard status == noErr else {
+            return
+        }
+
+        let isHardwareAccelerated = (property as? Bool)
+        lock.withLock {
+            mutableUsesHardwareAcceleration = isHardwareAccelerated
+        }
     }
 }
 
 package enum H264VideoToolboxEncoderError: Error, Equatable, Sendable {
     case configurationFailed(OSStatus)
+    case encoderNotConfigured
+    case encodingFailed(OSStatus)
+    case sampleBufferMissingImageBuffer
+    case encodedSampleBufferDataUnavailable
+    case missingFormatDescription
+    case invalidParameterSet(OSStatus)
+    case invalidBlockBuffer(OSStatus)
+    case invalidNALUnitLength
+}
+
+package final class H264CameraPublishPipeline: NativeCameraVideoFrameSink, @unchecked Sendable {
+    package let source: NativeCameraVideoSource
+    package let encoder: H264VideoToolboxEncoder
+    private let sendFrame: @Sendable (H264EncodedFrame) async throws -> Void
+    private let lock = NSLock()
+    private var mutableIsRunning = false
+    private var mutableLastError: (any Error)?
+
+    package init(
+        source: NativeCameraVideoSource,
+        encoder: H264VideoToolboxEncoder,
+        sendFrame: @escaping @Sendable (H264EncodedFrame) async throws -> Void
+    ) {
+        self.source = source
+        self.encoder = encoder
+        self.sendFrame = sendFrame
+    }
+
+    package var isRunning: Bool {
+        lock.withLock {
+            mutableIsRunning
+        }
+    }
+
+    package var lastError: (any Error)? {
+        lock.withLock {
+            mutableLastError
+        }
+    }
+
+    package func start() throws {
+        let shouldStart = lock.withLock {
+            guard !mutableIsRunning else {
+                return false
+            }
+            mutableIsRunning = true
+            mutableLastError = nil
+            return true
+        }
+        guard shouldStart else {
+            return
+        }
+
+        do {
+            try encoder.configure { [weak self] frame in
+                self?.dispatch(frame)
+            }
+            source.setFrameSink(self)
+            try source.start()
+        } catch {
+            lock.withLock {
+                mutableIsRunning = false
+                mutableLastError = error
+            }
+            source.setFrameSink(nil)
+            throw error
+        }
+    }
+
+    package func stop() {
+        source.stop()
+        source.setFrameSink(nil)
+        encoder.invalidate()
+        lock.withLock {
+            mutableIsRunning = false
+        }
+    }
+
+    package func cameraSource(
+        _ source: NativeCameraVideoSource,
+        didOutput sampleBuffer: CMSampleBuffer
+    ) {
+        do {
+            try encoder.encode(sampleBuffer)
+        } catch {
+            lock.withLock {
+                mutableLastError = error
+            }
+        }
+    }
+
+    private func dispatch(_ frame: H264EncodedFrame) {
+        Task { [sendFrame] in
+            do {
+                try await sendFrame(frame)
+            } catch {
+                self.lock.withLock {
+                    self.mutableLastError = error
+                }
+            }
+        }
+    }
+}
+
+private let h264VideoToolboxEncoderOutputCallback: VTCompressionOutputCallback = {
+    outputCallbackRefCon,
+    _,
+    status,
+    _,
+    sampleBuffer in
+    guard let outputCallbackRefCon else {
+        return
+    }
+
+    let encoder = Unmanaged<H264VideoToolboxEncoder>
+        .fromOpaque(outputCallbackRefCon)
+        .takeUnretainedValue()
+    encoder.handleOutput(status: status, sampleBuffer: sampleBuffer)
+}
+
+private extension H264EncodedFrame {
+    init(sampleBuffer: CMSampleBuffer) throws {
+        let timestamp = Self.rtpTimestamp(for: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        let isKeyFrame = Self.isKeyFrame(sampleBuffer)
+        var nalUnits: [Data] = []
+
+        if isKeyFrame {
+            nalUnits.append(contentsOf: try Self.parameterSets(from: sampleBuffer))
+        }
+        nalUnits.append(contentsOf: try Self.sampleNALUnits(from: sampleBuffer))
+
+        self.init(nalUnits: nalUnits, rtpTimestamp: timestamp, isKeyFrame: isKeyFrame)
+    }
+
+    static func rtpTimestamp(for presentationTimeStamp: CMTime) -> UInt32 {
+        guard presentationTimeStamp.isValid, !presentationTimeStamp.isIndefinite else {
+            return 0
+        }
+
+        let seconds = CMTimeGetSeconds(presentationTimeStamp)
+        guard seconds.isFinite, seconds >= 0 else {
+            return 0
+        }
+
+        return UInt32(seconds * 90_000) &+ 0
+    }
+
+    static func isKeyFrame(_ sampleBuffer: CMSampleBuffer) -> Bool {
+        let attachments = CMSampleBufferGetSampleAttachmentsArray(
+            sampleBuffer,
+            createIfNecessary: false
+        ) as? [[CFString: Any]]
+        let isNotSync = attachments?.first?[kCMSampleAttachmentKey_NotSync] as? Bool ?? false
+        return !isNotSync
+    }
+
+    static func parameterSets(from sampleBuffer: CMSampleBuffer) throws -> [Data] {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            throw H264VideoToolboxEncoderError.missingFormatDescription
+        }
+
+        var parameterSetCount = 0
+        var nalUnitHeaderLength: Int32 = 0
+        var status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            formatDescription,
+            parameterSetIndex: 0,
+            parameterSetPointerOut: nil,
+            parameterSetSizeOut: nil,
+            parameterSetCountOut: &parameterSetCount,
+            nalUnitHeaderLengthOut: &nalUnitHeaderLength
+        )
+        guard status == noErr else {
+            throw H264VideoToolboxEncoderError.invalidParameterSet(status)
+        }
+
+        var parameterSets: [Data] = []
+        for index in 0..<parameterSetCount {
+            var pointer: UnsafePointer<UInt8>?
+            var size = 0
+            status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                formatDescription,
+                parameterSetIndex: index,
+                parameterSetPointerOut: &pointer,
+                parameterSetSizeOut: &size,
+                parameterSetCountOut: nil,
+                nalUnitHeaderLengthOut: nil
+            )
+            guard status == noErr else {
+                throw H264VideoToolboxEncoderError.invalidParameterSet(status)
+            }
+            guard let pointer, size > 0 else {
+                continue
+            }
+
+            parameterSets.append(Data(bytes: pointer, count: size))
+        }
+
+        return parameterSets
+    }
+
+    static func sampleNALUnits(from sampleBuffer: CMSampleBuffer) throws -> [Data] {
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+            throw H264VideoToolboxEncoderError.encodedSampleBufferDataUnavailable
+        }
+
+        var totalLength = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        let status = CMBlockBufferGetDataPointer(
+            blockBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: nil,
+            totalLengthOut: &totalLength,
+            dataPointerOut: &dataPointer
+        )
+        guard status == noErr else {
+            throw H264VideoToolboxEncoderError.invalidBlockBuffer(status)
+        }
+        guard let dataPointer else {
+            throw H264VideoToolboxEncoderError.encodedSampleBufferDataUnavailable
+        }
+
+        let bytes = UnsafeRawBufferPointer(start: dataPointer, count: totalLength)
+        var offset = 0
+        var nalUnits: [Data] = []
+
+        while offset < totalLength {
+            guard offset + 4 <= totalLength else {
+                throw H264VideoToolboxEncoderError.invalidNALUnitLength
+            }
+
+            let nalLength = Int(bytes.networkUInt32(at: offset))
+            offset += 4
+
+            guard nalLength > 0, offset + nalLength <= totalLength else {
+                throw H264VideoToolboxEncoderError.invalidNALUnitLength
+            }
+
+            nalUnits.append(Data(bytes: bytes.baseAddress!.advanced(by: offset), count: nalLength))
+            offset += nalLength
+        }
+
+        return nalUnits
+    }
+}
+
+private extension UnsafeRawBufferPointer {
+    func networkUInt32(at offset: Int) -> UInt32 {
+        UInt32(self[offset]) << 24 |
+            UInt32(self[offset + 1]) << 16 |
+            UInt32(self[offset + 2]) << 8 |
+            UInt32(self[offset + 3])
+    }
 }
 
 package final class H264PublishRTPPacketizer: @unchecked Sendable {

@@ -225,6 +225,7 @@ public final class Room: @unchecked Sendable {
     private let subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration?
     private let publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration?
     private let publisherDataChannel: LocalDataChannelPublisher?
+    private let subscriberMediaReceivePipeline = SubscriberMediaReceivePipeline()
     private let snapshots: RoomSnapshotStore
     private let signalLoopLock = NSLock()
     private let connectionContextLock = NSLock()
@@ -242,6 +243,8 @@ public final class Room: @unchecked Sendable {
     private var nextPublisherOfferID: UInt32 = 1
     private var publisherAudioRTPSendersBySID: [String: PublisherAudioRTPSender] = [:]
     private var publisherVideoRTPSendersBySID: [String: PublisherVideoRTPSender] = [:]
+    private var publisherAudioPipelinesBySID: [String: OpusMicrophonePublishPipeline] = [:]
+    private var publisherVideoPipelinesBySID: [String: H264CameraPublishPipeline] = [:]
     private var publisherRTPSenderSIDByCID: [String: String] = [:]
     private var subscriberMediaStartupStarted = false
     private var subscriberMediaStartupTask: Task<Void, Never>?
@@ -1072,6 +1075,8 @@ public final class Room: @unchecked Sendable {
                         sid: publishedTrack.sid,
                         cid: plan.cid
                     )
+                    self.storePublisherVideoPipeline(plan: plan, sid: publishedTrack.sid)
+                    self.startPublisherLocalMediaPipelinesIfReady()
                     return publishedTrack
                 },
                 publishAudio: { [weak self] plan in
@@ -1092,6 +1097,8 @@ public final class Room: @unchecked Sendable {
                         sid: publishedTrack.sid,
                         cid: plan.cid
                     )
+                    self.storePublisherAudioPipeline(plan: plan, sid: publishedTrack.sid)
+                    self.startPublisherLocalMediaPipelinesIfReady()
                     return publishedTrack
                 },
                 unpublishTrack: { [weak self] plan in
@@ -1741,6 +1748,35 @@ public final class Room: @unchecked Sendable {
         }
     }
 
+    private func storePublisherAudioPipeline(plan: LocalAudioPublishPlan, sid: String) {
+        guard let source = plan.nativeMicrophoneSource else {
+            return
+        }
+
+        let profile = OpusVoiceProfile(
+            payloadType: plan.payloadType,
+            clockRate: plan.sampleRate,
+            channelCount: plan.channelCount,
+            frameDurationMilliseconds: plan.frameDurationMilliseconds
+        )
+        let pipeline = OpusMicrophonePublishPipeline(
+            source: source,
+            encoder: OpusAudioConverterEncoder(profile: profile)
+        ) { [weak self] packet in
+            guard let self else {
+                throw LiveKitNativeError.notConnected
+            }
+            try await self.sendPublisherAudio(packet, sid: sid)
+        }
+
+        let previous = publisherRTPSenderLock.withLock {
+            let previous = publisherAudioPipelinesBySID[sid]
+            publisherAudioPipelinesBySID[sid] = pipeline
+            return previous
+        }
+        previous?.stop()
+    }
+
     private func storePublisherVideoRTPSender(_ sender: PublisherVideoRTPSender, sid: String, cid: String) {
         publisherRTPSenderLock.withLock {
             removeStalePublisherRTPSenderLocked(cid: cid, sid: sid)
@@ -1750,6 +1786,75 @@ public final class Room: @unchecked Sendable {
         }
     }
 
+    private func storePublisherVideoPipeline(plan: LocalVideoPublishPlan, sid: String) {
+        guard let source = plan.nativeCameraSource else {
+            return
+        }
+
+        let pipeline = H264CameraPublishPipeline(
+            source: source,
+            encoder: H264VideoToolboxEncoder(settings: plan.encoderSettings)
+        ) { [weak self] frame in
+            guard let self else {
+                throw LiveKitNativeError.notConnected
+            }
+            try await self.sendPublisherVideo(frame, sid: sid)
+        }
+
+        let previous = publisherRTPSenderLock.withLock {
+            let previous = publisherVideoPipelinesBySID[sid]
+            publisherVideoPipelinesBySID[sid] = pipeline
+            return previous
+        }
+        previous?.stop()
+    }
+
+    private func startPublisherLocalMediaPipelinesIfReady() {
+        let hasPublisherTransport = publisherMediaStartupLock.withLock {
+            publisherMediaStartupResult != nil
+        }
+        guard hasPublisherTransport else {
+            return
+        }
+
+        let pipelines = publisherRTPSenderLock.withLock {
+            (
+                audio: Array(publisherAudioPipelinesBySID.values),
+                video: Array(publisherVideoPipelinesBySID.values)
+            )
+        }
+
+        for pipeline in pipelines.video where !pipeline.isRunning {
+            do {
+                try pipeline.start()
+            } catch {
+                storePublisherMediaStartupError(error)
+                LiveKitNativeLogging.log(.error, "Publisher camera pipeline failed: \(error.localizedDescription)")
+            }
+        }
+
+        for pipeline in pipelines.audio where !pipeline.isRunning {
+            do {
+                try pipeline.start()
+            } catch {
+                storePublisherMediaStartupError(error)
+                LiveKitNativeLogging.log(.error, "Publisher microphone pipeline failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func stopPublisherLocalMediaPipelines() {
+        let pipelines = publisherRTPSenderLock.withLock {
+            (
+                audio: Array(publisherAudioPipelinesBySID.values),
+                video: Array(publisherVideoPipelinesBySID.values)
+            )
+        }
+
+        pipelines.video.forEach { $0.stop() }
+        pipelines.audio.forEach { $0.stop() }
+    }
+
     private func removeStalePublisherRTPSenderLocked(cid: String, sid: String) {
         guard let existingSID = publisherRTPSenderSIDByCID[cid], existingSID != sid else {
             return
@@ -1757,24 +1862,41 @@ public final class Room: @unchecked Sendable {
 
         publisherAudioRTPSendersBySID[existingSID] = nil
         publisherVideoRTPSendersBySID[existingSID] = nil
+        publisherAudioPipelinesBySID[existingSID]?.stop()
+        publisherAudioPipelinesBySID[existingSID] = nil
+        publisherVideoPipelinesBySID[existingSID]?.stop()
+        publisherVideoPipelinesBySID[existingSID] = nil
     }
 
     @discardableResult
     private func removePublisherRTPSender(sid: String) -> Bool {
-        publisherRTPSenderLock.withLock {
+        let removed = publisherRTPSenderLock.withLock {
             let removedAudio = publisherAudioRTPSendersBySID.removeValue(forKey: sid)
             let removedVideo = publisherVideoRTPSendersBySID.removeValue(forKey: sid)
+            let removedAudioPipeline = publisherAudioPipelinesBySID.removeValue(forKey: sid)
+            let removedVideoPipeline = publisherVideoPipelinesBySID.removeValue(forKey: sid)
             publisherRTPSenderSIDByCID = publisherRTPSenderSIDByCID.filter { $0.value != sid }
-            return removedAudio != nil || removedVideo != nil
+            return (removedAudio != nil || removedVideo != nil, removedAudioPipeline, removedVideoPipeline)
         }
+
+        removed.1?.stop()
+        removed.2?.stop()
+        return removed.0
     }
 
     private func clearPublisherRTPSenders() {
-        publisherRTPSenderLock.withLock {
+        let pipelines = publisherRTPSenderLock.withLock {
+            let audioPipelines = Array(publisherAudioPipelinesBySID.values)
+            let videoPipelines = Array(publisherVideoPipelinesBySID.values)
             publisherAudioRTPSendersBySID.removeAll()
             publisherVideoRTPSendersBySID.removeAll()
+            publisherAudioPipelinesBySID.removeAll()
+            publisherVideoPipelinesBySID.removeAll()
             publisherRTPSenderSIDByCID.removeAll()
+            return (audioPipelines, videoPipelines)
         }
+        pipelines.0.forEach { $0.stop() }
+        pipelines.1.forEach { $0.stop() }
     }
 
     private func storeReconnectSubscriberAnswer(_ answer: Livekit_SessionDescription) {
@@ -1917,6 +2039,7 @@ public final class Room: @unchecked Sendable {
         }
         startPublisherICEConsentFreshnessLoopIfReady(result: result)
         startPublisherRTCPReceiveLoopIfReady()
+        startPublisherLocalMediaPipelinesIfReady()
     }
 
     private func storeSubscriberMediaStartupResult(_ result: PeerConnectionMediaStartupResult) {
@@ -1961,6 +2084,7 @@ public final class Room: @unchecked Sendable {
         cleared.0?.cancel()
         cleared.2?.cancel()
         cleared.3?.cancel()
+        stopPublisherLocalMediaPipelines()
         return cleared.1
     }
 
@@ -2157,8 +2281,7 @@ public final class Room: @unchecked Sendable {
 
     private func startSubscriberRTCPReceiveLoopIfReady() {
         subscriberMediaStartupLock.withLock {
-            guard subscriberRTCPHandler != nil,
-                  subscriberRTCPReceiveTask == nil,
+            guard subscriberRTCPReceiveTask == nil,
                   let transport = subscriberMediaStartupResult?.transport
             else {
                 return
@@ -2226,11 +2349,11 @@ public final class Room: @unchecked Sendable {
                 }
 
                 switch packet {
-                case .rtp:
-                    continue
+                case let .rtp(packet):
+                    await handleSubscriberRTP(packet)
                 case let .rtcp(packet):
                     guard let handler = subscriberRTCPHandlerSnapshot() else {
-                        return
+                        continue
                     }
                     await handler(packet)
                 }
@@ -2243,6 +2366,23 @@ public final class Room: @unchecked Sendable {
                 if !Task.isCancelled {
                     LiveKitNativeLogging.log(.error, "Subscriber RTCP receive loop stopped: \(error.localizedDescription)")
                 }
+                return
+            }
+        }
+    }
+
+    private func handleSubscriberRTP(_ packet: RTPPacket) async {
+        let result = subscriberMediaReceivePipeline.append(packet)
+        guard !result.feedbackPackets.isEmpty else {
+            return
+        }
+
+        for feedbackPacket in result.feedbackPackets {
+            do {
+                try await sendSubscriberRTCP(feedbackPacket)
+            } catch {
+                storeSubscriberMediaStartupError(error)
+                LiveKitNativeLogging.log(.error, "Subscriber RTCP feedback send failed: \(error.localizedDescription)")
                 return
             }
         }

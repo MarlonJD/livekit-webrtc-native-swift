@@ -21,12 +21,12 @@ dynamic trickle candidate checklists, SDP ICE credential extraction,
 coordinator-created ICE agents, use-candidate nomination, and subscribe-side
 H.264 RTP assembly.
 Milestone 0.3 adds native camera track scaffolding, VideoToolbox
-H.264 encoder configuration, H.264 publish RTP packetization, LiveKit
+H.264 encode output, H.264 publish RTP packetization, LiveKit
 `AddTrackRequest` construction, and local camera publication state. Milestone
-0.4 adds native microphone track scaffolding, Opus voice profile defaults, Opus
-RTP packetization/depacketization, audio playout scaffolding, LiveKit
-`AddTrackRequest` construction for microphone publishes, and local microphone
-publication state. Milestone 0.5 adds VP8 RTP payload descriptor parsing, VP8
+0.4 adds native microphone track scaffolding, AudioToolbox Opus encode/decode
+adapters, Opus RTP packetization/depacketization, audio playout scaffolding,
+LiveKit `AddTrackRequest` construction for microphone publishes, and local
+microphone publication state. Milestone 0.5 adds VP8 RTP payload descriptor parsing, VP8
 frame assembly, keyframe metadata extraction, and a decode-only frame inspector.
 Milestone 0.6 adds WebRTC data-channel DCEP open/ack messages, reliable/lossy
 SCTP channel planning, LiveKit `DataPacket` user-packet mapping,
@@ -79,19 +79,18 @@ acknowledgements before local publication removal; multi-track unpublish also
 sends a refreshed publisher offer for the remaining local media, and final
 local media unpublish closes and clears the injected publisher media transport.
 Room can send publisher RTP packets through a started injected secure media
-transport in tests, establishing the bridge for the future capture/encode
-loop, and stateful Opus/H.264 publisher RTP bridge helpers now keep packetizer
-sequence/timestamp state across packets and frames before handing RTP packets
-to that sink. Room also stores publisher audio/video RTP sender state by
-published SID and local CID after successful publish, removes only the matching
-sender after unpublish, and preserves remaining sender state for resume
-reconnect. Encoded Opus packets, H.264 frames, publisher RTCP packets, and
-subscriber RTCP packets can now be handed through the tested Room-level media
-hooks, registered publisher/subscriber RTCP handlers can receive decoded
-inbound RTCP from the injected secure media transport, and a deterministic
-feedback planner can map H.264/VP8 subscriber packet-loss and keyframe-request
-signals into bounded NACK/PLI RTCP packets that Room can send through the
-injected subscriber RTCP transport.
+transport in tests, and that bridge is now used by default camera/microphone
+capture and encode pipelines. Native camera-backed tracks encode H.264 through
+VideoToolbox, native microphone-backed tracks encode Opus through AudioToolbox
+without a vendored codec dependency, and stateful Opus/H.264 publisher RTP
+bridge helpers keep packetizer sequence/timestamp state before handing RTP
+packets to the secure transport. Room also stores publisher audio/video RTP
+sender state by published SID and local CID after successful publish, removes
+only the matching sender after unpublish, and preserves remaining sender state
+for resume reconnect. Registered publisher/subscriber RTCP handlers can
+receive decoded inbound RTCP from the injected secure media transport, and the
+default subscriber RTP receive loop now feeds protected RTP through jitter
+buffering, H.264/Opus packet assembly, and bounded NACK/PLI feedback dispatch.
 `Room.updateSubscription` and `Room.updateTrackSettings` expose media
 subscription and subscribed track settings signaling.
 `LocalParticipant.setTrackSubscriptionPermissions` exposes publisher-controlled
@@ -161,10 +160,10 @@ preferences, disabled subscribed tracks, local media/data publications, and
 the latest negotiated subscriber answer / publisher offer SDP state at
 unit-test level, and keep publisher offer track state so a later local publish
 after resume still includes existing local media sections. LiveKit E2E
-verification for the OpenSSL DTLS-SRTP path, default subscriber jitter-buffer
-integration, standards-compliant live SCTP association behavior, RTP sender
-capture/encode startup, subscriber-pipeline RTCP feedback dispatch, and
-reconnect media recovery remain part of production hardening.
+verification for the OpenSSL DTLS-SRTP path, decoded subscriber render/playout,
+standards-compliant live SCTP association behavior, real-device media timing,
+quality adaptation, and reconnect media recovery remain part of production
+hardening.
 
 Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the

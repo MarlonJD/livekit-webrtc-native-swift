@@ -13,6 +13,7 @@ struct LocalVideoPublishPlan: Equatable, Sendable {
     var codec: RTPCodec
     var ssrc: UInt32
     var payloadType: UInt8
+    var nativeCameraSource: NativeCameraVideoSource?
 
     init(
         track: LocalVideoTrack,
@@ -31,6 +32,20 @@ struct LocalVideoPublishPlan: Equatable, Sendable {
         self.codec = .h264
         self.ssrc = ssrc
         self.payloadType = payloadType
+        self.nativeCameraSource = track.nativeCameraSource
+    }
+
+    static func == (lhs: LocalVideoPublishPlan, rhs: LocalVideoPublishPlan) -> Bool {
+        lhs.cid == rhs.cid &&
+            lhs.name == rhs.name &&
+            lhs.source == rhs.source &&
+            lhs.width == rhs.width &&
+            lhs.height == rhs.height &&
+            lhs.framesPerSecond == rhs.framesPerSecond &&
+            lhs.simulcast == rhs.simulcast &&
+            lhs.codec == rhs.codec &&
+            lhs.ssrc == rhs.ssrc &&
+            lhs.payloadType == rhs.payloadType
     }
 
     var encoderSettings: H264EncoderSettings {
@@ -109,6 +124,7 @@ struct LocalAudioPublishPlan: Equatable, Sendable {
     var codec: RTPCodec
     var ssrc: UInt32
     var payloadType: UInt8
+    var nativeMicrophoneSource: NativeMicrophoneAudioSource?
 
     init(
         track: LocalAudioTrack,
@@ -126,6 +142,19 @@ struct LocalAudioPublishPlan: Equatable, Sendable {
         self.codec = .opus
         self.ssrc = ssrc
         self.payloadType = payloadType
+        self.nativeMicrophoneSource = track.nativeMicrophoneSource
+    }
+
+    static func == (lhs: LocalAudioPublishPlan, rhs: LocalAudioPublishPlan) -> Bool {
+        lhs.cid == rhs.cid &&
+            lhs.name == rhs.name &&
+            lhs.source == rhs.source &&
+            lhs.sampleRate == rhs.sampleRate &&
+            lhs.channelCount == rhs.channelCount &&
+            lhs.frameDurationMilliseconds == rhs.frameDurationMilliseconds &&
+            lhs.codec == rhs.codec &&
+            lhs.ssrc == rhs.ssrc &&
+            lhs.payloadType == rhs.payloadType
     }
 
     var packetizer: OpusRTPPacketizer {

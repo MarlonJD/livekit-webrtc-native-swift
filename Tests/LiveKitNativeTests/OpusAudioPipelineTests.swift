@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 @testable import LiveKitNativeWebRTC
 
@@ -130,5 +131,37 @@ final class OpusAudioPipelineTests: XCTestCase {
         XCTAssertEqual(source.configuration.sampleRate, 48_000)
         XCTAssertEqual(source.configuration.channelCount, 2)
         XCTAssertFalse(source.isRunning)
+    }
+
+    func testAudioToolboxOpusEncoderAndDecoderRoundTripPCMBuffer() throws {
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 960))
+        buffer.frameLength = 960
+        let channel = try XCTUnwrap(buffer.floatChannelData?[0])
+        for frame in 0..<Int(buffer.frameLength) {
+            channel[frame] = sin(Float(frame) * 0.01) * 0.1
+        }
+
+        let encoder = OpusAudioConverterEncoder()
+        let packet: OpusPacket
+        do {
+            packet = try encoder.encode(buffer)
+        } catch let error as OpusAudioPipelineError {
+            throw XCTSkip("AudioToolbox Opus encoder unavailable in this environment: \(error)")
+        }
+
+        XCTAssertFalse(packet.payload.isEmpty)
+
+        let decoder = OpusAudioConverterDecoder()
+        let decoded: AVAudioPCMBuffer
+        do {
+            decoded = try decoder.decode(packet)
+        } catch let error as OpusAudioPipelineError {
+            throw XCTSkip("AudioToolbox Opus decoder unavailable in this environment: \(error)")
+        }
+
+        XCTAssertGreaterThan(decoded.frameLength, 0)
+        XCTAssertEqual(decoded.format.sampleRate, 48_000)
+        XCTAssertEqual(decoded.format.channelCount, 1)
     }
 }

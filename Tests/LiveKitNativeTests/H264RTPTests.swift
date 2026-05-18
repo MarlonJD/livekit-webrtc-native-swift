@@ -1,4 +1,6 @@
 import Foundation
+import CoreMedia
+import CoreVideo
 import XCTest
 @testable import LiveKitNativeWebRTC
 
@@ -134,6 +136,40 @@ final class H264RTPTests: XCTestCase {
         XCTAssertEqual(secondPackets.first?.timestamp, 93_000)
     }
 
+    func testVideoToolboxEncoderProducesH264NALUnitsFromPixelBuffer() throws {
+        let recorder = H264EncodedFrameRecorder()
+        let didEncode = expectation(description: "VideoToolbox encoder produced a frame")
+        let encoder = H264VideoToolboxEncoder(
+            settings: H264EncoderSettings(
+                width: 16,
+                height: 16,
+                framesPerSecond: 30,
+                bitrate: 100_000
+            )
+        )
+
+        do {
+            try encoder.configure { frame in
+                recorder.record(frame)
+                didEncode.fulfill()
+            }
+            try encoder.encode(
+                pixelBuffer: Self.makeNV12PixelBuffer(width: 16, height: 16),
+                presentationTimeStamp: CMTime(value: 0, timescale: 30),
+                duration: CMTime(value: 1, timescale: 30)
+            )
+            try encoder.completeFrames()
+        } catch let error as H264VideoToolboxEncoderError {
+            throw XCTSkip("VideoToolbox H.264 encoder unavailable in this environment: \(error)")
+        }
+
+        wait(for: [didEncode], timeout: 2.0)
+        let frames = recorder.frames
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertFalse(try XCTUnwrap(frames.first).nalUnits.isEmpty)
+        XCTAssertEqual(frames.first?.rtpTimestamp, 0)
+    }
+
     func testDetectsMissingFUAStart() {
         let packet = RTPPacket(
             marker: false,
@@ -148,4 +184,56 @@ final class H264RTPTests: XCTestCase {
             XCTAssertEqual(error as? H264RTPError, .missingFragmentStart)
         }
     }
+
+    private static func makeNV12PixelBuffer(width: Int, height: Int) throws -> CVPixelBuffer {
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            [
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+            ] as CFDictionary,
+            &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pixelBuffer else {
+            throw H264TestError.pixelBufferCreationFailed(status)
+        }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+        for plane in 0..<CVPixelBufferGetPlaneCount(pixelBuffer) {
+            guard let baseAddress = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, plane) else {
+                continue
+            }
+            let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, plane)
+            let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, plane)
+            memset(baseAddress, 0x80, height * bytesPerRow)
+        }
+
+        return pixelBuffer
+    }
+}
+
+private final class H264EncodedFrameRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var mutableFrames: [H264EncodedFrame] = []
+
+    var frames: [H264EncodedFrame] {
+        lock.withLock {
+            mutableFrames
+        }
+    }
+
+    func record(_ frame: H264EncodedFrame) {
+        lock.withLock {
+            mutableFrames.append(frame)
+        }
+    }
+}
+
+private enum H264TestError: Error {
+    case pixelBufferCreationFailed(CVReturn)
 }

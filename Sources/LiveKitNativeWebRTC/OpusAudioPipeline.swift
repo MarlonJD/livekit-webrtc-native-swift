@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import Foundation
 
 package enum OpusPacketError: Error, Equatable, Sendable {
@@ -9,6 +10,11 @@ package enum OpusPacketError: Error, Equatable, Sendable {
 package enum OpusAudioPipelineError: Error, Equatable, Sendable {
     case payloadTypeMismatch(expected: UInt8, actual: UInt8)
     case unsupportedAudioFormat
+    case audioConverterCreationFailed(OSStatus)
+    case audioConverterPropertyFailed(OSStatus)
+    case audioConversionFailed(OSStatus)
+    case encodedPacketUnavailable
+    case decodedPCMBufferUnavailable
 }
 
 package struct OpusVoiceProfile: Equatable, Sendable {
@@ -167,6 +173,390 @@ package final class OpusSubscribePipeline: @unchecked Sendable {
     }
 }
 
+package final class OpusAudioConverterEncoder: @unchecked Sendable {
+    package let profile: OpusVoiceProfile
+    package let bitrate: UInt32
+    private var converter: AudioConverterRef?
+    private var configuredInputSampleRate: Double?
+    private var configuredInputChannelCount: Int?
+
+    package init(profile: OpusVoiceProfile = OpusVoiceProfile(), bitrate: UInt32 = 32_000) {
+        self.profile = profile
+        self.bitrate = bitrate
+    }
+
+    deinit {
+        if let converter {
+            AudioConverterDispose(converter)
+        }
+    }
+
+    package func encode(_ buffer: AVAudioPCMBuffer) throws -> OpusPacket {
+        let input = try InterleavedFloatPCMInput(buffer: buffer)
+        let converter = try configureIfNeeded(
+            sampleRate: input.sampleRate,
+            channelCount: input.channelCount
+        )
+        let context = AudioConverterLinearPCMInputContext(
+            data: input.data,
+            frameCount: input.frameCount,
+            channelCount: input.channelCount
+        )
+
+        var outputPacketCount: UInt32 = 1
+        var outputData = Data(count: Int(maximumOutputPacketSize(converter: converter)))
+        var outputBufferList = AudioBufferList(
+            mNumberBuffers: 1,
+            mBuffers: AudioBuffer(
+                mNumberChannels: UInt32(profile.channelCount),
+                mDataByteSize: UInt32(outputData.count),
+                mData: nil
+            )
+        )
+
+        let status = outputData.withUnsafeMutableBytes { outputBytes in
+            outputBufferList.mBuffers.mData = outputBytes.baseAddress
+            return AudioConverterFillComplexBuffer(
+                converter,
+                opusLinearPCMInputProc,
+                Unmanaged.passUnretained(context).toOpaque(),
+                &outputPacketCount,
+                &outputBufferList,
+                nil
+            )
+        }
+        guard status == noErr else {
+            throw OpusAudioPipelineError.audioConversionFailed(status)
+        }
+        guard outputPacketCount > 0, outputBufferList.mBuffers.mDataByteSize > 0 else {
+            throw OpusAudioPipelineError.encodedPacketUnavailable
+        }
+
+        return try OpusPacket(payload: outputData.prefixBytes(Int(outputBufferList.mBuffers.mDataByteSize)))
+    }
+
+    package func invalidate() {
+        if let converter {
+            AudioConverterDispose(converter)
+        }
+        converter = nil
+        configuredInputSampleRate = nil
+        configuredInputChannelCount = nil
+    }
+
+    private func configureIfNeeded(sampleRate: Double, channelCount: Int) throws -> AudioConverterRef {
+        if let converter,
+           configuredInputSampleRate == sampleRate,
+           configuredInputChannelCount == channelCount {
+            return converter
+        }
+
+        invalidate()
+
+        var inputDescription = Self.linearPCMDescription(sampleRate: sampleRate, channelCount: channelCount)
+        var outputDescription = Self.opusDescription(
+            sampleRate: Double(profile.clockRate),
+            channelCount: profile.channelCount,
+            framesPerPacket: profile.framesPerPacket
+        )
+
+        var newConverter: AudioConverterRef?
+        let creationStatus = AudioConverterNew(
+            &inputDescription,
+            &outputDescription,
+            &newConverter
+        )
+        guard creationStatus == noErr, let newConverter else {
+            throw OpusAudioPipelineError.audioConverterCreationFailed(creationStatus)
+        }
+
+        var mutableBitrate = bitrate
+        let propertyStatus = AudioConverterSetProperty(
+            newConverter,
+            kAudioConverterEncodeBitRate,
+            UInt32(MemoryLayout<UInt32>.size),
+            &mutableBitrate
+        )
+        if propertyStatus != noErr {
+            AudioConverterDispose(newConverter)
+            throw OpusAudioPipelineError.audioConverterPropertyFailed(propertyStatus)
+        }
+
+        converter = newConverter
+        configuredInputSampleRate = sampleRate
+        configuredInputChannelCount = channelCount
+        return newConverter
+    }
+
+    private func maximumOutputPacketSize(converter: AudioConverterRef) -> UInt32 {
+        var packetSize: UInt32 = 1_500
+        var propertySize = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioConverterGetProperty(
+            converter,
+            kAudioConverterPropertyMaximumOutputPacketSize,
+            &propertySize,
+            &packetSize
+        )
+        guard status == noErr else {
+            return 1_500
+        }
+
+        return max(packetSize, 1_500)
+    }
+
+    fileprivate static func linearPCMDescription(sampleRate: Double, channelCount: Int) -> AudioStreamBasicDescription {
+        AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: UInt32(channelCount * MemoryLayout<Float>.size),
+            mFramesPerPacket: 1,
+            mBytesPerFrame: UInt32(channelCount * MemoryLayout<Float>.size),
+            mChannelsPerFrame: UInt32(channelCount),
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+    }
+
+    fileprivate static func opusDescription(
+        sampleRate: Double,
+        channelCount: Int,
+        framesPerPacket: Int
+    ) -> AudioStreamBasicDescription {
+        AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatOpus,
+            mFormatFlags: 0,
+            mBytesPerPacket: 0,
+            mFramesPerPacket: UInt32(max(1, framesPerPacket)),
+            mBytesPerFrame: 0,
+            mChannelsPerFrame: UInt32(channelCount),
+            mBitsPerChannel: 0,
+            mReserved: 0
+        )
+    }
+}
+
+package final class OpusAudioConverterDecoder: @unchecked Sendable {
+    package let profile: OpusVoiceProfile
+    private var converter: AudioConverterRef?
+
+    package init(profile: OpusVoiceProfile = OpusVoiceProfile()) {
+        self.profile = profile
+    }
+
+    deinit {
+        if let converter {
+            AudioConverterDispose(converter)
+        }
+    }
+
+    package func decode(_ packet: OpusPacket) throws -> AVAudioPCMBuffer {
+        let converter = try configureIfNeeded()
+        let frameCapacity = max(1, packet.toc.packetDurationMicroseconds * profile.clockRate / 1_000_000)
+        let byteCapacity = frameCapacity * profile.channelCount * MemoryLayout<Float>.size
+        let context = AudioConverterCompressedInputContext(
+            data: packet.payload,
+            framesPerPacket: frameCapacity,
+            channelCount: profile.channelCount
+        )
+
+        var outputFrameCount = UInt32(frameCapacity)
+        var outputData = Data(count: byteCapacity)
+        var outputBufferList = AudioBufferList(
+            mNumberBuffers: 1,
+            mBuffers: AudioBuffer(
+                mNumberChannels: UInt32(profile.channelCount),
+                mDataByteSize: UInt32(outputData.count),
+                mData: nil
+            )
+        )
+
+        let status = outputData.withUnsafeMutableBytes { outputBytes in
+            outputBufferList.mBuffers.mData = outputBytes.baseAddress
+            return AudioConverterFillComplexBuffer(
+                converter,
+                opusCompressedInputProc,
+                Unmanaged.passUnretained(context).toOpaque(),
+                &outputFrameCount,
+                &outputBufferList,
+                nil
+            )
+        }
+        guard status == noErr else {
+            throw OpusAudioPipelineError.audioConversionFailed(status)
+        }
+
+        return try Self.pcmBuffer(
+            interleavedFloatData: outputData,
+            frameCount: Int(outputFrameCount),
+            channelCount: profile.channelCount,
+            sampleRate: Double(profile.clockRate)
+        )
+    }
+
+    package func invalidate() {
+        if let converter {
+            AudioConverterDispose(converter)
+        }
+        converter = nil
+    }
+
+    private func configureIfNeeded() throws -> AudioConverterRef {
+        if let converter {
+            return converter
+        }
+
+        var inputDescription = OpusAudioConverterEncoder.opusDescription(
+            sampleRate: Double(profile.clockRate),
+            channelCount: profile.channelCount,
+            framesPerPacket: profile.framesPerPacket
+        )
+        var outputDescription = OpusAudioConverterEncoder.linearPCMDescription(
+            sampleRate: Double(profile.clockRate),
+            channelCount: profile.channelCount
+        )
+
+        var newConverter: AudioConverterRef?
+        let creationStatus = AudioConverterNew(
+            &inputDescription,
+            &outputDescription,
+            &newConverter
+        )
+        guard creationStatus == noErr, let newConverter else {
+            throw OpusAudioPipelineError.audioConverterCreationFailed(creationStatus)
+        }
+
+        converter = newConverter
+        return newConverter
+    }
+
+    private static func pcmBuffer(
+        interleavedFloatData data: Data,
+        frameCount: Int,
+        channelCount: Int,
+        sampleRate: Double
+    ) throws -> AVAudioPCMBuffer {
+        guard let format = AVAudioFormat(
+            standardFormatWithSampleRate: sampleRate,
+            channels: AVAudioChannelCount(channelCount)
+        ),
+            let buffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(frameCount)
+            ),
+            let outputChannels = buffer.floatChannelData
+        else {
+            throw OpusAudioPipelineError.decodedPCMBufferUnavailable
+        }
+
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        data.withUnsafeBytes { rawBytes in
+            let samples = rawBytes.bindMemory(to: Float.self)
+            for frame in 0..<frameCount {
+                for channel in 0..<channelCount {
+                    outputChannels[channel][frame] = samples[frame * channelCount + channel]
+                }
+            }
+        }
+
+        return buffer
+    }
+}
+
+package final class OpusMicrophonePublishPipeline: NativeMicrophoneAudioFrameSink, @unchecked Sendable {
+    package let source: NativeMicrophoneAudioSource
+    package let encoder: OpusAudioConverterEncoder
+    private let sendPacket: @Sendable (OpusPacket) async throws -> Void
+    private let lock = NSLock()
+    private var mutableIsRunning = false
+    private var mutableLastError: (any Error)?
+
+    package init(
+        source: NativeMicrophoneAudioSource,
+        encoder: OpusAudioConverterEncoder,
+        sendPacket: @escaping @Sendable (OpusPacket) async throws -> Void
+    ) {
+        self.source = source
+        self.encoder = encoder
+        self.sendPacket = sendPacket
+    }
+
+    package var isRunning: Bool {
+        lock.withLock {
+            mutableIsRunning
+        }
+    }
+
+    package var lastError: (any Error)? {
+        lock.withLock {
+            mutableLastError
+        }
+    }
+
+    package func start() throws {
+        let shouldStart = lock.withLock {
+            guard !mutableIsRunning else {
+                return false
+            }
+            mutableIsRunning = true
+            mutableLastError = nil
+            return true
+        }
+        guard shouldStart else {
+            return
+        }
+
+        do {
+            source.setFrameSink(self)
+            try source.start()
+        } catch {
+            lock.withLock {
+                mutableIsRunning = false
+                mutableLastError = error
+            }
+            source.setFrameSink(nil)
+            throw error
+        }
+    }
+
+    package func stop() {
+        source.stop()
+        source.setFrameSink(nil)
+        encoder.invalidate()
+        lock.withLock {
+            mutableIsRunning = false
+        }
+    }
+
+    package func microphoneSource(
+        _ source: NativeMicrophoneAudioSource,
+        didOutput buffer: AVAudioPCMBuffer,
+        at time: AVAudioTime
+    ) {
+        do {
+            let packet = try encoder.encode(buffer)
+            dispatch(packet)
+        } catch {
+            lock.withLock {
+                mutableLastError = error
+            }
+        }
+    }
+
+    private func dispatch(_ packet: OpusPacket) {
+        Task { [sendPacket] in
+            do {
+                try await sendPacket(packet)
+            } catch {
+                self.lock.withLock {
+                    self.mutableLastError = error
+                }
+            }
+        }
+    }
+}
+
 package struct NativeMicrophoneCaptureConfiguration: Equatable, Sendable {
     package var echoCancellation: Bool
     package var sampleRate: Int
@@ -183,6 +573,161 @@ package struct NativeMicrophoneCaptureConfiguration: Equatable, Sendable {
         self.sampleRate = sampleRate
         self.channelCount = channelCount
         self.frameDurationMilliseconds = frameDurationMilliseconds
+    }
+}
+
+private extension OpusVoiceProfile {
+    var framesPerPacket: Int {
+        max(1, clockRate * frameDurationMilliseconds / 1_000)
+    }
+}
+
+private struct InterleavedFloatPCMInput {
+    var data: Data
+    var frameCount: Int
+    var channelCount: Int
+    var sampleRate: Double
+
+    init(buffer: AVAudioPCMBuffer) throws {
+        guard let channelData = buffer.floatChannelData else {
+            throw OpusAudioPipelineError.unsupportedAudioFormat
+        }
+
+        let frameCount = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        guard frameCount > 0, channelCount > 0 else {
+            throw OpusAudioPipelineError.unsupportedAudioFormat
+        }
+
+        self.frameCount = frameCount
+        self.channelCount = channelCount
+        self.sampleRate = buffer.format.sampleRate
+        self.data = Data(count: frameCount * channelCount * MemoryLayout<Float>.size)
+
+        data.withUnsafeMutableBytes { rawBytes in
+            let samples = rawBytes.bindMemory(to: Float.self)
+            if buffer.format.isInterleaved {
+                let source = UnsafeBufferPointer(start: channelData[0], count: frameCount * channelCount)
+                for index in source.indices {
+                    samples[index] = source[index]
+                }
+            } else {
+                for frame in 0..<frameCount {
+                    for channel in 0..<channelCount {
+                        samples[frame * channelCount + channel] = channelData[channel][frame]
+                    }
+                }
+            }
+        }
+    }
+}
+
+private final class AudioConverterLinearPCMInputContext {
+    let data: Data
+    let frameCount: Int
+    let channelCount: Int
+    var didProvideData = false
+
+    init(data: Data, frameCount: Int, channelCount: Int) {
+        self.data = data
+        self.frameCount = frameCount
+        self.channelCount = channelCount
+    }
+}
+
+private final class AudioConverterCompressedInputContext {
+    let data: Data
+    let channelCount: Int
+    let packetDescription: UnsafeMutablePointer<AudioStreamPacketDescription>
+    var didProvideData = false
+
+    init(data: Data, framesPerPacket: Int, channelCount: Int) {
+        self.data = data
+        self.channelCount = channelCount
+        self.packetDescription = UnsafeMutablePointer<AudioStreamPacketDescription>.allocate(capacity: 1)
+        self.packetDescription.initialize(
+            to: AudioStreamPacketDescription(
+                mStartOffset: 0,
+                mVariableFramesInPacket: UInt32(max(1, framesPerPacket)),
+                mDataByteSize: UInt32(data.count)
+            )
+        )
+    }
+
+    deinit {
+        packetDescription.deinitialize(count: 1)
+        packetDescription.deallocate()
+    }
+}
+
+private let opusLinearPCMInputProc: AudioConverterComplexInputDataProc = {
+    _,
+    ioNumberDataPackets,
+    ioData,
+    _,
+    userData in
+    guard let userData else {
+        return -1
+    }
+
+    let context = Unmanaged<AudioConverterLinearPCMInputContext>
+        .fromOpaque(userData)
+        .takeUnretainedValue()
+    guard !context.didProvideData else {
+        ioNumberDataPackets.pointee = 0
+        return noErr
+    }
+
+    context.didProvideData = true
+    ioNumberDataPackets.pointee = UInt32(context.frameCount)
+
+    return context.data.withUnsafeBytes { rawBytes in
+        ioData.pointee.mNumberBuffers = 1
+        ioData.pointee.mBuffers = AudioBuffer(
+            mNumberChannels: UInt32(context.channelCount),
+            mDataByteSize: UInt32(context.data.count),
+            mData: UnsafeMutableRawPointer(mutating: rawBytes.baseAddress)
+        )
+        return noErr
+    }
+}
+
+private let opusCompressedInputProc: AudioConverterComplexInputDataProc = {
+    _,
+    ioNumberDataPackets,
+    ioData,
+    outDataPacketDescription,
+    userData in
+    guard let userData else {
+        return -1
+    }
+
+    let context = Unmanaged<AudioConverterCompressedInputContext>
+        .fromOpaque(userData)
+        .takeUnretainedValue()
+    guard !context.didProvideData else {
+        ioNumberDataPackets.pointee = 0
+        return noErr
+    }
+
+    context.didProvideData = true
+    ioNumberDataPackets.pointee = 1
+    outDataPacketDescription?.pointee = context.packetDescription
+
+    return context.data.withUnsafeBytes { rawBytes in
+        ioData.pointee.mNumberBuffers = 1
+        ioData.pointee.mBuffers = AudioBuffer(
+            mNumberChannels: UInt32(context.channelCount),
+            mDataByteSize: UInt32(context.data.count),
+            mData: UnsafeMutableRawPointer(mutating: rawBytes.baseAddress)
+        )
+        return noErr
+    }
+}
+
+private extension Data {
+    func prefixBytes(_ count: Int) -> Data {
+        Data(prefix(count))
     }
 }
 
