@@ -2078,6 +2078,71 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(remb.ssrcs, [mediaSSRC])
     }
 
+    func testSubscriberReceiverReportAutoAppliesAdaptiveTrackSettingsWhenEnabled() async throws {
+        let (room, datagramTransport, signalTransport) = try await makeStartedSubscriberRTCPFeedbackRoomWithSignalTransport(
+            roomOptions: RoomOptions(
+                automaticallyApplySubscriberAdaptiveTrackSettings: true,
+                subscriberAdaptiveTrackSettingsPriority: 2
+            )
+        )
+        let mediaSSRC: UInt32 = 0x0506_0708
+
+        datagramTransport.enqueueIncomingDatagram(
+            try await protectedSubscriberInboundRTPDatagram(
+                RTPPacket(
+                    marker: false,
+                    payloadType: 111,
+                    sequenceNumber: 1,
+                    timestamp: 960,
+                    ssrc: mediaSSRC,
+                    payload: Data([0x08])
+                )
+            )
+        )
+        datagramTransport.enqueueIncomingDatagram(
+            try await protectedSubscriberInboundRTPDatagram(
+                RTPPacket(
+                    marker: false,
+                    payloadType: 111,
+                    sequenceNumber: 2,
+                    timestamp: 1_920,
+                    ssrc: mediaSSRC,
+                    payload: Data([0x08])
+                )
+            )
+        )
+
+        _ = await waitForSubscriberReceiverReportSnapshots(
+            room,
+            mediaSSRC: mediaSSRC,
+            receivedPackets: 2
+        )
+
+        _ = try await room.sendSubscriberRTCPReceiverReport(senderSSRC: 0x0102_0304)
+
+        let sentFrames = await waitForSentFrameCount(4, transport: signalTransport)
+        guard case let .binary(data) = sentFrames[3] else {
+            return XCTFail("Expected binary UpdateTrackSettings request.")
+        }
+
+        let request = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: data)
+        guard case let .trackSetting(settings)? = request.message else {
+            return XCTFail("Expected SignalRequest.trackSetting.")
+        }
+        XCTAssertEqual(settings.trackSids, ["TR_camera"])
+        XCTAssertFalse(settings.disabled)
+        XCTAssertEqual(settings.quality, .medium)
+        XCTAssertEqual(settings.width, 1_280)
+        XCTAssertEqual(settings.height, 720)
+        XCTAssertEqual(settings.fps, 24)
+        XCTAssertEqual(settings.priority, 2)
+
+        _ = try await room.sendSubscriberRTCPReceiverReport(senderSSRC: 0x0102_0304)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let sentFrameCountAfterDuplicatePlan = await signalTransport.sentFrames.count
+        XCTAssertEqual(sentFrameCountAfterDuplicatePlan, 4)
+    }
+
     func testSubscriberReceiverReportLoopSendsCadencedReportsAfterObservedRTP() async throws {
         let (room, datagramTransport) = try await makeStartedSubscriberRTCPFeedbackRoom(
             receiverReportPolicy: RTCPReceiverReportSchedulePolicy(intervalSeconds: 0.01)
@@ -5476,6 +5541,16 @@ private func waitForPublisherMediaStartupError(_ room: Room) async -> (any Error
 private func makeStartedSubscriberRTCPFeedbackRoom(
     receiverReportPolicy: RTCPReceiverReportSchedulePolicy = .standard
 ) async throws -> (Room, RoomMediaStartupDatagramTransport) {
+    let result = try await makeStartedSubscriberRTCPFeedbackRoomWithSignalTransport(
+        receiverReportPolicy: receiverReportPolicy
+    )
+    return (result.room, result.datagramTransport)
+}
+
+private func makeStartedSubscriberRTCPFeedbackRoomWithSignalTransport(
+    roomOptions: RoomOptions = RoomOptions(),
+    receiverReportPolicy: RTCPReceiverReportSchedulePolicy = .standard
+) async throws -> (room: Room, datagramTransport: RoomMediaStartupDatagramTransport, signalTransport: MockSignalTransport) {
     let frames = try [
         makeJoinResponse(),
         makeSubscriberOfferResponse(),
@@ -5505,6 +5580,7 @@ private func makeStartedSubscriberRTCPFeedbackRoom(
         )
     )
     let room = Room(
+        options: roomOptions,
         signalConnection: SignalConnection(transport: signalTransport),
         subscriberPeerConnection: PeerConnectionCoordinator(configuration: NativeWebRTCConfiguration(role: .subscriber)),
             subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration(
@@ -5520,7 +5596,7 @@ private func makeStartedSubscriberRTCPFeedbackRoom(
     let startupResult = await waitForSubscriberMediaStartupResult(room)
     _ = try XCTUnwrap(startupResult)
 
-    return (room, datagramTransport)
+    return (room, datagramTransport, signalTransport)
 }
 
 private func decodedSubscriberOutboundRTCPPackets(from datagrams: [Data]) async throws -> [RTCPPacket] {

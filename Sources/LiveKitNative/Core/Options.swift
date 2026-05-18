@@ -5,17 +5,23 @@ public struct RoomOptions: Equatable, Sendable {
     public var defaultAdaptiveStream: Bool?
     public var defaultSubscriberAllowPause: Bool?
     public var defaultAutoSubscribeDataTrack: Bool?
+    public var automaticallyApplySubscriberAdaptiveTrackSettings: Bool
+    public var subscriberAdaptiveTrackSettingsPriority: UInt32
 
     public init(
         defaultAutoSubscribe: Bool = true,
         defaultAdaptiveStream: Bool? = nil,
         defaultSubscriberAllowPause: Bool? = nil,
-        defaultAutoSubscribeDataTrack: Bool? = nil
+        defaultAutoSubscribeDataTrack: Bool? = nil,
+        automaticallyApplySubscriberAdaptiveTrackSettings: Bool = false,
+        subscriberAdaptiveTrackSettingsPriority: UInt32 = 0
     ) {
         self.defaultAutoSubscribe = defaultAutoSubscribe
         self.defaultAdaptiveStream = defaultAdaptiveStream
         self.defaultSubscriberAllowPause = defaultSubscriberAllowPause
         self.defaultAutoSubscribeDataTrack = defaultAutoSubscribeDataTrack
+        self.automaticallyApplySubscriberAdaptiveTrackSettings = automaticallyApplySubscriberAdaptiveTrackSettings
+        self.subscriberAdaptiveTrackSettingsPriority = subscriberAdaptiveTrackSettingsPriority
     }
 }
 

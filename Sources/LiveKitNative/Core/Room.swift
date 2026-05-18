@@ -305,6 +305,7 @@ public final class Room: @unchecked Sendable {
     private let publisherRTPSenderLock = NSLock()
     private let subscriberMediaStartupLock = NSLock()
     private let publisherMediaStartupLock = NSLock()
+    private let subscriberAdaptiveTrackSettingsLock = NSLock()
     private let reconnectSyncStateLock = NSLock()
     private let reconnectSessionDescriptionLock = NSLock()
     private let dataChannelReceiveLoopLock = NSLock()
@@ -341,6 +342,7 @@ public final class Room: @unchecked Sendable {
     private var publisherRTCPReceiveLoopID: UInt64 = 0
     private var publisherLocalCandidatesGathered = false
     private var publisherLocalCandidates: [ICECandidate] = []
+    private var lastSubscriberAdaptiveTrackSettingsPlan: AdaptiveTrackSettingsPlan?
     private var dataChannelReceiveTask: Task<Void, Never>?
     private var dataChannelReceiveLoopID: UInt64 = 0
     private var reconnectSubscribedTrackSIDs: Set<String> = []
@@ -536,7 +538,8 @@ public final class Room: @unchecked Sendable {
         }
 
         try await sendSubscriberRTCP(packet)
-        subscriberRTCPBandwidthEstimates.update(with: packet)
+        let updatedSnapshots = subscriberRTCPBandwidthEstimates.update(with: packet)
+        try await applySubscriberAdaptiveTrackSettingsIfNeeded(updatedSnapshots: updatedSnapshots)
         return packet
     }
 
@@ -839,6 +842,79 @@ public final class Room: @unchecked Sendable {
             priority: plan.priority
         )
         return plan
+    }
+
+    @discardableResult
+    private func applySubscriberAdaptiveTrackSettingsIfNeeded(
+        updatedSnapshots: [MediaQualityEstimateSnapshot]
+    ) async throws -> AdaptiveTrackSettingsPlan? {
+        guard options.automaticallyApplySubscriberAdaptiveTrackSettings,
+              !updatedSnapshots.isEmpty
+        else {
+            return nil
+        }
+
+        let trackSIDs = subscriberAdaptiveVideoTrackSIDs()
+        let recommendation = subscriberRTCPBandwidthEstimates.snapshots
+            .map(\.estimate)
+            .min { $0.estimatedBitrateBps < $1.estimatedBitrateBps }?
+            .recommendation
+
+        guard let recommendation,
+              let plan = AdaptiveTrackSettingsPlanner().plan(
+                  trackSIDs: trackSIDs,
+                  recommendation: recommendation,
+                  priority: options.subscriberAdaptiveTrackSettingsPriority
+              )
+        else {
+            return nil
+        }
+
+        let shouldSend = subscriberAdaptiveTrackSettingsLock.withLock {
+            guard lastSubscriberAdaptiveTrackSettingsPlan != plan else {
+                return false
+            }
+
+            lastSubscriberAdaptiveTrackSettingsPlan = plan
+            return true
+        }
+        guard shouldSend else {
+            return nil
+        }
+
+        do {
+            try await updateTrackSettings(
+                trackSIDs: plan.trackSIDs,
+                disabled: plan.disabled,
+                quality: plan.quality,
+                width: plan.width,
+                height: plan.height,
+                fps: plan.fps,
+                priority: plan.priority
+            )
+            return plan
+        } catch {
+            subscriberAdaptiveTrackSettingsLock.withLock {
+                if lastSubscriberAdaptiveTrackSettingsPlan == plan {
+                    lastSubscriberAdaptiveTrackSettingsPlan = nil
+                }
+            }
+            throw error
+        }
+    }
+
+    private func subscriberAdaptiveVideoTrackSIDs() -> [String] {
+        snapshots.remoteParticipants
+            .flatMap(\.trackPublications)
+            .filter { $0.kind == .video && !$0.isMuted && !$0.sid.isEmpty }
+            .map(\.sid)
+            .sorted()
+    }
+
+    private func clearSubscriberAdaptiveTrackSettingsState() {
+        subscriberAdaptiveTrackSettingsLock.withLock {
+            lastSubscriberAdaptiveTrackSettingsPlan = nil
+        }
     }
 
     func applyRemoteParticipantSnapshots(_ participantSnapshots: [ParticipantSnapshot]) async {
@@ -2318,6 +2394,7 @@ public final class Room: @unchecked Sendable {
         cleared.4?.cancel()
         subscriberMediaReceivePipeline.reset()
         subscriberRTCPBandwidthEstimates.reset()
+        clearSubscriberAdaptiveTrackSettingsState()
         stopPublisherLocalMediaPipelines()
         return cleared.1
     }

@@ -165,7 +165,9 @@ encode work. Publisher RTCP receiver reports now feed the bandwidth estimator
 without requiring an external RTCP handler, and matching H.264 camera pipelines
 can apply recommended bitrate/FPS caps to VideoToolbox.
 Subscriber-side recommendations can also be planned and sent as LiveKit
-`UpdateTrackSettings` requests for low/medium/high/off reception.
+`UpdateTrackSettings` requests for low/medium/high/off reception, and
+`RoomOptions` can opt into deduplicated automatic subscriber track-settings
+dispatch for remote video tracks from the current receiver-report estimate.
 `RoomOptions` can now set default LiveKit adaptive stream, subscriber pause,
 and data-track auto-subscribe preferences for the initial `/rtc` signaling URL,
 with per-connection `ConnectOptions` overrides, without relying on ad hoc URL
@@ -612,6 +614,9 @@ The old binary WebRTC dependency path has been removed from the package model.
   - subscriber adaptive track-settings planner that maps quality
     recommendations into LiveKit low/medium/high/off `UpdateTrackSettings`
     requests with bounded resolution and FPS caps
+  - opt-in Room subscriber adaptive track-settings dispatch that applies the
+    lowest current receiver-report bandwidth recommendation to remote video
+    tracks and suppresses duplicate plans
   - first-class `RoomOptions` defaults and `ConnectOptions` overrides for
     LiveKit adaptive stream, subscriber pause, and data-track auto-subscribe
     connection settings
@@ -800,7 +805,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 462 tests passed
+  - 463 tests passed
   - 1 test skipped by opt-in guard
 - Release-mode benchmark smoke:
   - `swift run -c release LiveKitNativeBenchmarks`
@@ -809,7 +814,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,800,299 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,806,498 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -873,14 +878,14 @@ The following checks passed after the latest implementation pass:
   receive loop, scheduled subscriber Receiver Reports, deterministic
   receiver-report bandwidth estimator, REMB packet/planner/sending, adaptive
   recommendation primitive, publisher RTCP receiver-report ingestion, H.264
-  encoder bitrate/FPS recommendation application, subscriber adaptive
-  track-settings planning/signaling, and Room subscriber feedback dispatch.
+  encoder bitrate/FPS recommendation application, opt-in subscriber adaptive
+  track-settings dispatch, and Room subscriber feedback dispatch.
 - TWCC, full REMB interop/tuning, or complete congestion control.
 - Packet-loss recovery beyond default subscriber jitter buffering, NACK/PLI
   feedback dispatch, and basic RTP/RTCP packet primitives.
 - Complete live adaptive quality control that automatically applies estimated
   bandwidth, packet loss, CPU, and subscriber preferences across encoder,
-  sender, and subscriber settings.
+  sender, and subscriber settings by default and against real LiveKit rooms.
 - RTP timestamp and jitter tracking beyond packet encode/decode.
 
 ### Media

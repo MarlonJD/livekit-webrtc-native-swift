@@ -109,7 +109,9 @@ recommended bitrate/FPS caps to VideoToolbox. Subscriber-side recommendations
 can be planned and sent as LiveKit `UpdateTrackSettings` requests for
 low/medium/high/off reception, and observed subscriber RTP/Sender Report state
 can produce scheduled RTCP Receiver Reports with DLSR timing plus REMB bitrate
-feedback over the subscriber secure RTCP transport.
+feedback over the subscriber secure RTCP transport. `RoomOptions` can opt into
+deduplicated automatic subscriber `UpdateTrackSettings` dispatch from the
+current receiver-report estimate.
 `Room.updateSubscription` and `Room.updateTrackSettings` expose media
 subscription and subscribed track settings signaling.
 `LocalParticipant.setTrackSubscriptionPermissions` exposes publisher-controlled
