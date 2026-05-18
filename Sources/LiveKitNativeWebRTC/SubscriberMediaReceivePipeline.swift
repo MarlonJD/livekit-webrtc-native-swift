@@ -6,6 +6,8 @@ package struct SubscriberMediaReceiveResult: Equatable, Sendable {
     package var droppedSequenceNumbers: [UInt16]
     package var h264AccessUnits: [H264AccessUnit]
     package var opusPackets: [OpusPacket]
+    package var decodedAudioBufferCount: Int
+    package var audioPlayoutErrorCount: Int
     package var feedbackPackets: [RTCPPacket]
 
     package init(
@@ -14,6 +16,8 @@ package struct SubscriberMediaReceiveResult: Equatable, Sendable {
         droppedSequenceNumbers: [UInt16] = [],
         h264AccessUnits: [H264AccessUnit] = [],
         opusPackets: [OpusPacket] = [],
+        decodedAudioBufferCount: Int = 0,
+        audioPlayoutErrorCount: Int = 0,
         feedbackPackets: [RTCPPacket] = []
     ) {
         self.releasedPackets = releasedPackets
@@ -21,6 +25,8 @@ package struct SubscriberMediaReceiveResult: Equatable, Sendable {
         self.droppedSequenceNumbers = droppedSequenceNumbers
         self.h264AccessUnits = h264AccessUnits
         self.opusPackets = opusPackets
+        self.decodedAudioBufferCount = decodedAudioBufferCount
+        self.audioPlayoutErrorCount = audioPlayoutErrorCount
         self.feedbackPackets = feedbackPackets
     }
 }
@@ -35,18 +41,21 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
     private var h264PipelinesBySSRC: [UInt32: H264SubscribePipeline] = [:]
     private var h264DecodersBySSRC: [UInt32: H264VideoToolboxSubscribeDecoder] = [:]
     private var opusPipelinesBySSRC: [UInt32: OpusSubscribePipeline] = [:]
+    private let audioPlayoutPipeline: OpusAudioPlayoutPipeline?
     private let receiverReportStore = RTCPReceiverReportStore()
 
     package init(
         audioPayloadType: UInt8 = 111,
         videoPayloadType: UInt8 = 102,
         feedbackSenderSSRC: UInt32 = 0,
-        maxBufferedPackets: Int = 64
+        maxBufferedPackets: Int = 64,
+        audioPlayoutPipeline: OpusAudioPlayoutPipeline? = nil
     ) {
         self.audioPayloadType = audioPayloadType
         self.videoPayloadType = videoPayloadType
         self.feedbackSenderSSRC = feedbackSenderSSRC
         self.maxBufferedPackets = maxBufferedPackets
+        self.audioPlayoutPipeline = audioPlayoutPipeline
     }
 
     package func append(_ packet: RTPPacket) -> SubscriberMediaReceiveResult {
@@ -76,8 +85,13 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
             h264PipelinesBySSRC.removeAll()
             h264DecodersBySSRC.removeAll()
             opusPipelinesBySSRC.removeAll()
+            audioPlayoutPipeline?.reset()
             receiverReportStore.reset()
         }
+    }
+
+    package var audioPlayoutScheduledBufferCount: Int {
+        audioPlayoutPipeline?.scheduledBufferCount ?? 0
     }
 
     private func appendLocked(_ packet: RTPPacket) -> SubscriberMediaReceiveResult {
@@ -153,7 +167,16 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
         opusPipelinesBySSRC[packet.ssrc] = pipeline
 
         do {
-            result.opusPackets.append(try pipeline.append(packet))
+            let opusPacket = try pipeline.append(packet)
+            result.opusPackets.append(opusPacket)
+            if let audioPlayoutPipeline {
+                do {
+                    try audioPlayoutPipeline.append(opusPacket)
+                    result.decodedAudioBufferCount += 1
+                } catch {
+                    result.audioPlayoutErrorCount += 1
+                }
+            }
         } catch {
             result.droppedSequenceNumbers.append(packet.sequenceNumber)
         }

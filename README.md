@@ -228,10 +228,10 @@ camera publish pipeline startup, and mock transport tests.
 The audio groundwork now includes native microphone track scaffolding,
 AVAudioEngine capture and playout adapters, AudioToolbox Opus encode/decode
 adapters, Opus voice profile defaults, Opus TOC parsing, Opus RTP
-packetization/depacketization, subscribe-side packet loss accounting, LiveKit
-`AddTrackRequest` construction for microphone publishes, `TrackPublishedResponse`
-correlation, default microphone publish pipeline startup, and local audio
-publication state.
+packetization/depacketization, subscribe-side packet loss accounting, opt-in
+subscriber Opus decode-to-playout scheduling, LiveKit `AddTrackRequest`
+construction for microphone publishes, `TrackPublishedResponse` correlation,
+default microphone publish pipeline startup, and local audio publication state.
 
 VP8 subscribe groundwork now includes RTP payload descriptor parsing, PictureID
 and layer metadata parsing, VP8 frame assembly from single-packet and fragmented
@@ -262,8 +262,9 @@ latest-value Room state and emitted as typed room events.
 The active implementation focus is now `1.0.0` hardening: validating the
 OpenSSL-backed DTLS-SRTP `use_srtp` handshake/exporter against LiveKit,
 completing LiveKit-validated default secure media transport, TURN TCP/TLS,
-live quality-control wiring, decoded subscriber render/playout, standards-compliant
-DTLS-SCTP association behavior, integration apps, and size gates.
+live quality-control wiring, decoded subscriber video rendering,
+standards-compliant DTLS-SCTP association behavior, meeting-grade audio session
+hardening, integration apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -321,7 +322,9 @@ send path after publisher media startup. Registered publisher and subscriber
 RTCP handlers can also receive decoded inbound RTCP from the injected secure
 media transport, and the default subscriber RTP receive loop now feeds
 protected RTP through jitter buffering, H.264/Opus packet assembly, and
-bounded NACK/PLI feedback dispatch. A deterministic RTCP receiver-report
+bounded NACK/PLI feedback dispatch. `RoomOptions` can opt into subscriber Opus
+decode-to-`AVAudioPlayerNode` playout scheduling from that receive loop. A
+deterministic RTCP receiver-report
 bandwidth estimator now maps loss into adaptive video quality recommendations,
 publisher RTCP receiver reports feed that estimator even without an external
 RTCP handler, matching H.264 camera pipelines can apply recommended
@@ -365,11 +368,12 @@ estimation, publisher RTCP report ingestion, adaptive video quality
 recommendations, VideoToolbox bitrate/FPS recommendation application, camera
 publish backpressure/drop control, subscriber adaptive track-settings planning
 and opt-in automatic signaling, subscriber Receiver Report
-generation/cadence/sending, REMB packet/planner/sending, and matching
-`RequestResponse` failure
+generation/cadence/sending, REMB packet/planner/sending, opt-in subscriber
+Opus playout scheduling, and matching `RequestResponse` failure
 mapping are unit-tested, while LiveKit E2E media validation, decoded subscriber
-render/playout, standards-compliant live SCTP association behavior, TURN TCP/TLS
-execution, media recovery, and end-to-end LiveKit hardening are still open.
+video rendering, standards-compliant live SCTP association behavior, TURN
+TCP/TLS execution, media recovery, meeting-grade audio session behavior, and
+end-to-end LiveKit hardening are still open.
 
 ## Benchmarks
 
@@ -418,10 +422,10 @@ unit/integration opt-in tests, benchmark smoke, and the compressed release
 binary size proxy. The strict gate additionally requires
 `LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
 That strict gate intentionally fails today because LiveKit E2E secure RTP/RTCP
-verification, full ICE/TURN hardening, decoded subscriber render/playout,
+verification, full ICE/TURN hardening, decoded subscriber video rendering,
 standards-compliant live SCTP, Apple-platform OpenSSL packaging validation,
-meeting-grade audio, full live congestion/adaptive-quality policy, and
-end-to-end LiveKit tests are still open.
+meeting-grade audio session behavior, full live congestion/adaptive-quality
+policy, and end-to-end LiveKit tests are still open.
 
 ## Requirements
 

@@ -26,7 +26,8 @@ H.264 encode output, H.264 publish RTP packetization, LiveKit
 0.4 adds native microphone track scaffolding, AudioToolbox Opus encode/decode
 adapters, Opus RTP packetization/depacketization, audio playout scaffolding,
 LiveKit `AddTrackRequest` construction for microphone publishes, and local
-microphone publication state. Milestone 0.5 adds VP8 RTP payload descriptor parsing, VP8
+microphone publication state. Later hardening adds opt-in subscriber Opus
+decode-to-playout scheduling from the Room receive loop. Milestone 0.5 adds VP8 RTP payload descriptor parsing, VP8
 frame assembly, keyframe metadata extraction, and a decode-only frame inspector.
 Milestone 0.6 adds WebRTC data-channel DCEP open/ack messages, reliable/lossy
 SCTP channel planning, LiveKit `DataPacket` user-packet mapping,
@@ -100,6 +101,8 @@ for resume reconnect. Registered publisher/subscriber RTCP handlers can
 receive decoded inbound RTCP from the injected secure media transport, and the
 default subscriber RTP receive loop now feeds protected RTP through jitter
 buffering, H.264/Opus packet assembly, and bounded NACK/PLI feedback dispatch.
+`RoomOptions` can opt into decoding subscriber Opus packets and scheduling
+PCM buffers into native audio playout.
 A deterministic RTCP receiver-report bandwidth estimator maps packet loss into
 adaptive video quality recommendations, and the camera publish pipeline applies
 bounded frame backpressure/drop control before queuing VideoToolbox encode
@@ -194,9 +197,10 @@ startup is configured, send LiveKit `SyncState` for retained media subscription
 preferences, disabled subscribed tracks, and local media/data publications at
 unit-test level, and keep publisher offer track state so a later local publish
 after resume still includes existing local media sections. LiveKit E2E
-verification for the OpenSSL DTLS-SRTP path, decoded subscriber render/playout,
+verification for the OpenSSL DTLS-SRTP path, decoded subscriber video rendering,
 standards-compliant live SCTP association behavior, TURN TCP/TLS execution,
-real-device media timing, complete live congestion/adaptive-quality control,
+real-device media timing, meeting-grade audio session behavior,
+complete live congestion/adaptive-quality control,
 LiveKit-validated data-channel recovery, and reconnect
 media recovery remain part of production
 hardening.

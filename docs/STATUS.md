@@ -26,9 +26,12 @@ candidates are routed into the publisher peer connection adapter. Native
 camera-backed tracks can now feed VideoToolbox H.264 encoded frames into the
 stored publisher RTP sender after secure publisher media startup, and native
 microphone-backed tracks can feed AudioToolbox Opus packets into the same
-publisher RTP/SRTP path. LiveKit E2E media validation, decoded subscriber
-render/playout, complete live congestion-control policy, and production runtime
-pacing are still open.
+publisher RTP/SRTP path. Subscriber Opus packets can now be decoded through
+AudioToolbox and scheduled into an opt-in `AVAudioPlayerNode` playout pipeline
+from the default subscriber receive loop. LiveKit E2E media validation, decoded
+subscriber video rendering, complete live congestion-control policy,
+meeting-grade audio session behavior, and production runtime pacing are still
+open.
 Data-track publish/unpublish/update-subscription signaling is also wired at
 unit-test level, including server/SFU data-track unpublish cleanup for local
 publication and reconnect state; full standards-compliant SCTP behavior remains
@@ -151,8 +154,9 @@ requests into bounded RTCP feedback packets that Room can dispatch through the
 injected subscriber RTCP transport. The default subscriber RTP receive pipeline
 now runs inbound RTP through bounded jitter buffers, assembles H.264 access
 units or Opus packets, and emits NACK/PLI feedback through subscriber RTCP
-when packet loss or keyframe requirements are detected; decoded video render,
-decoded audio playout, and complete adaptive recovery policy remain open.
+when packet loss or keyframe requirements are detected; opt-in subscriber Opus
+decode-to-playout scheduling is wired, while decoded video render and complete
+adaptive recovery policy remain open.
 Subscriber RTP/Sender Report observations can now generate RTCP Receiver
 Reports with DLSR timing, and Room can send them manually or on a deterministic
 cadence through the injected subscriber RTCP transport. The RTCP codec also
@@ -737,8 +741,10 @@ The old binary WebRTC dependency path has been removed from the package model.
   - Opus RTP packetization and depacketization
   - subscribe-side Opus packet pipeline with payload type validation and packet
     loss accounting
-  - native audio playout scaffold using `AVAudioEngine` and
-    `AVAudioPlayerNode`
+  - native audio playout pipeline that decodes subscriber Opus packets through
+    AudioToolbox and schedules PCM buffers into `AVAudioPlayerNode`
+  - `RoomOptions.automaticallyPlaySubscriberAudio` opt-in wiring for default
+    subscriber receive-loop audio playout scheduling
   - native microphone publish pipeline that starts after publisher secure media
     transport startup and sends AudioToolbox Opus packets through the stored
     publisher RTP sender
@@ -805,7 +811,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 463 tests passed
+  - 466 tests passed
   - 1 test skipped by opt-in guard
 - Release-mode benchmark smoke:
   - `swift run -c release LiveKitNativeBenchmarks`
@@ -814,7 +820,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,806,498 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,811,666 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed

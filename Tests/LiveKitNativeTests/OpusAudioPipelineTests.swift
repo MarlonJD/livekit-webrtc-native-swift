@@ -131,21 +131,36 @@ final class OpusAudioPipelineTests: XCTestCase {
         XCTAssertEqual(source.configuration.sampleRate, 48_000)
         XCTAssertEqual(source.configuration.channelCount, 2)
         XCTAssertFalse(source.isRunning)
+        XCTAssertEqual(source.scheduledBufferCount, 0)
+    }
+
+    func testAudioPlayoutPipelineDecodesAndSchedulesBuffer() throws {
+        let packet = try makeEncodedOpusPacket()
+        let source = NativeAudioPlayoutSource()
+        let pipeline = OpusAudioPlayoutPipeline(source: source)
+
+        let decoded: AVAudioPCMBuffer
+        do {
+            decoded = try pipeline.append(packet)
+        } catch let error as OpusAudioPipelineError {
+            throw XCTSkip("AudioToolbox Opus playout unavailable in this environment: \(error)")
+        }
+
+        XCTAssertGreaterThan(decoded.frameLength, 0)
+        XCTAssertEqual(pipeline.decodedBufferCount, 1)
+        XCTAssertEqual(pipeline.scheduledBufferCount, 1)
+        XCTAssertEqual(source.scheduledBufferCount, 1)
+
+        pipeline.reset()
+
+        XCTAssertEqual(pipeline.decodedBufferCount, 0)
+        XCTAssertEqual(pipeline.scheduledBufferCount, 0)
     }
 
     func testAudioToolboxOpusEncoderAndDecoderRoundTripPCMBuffer() throws {
-        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
-        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 960))
-        buffer.frameLength = 960
-        let channel = try XCTUnwrap(buffer.floatChannelData?[0])
-        for frame in 0..<Int(buffer.frameLength) {
-            channel[frame] = sin(Float(frame) * 0.01) * 0.1
-        }
-
-        let encoder = OpusAudioConverterEncoder()
         let packet: OpusPacket
         do {
-            packet = try encoder.encode(buffer)
+            packet = try makeEncodedOpusPacket()
         } catch let error as OpusAudioPipelineError {
             throw XCTSkip("AudioToolbox Opus encoder unavailable in this environment: \(error)")
         }
@@ -163,5 +178,17 @@ final class OpusAudioPipelineTests: XCTestCase {
         XCTAssertGreaterThan(decoded.frameLength, 0)
         XCTAssertEqual(decoded.format.sampleRate, 48_000)
         XCTAssertEqual(decoded.format.channelCount, 1)
+    }
+
+    private func makeEncodedOpusPacket() throws -> OpusPacket {
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 960))
+        buffer.frameLength = 960
+        let channel = try XCTUnwrap(buffer.floatChannelData?[0])
+        for frame in 0..<Int(buffer.frameLength) {
+            channel[frame] = sin(Float(frame) * 0.01) * 0.1
+        }
+
+        return try OpusAudioConverterEncoder().encode(buffer)
     }
 }

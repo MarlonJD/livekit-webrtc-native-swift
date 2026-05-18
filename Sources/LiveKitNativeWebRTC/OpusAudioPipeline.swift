@@ -797,7 +797,9 @@ package final class NativeAudioPlayoutSource: @unchecked Sendable {
     package let configuration: NativeAudioPlayoutConfiguration
     private lazy var engine = AVAudioEngine()
     private lazy var player = AVAudioPlayerNode()
+    private let lock = NSLock()
     private var isConfigured = false
+    private var mutableScheduledBufferCount = 0
 
     package init(configuration: NativeAudioPlayoutConfiguration = .init()) {
         self.configuration = configuration
@@ -822,8 +824,24 @@ package final class NativeAudioPlayoutSource: @unchecked Sendable {
         engine.stop()
     }
 
-    package func schedule(_ buffer: AVAudioPCMBuffer) {
+    package var scheduledBufferCount: Int {
+        lock.withLock {
+            mutableScheduledBufferCount
+        }
+    }
+
+    package func schedule(_ buffer: AVAudioPCMBuffer) throws {
+        try configureIfNeeded()
         player.scheduleBuffer(buffer)
+        lock.withLock {
+            mutableScheduledBufferCount += 1
+        }
+    }
+
+    package func resetScheduledBufferCount() {
+        lock.withLock {
+            mutableScheduledBufferCount = 0
+        }
     }
 
     package func configureIfNeeded() throws {
@@ -841,5 +859,82 @@ package final class NativeAudioPlayoutSource: @unchecked Sendable {
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format)
         isConfigured = true
+    }
+}
+
+package final class OpusAudioPlayoutPipeline: @unchecked Sendable {
+    package let decoder: OpusAudioConverterDecoder
+    package let source: NativeAudioPlayoutSource
+    private let lock = NSLock()
+    private var mutableDecodedBufferCount = 0
+    private var mutableLastError: (any Error)?
+
+    package init(
+        decoder: OpusAudioConverterDecoder = OpusAudioConverterDecoder(),
+        source: NativeAudioPlayoutSource = NativeAudioPlayoutSource()
+    ) {
+        self.decoder = decoder
+        self.source = source
+    }
+
+    package var decodedBufferCount: Int {
+        lock.withLock {
+            mutableDecodedBufferCount
+        }
+    }
+
+    package var scheduledBufferCount: Int {
+        source.scheduledBufferCount
+    }
+
+    package var lastError: (any Error)? {
+        lock.withLock {
+            mutableLastError
+        }
+    }
+
+    package func start() throws {
+        do {
+            try source.start()
+        } catch {
+            store(error)
+            throw error
+        }
+    }
+
+    package func stop() {
+        source.stop()
+    }
+
+    @discardableResult
+    package func append(_ packet: OpusPacket) throws -> AVAudioPCMBuffer {
+        do {
+            let buffer = try decoder.decode(packet)
+            try source.schedule(buffer)
+            lock.withLock {
+                mutableDecodedBufferCount += 1
+                mutableLastError = nil
+            }
+            return buffer
+        } catch {
+            store(error)
+            throw error
+        }
+    }
+
+    package func reset() {
+        stop()
+        decoder.invalidate()
+        source.resetScheduledBufferCount()
+        lock.withLock {
+            mutableDecodedBufferCount = 0
+            mutableLastError = nil
+        }
+    }
+
+    private func store(_ error: any Error) {
+        lock.withLock {
+            mutableLastError = error
+        }
     }
 }

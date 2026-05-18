@@ -297,7 +297,7 @@ public final class Room: @unchecked Sendable {
     private var publisherDataChannel: LocalDataChannelPublisher?
     private let publisherRTCPBandwidthEstimates = RTCPBandwidthEstimateStore()
     private let subscriberRTCPBandwidthEstimates = RTCPBandwidthEstimateStore()
-    private let subscriberMediaReceivePipeline = SubscriberMediaReceivePipeline()
+    private let subscriberMediaReceivePipeline: SubscriberMediaReceivePipeline
     private let snapshots: RoomSnapshotStore
     private let signalLoopLock = NSLock()
     private let connectionContextLock = NSLock()
@@ -417,6 +417,10 @@ public final class Room: @unchecked Sendable {
 
     var subscriberBandwidthEstimateSnapshots: [MediaQualityEstimateSnapshot] {
         subscriberRTCPBandwidthEstimates.snapshots
+    }
+
+    var subscriberAudioPlayoutScheduledBufferCount: Int {
+        subscriberMediaReceivePipeline.audioPlayoutScheduledBufferCount
     }
 
     var lastSubscriberMediaStartupResult: PeerConnectionMediaStartupResult? {
@@ -682,6 +686,9 @@ public final class Room: @unchecked Sendable {
         self.subscriberRTCPReceiverReportPolicy = subscriberRTCPReceiverReportPolicy
         self.publisherDataChannelIsInjected = publisherDataChannel != nil
         self.publisherDataChannel = publisherDataChannel
+        self.subscriberMediaReceivePipeline = SubscriberMediaReceivePipeline(
+            audioPlayoutPipeline: options.automaticallyPlaySubscriberAudio ? OpusAudioPlayoutPipeline() : nil
+        )
 
         let localParticipant = LocalParticipant(identity: "local")
         self.actor = RoomActor(localParticipant: localParticipant)

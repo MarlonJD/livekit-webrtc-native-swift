@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import Darwin
 import LiveKitNativeProtocol
 import LiveKitNativeWebRTC
@@ -2141,6 +2142,37 @@ final class RoomConnectTests: XCTestCase {
         try await Task.sleep(nanoseconds: 20_000_000)
         let sentFrameCountAfterDuplicatePlan = await signalTransport.sentFrames.count
         XCTAssertEqual(sentFrameCountAfterDuplicatePlan, 4)
+    }
+
+    func testSubscriberReceiveLoopSchedulesAudioPlayoutWhenEnabled() async throws {
+        let opusPacket: OpusPacket
+        do {
+            opusPacket = try makeEncodedOpusPacket()
+            _ = try OpusAudioConverterDecoder().decode(opusPacket)
+        } catch let error as OpusAudioPipelineError {
+            throw XCTSkip("AudioToolbox Opus playout unavailable in this environment: \(error)")
+        }
+
+        let (room, datagramTransport, _) = try await makeStartedSubscriberRTCPFeedbackRoomWithSignalTransport(
+            roomOptions: RoomOptions(automaticallyPlaySubscriberAudio: true)
+        )
+        let mediaSSRC: UInt32 = 0x0506_0708
+
+        datagramTransport.enqueueIncomingDatagram(
+            try await protectedSubscriberInboundRTPDatagram(
+                RTPPacket(
+                    marker: false,
+                    payloadType: 111,
+                    sequenceNumber: 1,
+                    timestamp: 960,
+                    ssrc: mediaSSRC,
+                    payload: opusPacket.payload
+                )
+            )
+        )
+
+        let scheduledBufferCount = await waitForSubscriberAudioPlayoutScheduledBufferCount(room, count: 1)
+        XCTAssertEqual(scheduledBufferCount, 1)
     }
 
     func testSubscriberReceiverReportLoopSendsCadencedReportsAfterObservedRTP() async throws {
@@ -5514,6 +5546,19 @@ private func waitForSubscriberReceiverReportSnapshots(
     return room.subscriberReceiverReportSnapshots
 }
 
+private func waitForSubscriberAudioPlayoutScheduledBufferCount(_ room: Room, count: Int) async -> Int {
+    for _ in 0..<100 {
+        let scheduledBufferCount = room.subscriberAudioPlayoutScheduledBufferCount
+        if scheduledBufferCount >= count {
+            return scheduledBufferCount
+        }
+
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+
+    return room.subscriberAudioPlayoutScheduledBufferCount
+}
+
 private func waitForSubscriberMediaStartupError(_ room: Room) async -> (any Error)? {
     for _ in 0..<100 {
         if let error = room.lastSubscriberMediaStartupError {
@@ -5665,6 +5710,18 @@ private func protectedSubscriberInboundRTPDatagram(_ packet: RTPPacket) async th
 
     try await peerTransport.sendRTP(packet)
     return try XCTUnwrap(datagramTransport.sentDatagrams.first)
+}
+
+private func makeEncodedOpusPacket() throws -> OpusPacket {
+    let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+    let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 960))
+    buffer.frameLength = 960
+    let channel = try XCTUnwrap(buffer.floatChannelData?[0])
+    for frame in 0..<Int(buffer.frameLength) {
+        channel[frame] = sin(Float(frame) * 0.01) * 0.1
+    }
+
+    return try OpusAudioConverterEncoder().encode(buffer)
 }
 
 private func roomMediaStartupExportedKeyingMaterial() -> Data {
