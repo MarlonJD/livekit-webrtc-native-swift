@@ -450,7 +450,9 @@ swift test --filter LiveKitNativeIntegrationTests
 ```
 
 The harness generates per-run room names with an `lknative-` prefix and
-short-lived room-scoped participant tokens. Strict production release mode now
+short-lived room-scoped participant tokens. It currently covers one-client
+connect/disconnect, two-client participant join/leave, and two-client
+data-track subscriber-handle signaling. Strict production release mode now
 requires those integration variables so the future `productionReady` marker
 cannot pass while live tests are silently skipped.
 

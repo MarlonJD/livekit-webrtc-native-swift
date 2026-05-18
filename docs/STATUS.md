@@ -844,8 +844,11 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 477 tests passed
-  - 1 test skipped by opt-in guard
+  - 485 tests passed
+  - 4 tests skipped by opt-in guard
+- `swift test --filter LiveKitNativeIntegrationTests --jobs 1`
+  - 6 integration tests selected
+  - 4 live tests skipped by opt-in guard without LiveKit environment variables
 - `swift build --target LiveKitNativeWebRTC --jobs 1 --disable-index-store -debug-info-format none`
   - target build passed
 - `xcodebuild build -scheme LiveKitNative -destination 'generic/platform=iOS Simulator'`
@@ -856,6 +859,10 @@ The following checks passed after the latest implementation pass:
 - Release gates:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
+  - The release-shape check passes with tests, benchmarks, and size gate
+    disabled through `LIVEKIT_NATIVE_RELEASE_RUN_TESTS=0`,
+    `LIVEKIT_NATIVE_RELEASE_RUN_BENCHMARKS=0`, and
+    `LIVEKIT_NATIVE_RELEASE_RUN_SIZE_GATE=0`
   - `scripts/check_release_size.sh` passes with the current compressed
     `LiveKitNativeBenchmarks` release binary at 2,841,082 bytes under the 5 MB
     proxy limit
@@ -979,15 +986,12 @@ The following checks passed after the latest implementation pass:
 
 ### Integration
 
-- Opt-in LiveKit integration harness using `LIVEKIT_NATIVE_RUN_INTEGRATION=1`,
-  `LIVEKIT_NATIVE_LIVEKIT_URL`, `LIVEKIT_NATIVE_API_KEY`,
-  `LIVEKIT_NATIVE_API_SECRET`, generated `lknative-` room prefixes, and
-  short-lived room-scoped participant tokens.
-- End-to-end one-client connection and disconnect against a configured LiveKit
-  server.
-- Subscribe path.
+- Expand the current opt-in LiveKit integration harness beyond one-client
+  connect/disconnect, two-client participant join/leave, generated `lknative-`
+  room prefixes, short-lived room-scoped tokens, and two-client data-track
+  subscriber-handle signaling.
+- Data packet publish/receive over standards-compliant SCTP.
 - Publish path.
-- Two-client media/data test.
 - Reconnect integration test.
 - Multi-participant meeting tests with simultaneous publish/subscribe.
 - Weak-network tests with packet loss, jitter, bandwidth changes, and recovery

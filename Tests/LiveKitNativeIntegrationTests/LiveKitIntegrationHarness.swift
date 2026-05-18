@@ -63,6 +63,23 @@ struct LiveKitIntegrationHarness: Sendable {
         )
     }
 
+    func connect(
+        _ room: Room,
+        identity: String,
+        roomName: String,
+        timeoutSeconds: TimeInterval = 15
+    ) async throws {
+        let token = try token(identity: identity, roomName: roomName)
+        do {
+            try await withLiveKitIntegrationTimeout(seconds: timeoutSeconds) {
+                try await room.connect(url: liveKitURL, token: token)
+            }
+        } catch {
+            await room.disconnect()
+            throw error
+        }
+    }
+
     private static func requiredValue(_ name: String, in environment: [String: String]) throws -> String {
         let value = environment[name]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !value.isEmpty else {
@@ -70,6 +87,108 @@ struct LiveKitIntegrationHarness: Sendable {
         }
 
         return value
+    }
+}
+
+final class LiveKitIntegrationEventRecorder: RoomDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [RoomEvent] = []
+
+    var recordedEvents: [RoomEvent] {
+        lock.withLock {
+            events
+        }
+    }
+
+    func room(_ room: Room, didEmit event: RoomEvent) {
+        lock.withLock {
+            events.append(event)
+        }
+    }
+
+    func waitForParticipantConnected(
+        identity: String,
+        timeoutSeconds: TimeInterval = 10
+    ) async throws -> RemoteParticipant {
+        try await wait(timeoutSeconds: timeoutSeconds) { events in
+            for event in events.reversed() {
+                if case let .participantConnected(participant) = event,
+                   participant.identity == identity {
+                    return participant
+                }
+            }
+
+            return nil
+        }
+    }
+
+    func waitForParticipantDisconnected(
+        identity: String,
+        timeoutSeconds: TimeInterval = 10
+    ) async throws -> RemoteParticipant {
+        try await wait(timeoutSeconds: timeoutSeconds) { events in
+            for event in events.reversed() {
+                if case let .participantDisconnected(participant) = event,
+                   participant.identity == identity {
+                    return participant
+                }
+            }
+
+            return nil
+        }
+    }
+
+    func waitForDataTrackSubscriberHandle(
+        publisherIdentity: String,
+        timeoutSeconds: TimeInterval = 10
+    ) async throws -> DataTrackSubscriberHandleInfo {
+        try await wait(timeoutSeconds: timeoutSeconds) { events in
+            for event in events.reversed() {
+                if case let .dataTrackSubscriberHandlesChanged(handles) = event,
+                   let handle = handles.handles.first(where: { $0.publisherIdentity == publisherIdentity }) {
+                    return handle
+                }
+            }
+
+            return nil
+        }
+    }
+
+    func waitForDataReceived(
+        payload: Data,
+        topic: String? = nil,
+        participantIdentity: String? = nil,
+        timeoutSeconds: TimeInterval = 10
+    ) async throws -> (Data, RemoteParticipant?, String?) {
+        try await wait(timeoutSeconds: timeoutSeconds) { events in
+            for event in events.reversed() {
+                if case let .dataReceived(eventPayload, participant, eventTopic) = event,
+                   eventPayload == payload,
+                   eventTopic == topic,
+                   participantIdentity == nil || participant?.identity == participantIdentity {
+                    return (eventPayload, participant, eventTopic)
+                }
+            }
+
+            return nil
+        }
+    }
+
+    private func wait<T: Sendable>(
+        timeoutSeconds: TimeInterval,
+        match: @escaping @Sendable ([RoomEvent]) -> T?
+    ) async throws -> T {
+        try await withLiveKitIntegrationTimeout(seconds: timeoutSeconds) {
+            while !Task.isCancelled {
+                if let value = match(self.recordedEvents) {
+                    return value
+                }
+
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+
+            throw CancellationError()
+        }
     }
 }
 
