@@ -1,5 +1,7 @@
 import Foundation
 import AVFoundation
+import CoreMedia
+import CoreVideo
 import XCTest
 @testable import LiveKitNativeWebRTC
 
@@ -116,6 +118,31 @@ final class SubscriberMediaReceivePipelineTests: XCTestCase {
         XCTAssertEqual(pipeline.audioPlayoutScheduledBufferCount, 0)
     }
 
+    func testH264ReceivePipelineDecodesVideoWhenEnabled() throws {
+        let encodedFrame = try makeEncodedH264Frame()
+        let packetizer = H264PublishRTPPacketizer(payloadType: 102, mtu: 1_200, ssrc: 0x1111_2222)
+        let packets = try packetizer.packetize(encodedFrame)
+        let pipeline = SubscriberMediaReceivePipeline(maxBufferedPackets: 0, videoDecodeEnabled: true)
+        var decodedVideoFrameCount = 0
+        var videoDecodeErrorCount = 0
+
+        for packet in packets {
+            let result = pipeline.append(packet)
+            decodedVideoFrameCount += result.decodedVideoFrameCount
+            videoDecodeErrorCount += result.videoDecodeErrorCount
+        }
+
+        guard videoDecodeErrorCount == 0 else {
+            throw XCTSkip("VideoToolbox H.264 decoder unavailable in this environment.")
+        }
+        XCTAssertEqual(decodedVideoFrameCount, 1)
+        XCTAssertEqual(pipeline.decodedVideoFrameCount, 1)
+
+        pipeline.reset()
+
+        XCTAssertEqual(pipeline.decodedVideoFrameCount, 0)
+    }
+
     func testReceiverReportTracksObservedRTPAndSenderReports() throws {
         let pipeline = SubscriberMediaReceivePipeline()
         let mediaSSRC: UInt32 = 0x1111_2222
@@ -179,4 +206,87 @@ final class SubscriberMediaReceivePipelineTests: XCTestCase {
 
         return try OpusAudioConverterEncoder().encode(buffer)
     }
+
+    private func makeEncodedH264Frame() throws -> H264EncodedFrame {
+        let recorder = SubscriberH264EncodedFrameRecorder()
+        let didEncode = expectation(description: "VideoToolbox encoder produced subscriber frame")
+        let encoder = H264VideoToolboxEncoder(
+            settings: H264EncoderSettings(
+                width: 16,
+                height: 16,
+                framesPerSecond: 30,
+                bitrate: 100_000
+            )
+        )
+
+        do {
+            try encoder.configure { frame in
+                recorder.record(frame)
+                didEncode.fulfill()
+            }
+            try encoder.encode(
+                pixelBuffer: Self.makeNV12PixelBuffer(width: 16, height: 16),
+                presentationTimeStamp: CMTime(value: 1, timescale: 30),
+                duration: CMTime(value: 1, timescale: 30)
+            )
+            try encoder.completeFrames()
+        } catch let error as H264VideoToolboxEncoderError {
+            throw XCTSkip("VideoToolbox H.264 encoder unavailable in this environment: \(error)")
+        }
+
+        wait(for: [didEncode], timeout: 2.0)
+        return try XCTUnwrap(recorder.frames.first)
+    }
+
+    private static func makeNV12PixelBuffer(width: Int, height: Int) throws -> CVPixelBuffer {
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            [
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+            ] as CFDictionary,
+            &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pixelBuffer else {
+            throw SubscriberH264TestError.pixelBufferCreationFailed(status)
+        }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+        for plane in 0..<CVPixelBufferGetPlaneCount(pixelBuffer) {
+            guard let baseAddress = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, plane) else {
+                continue
+            }
+            let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, plane)
+            let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, plane)
+            memset(baseAddress, 0x80, height * bytesPerRow)
+        }
+
+        return pixelBuffer
+    }
+}
+
+private final class SubscriberH264EncodedFrameRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var mutableFrames: [H264EncodedFrame] = []
+
+    var frames: [H264EncodedFrame] {
+        lock.withLock {
+            mutableFrames
+        }
+    }
+
+    func record(_ frame: H264EncodedFrame) {
+        lock.withLock {
+            mutableFrames.append(frame)
+        }
+    }
+}
+
+private enum SubscriberH264TestError: Error {
+    case pixelBufferCreationFailed(CVReturn)
 }

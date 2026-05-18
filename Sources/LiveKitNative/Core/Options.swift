@@ -7,6 +7,7 @@ public struct RoomOptions: Equatable, Sendable {
     public var defaultAutoSubscribeDataTrack: Bool?
     public var automaticallyApplySubscriberAdaptiveTrackSettings: Bool
     public var subscriberAdaptiveTrackSettingsPriority: UInt32
+    public var automaticallyDecodeSubscriberVideo: Bool
     public var automaticallyPlaySubscriberAudio: Bool
 
     public init(
@@ -16,6 +17,7 @@ public struct RoomOptions: Equatable, Sendable {
         defaultAutoSubscribeDataTrack: Bool? = nil,
         automaticallyApplySubscriberAdaptiveTrackSettings: Bool = false,
         subscriberAdaptiveTrackSettingsPriority: UInt32 = 0,
+        automaticallyDecodeSubscriberVideo: Bool = false,
         automaticallyPlaySubscriberAudio: Bool = false
     ) {
         self.defaultAutoSubscribe = defaultAutoSubscribe
@@ -24,6 +26,7 @@ public struct RoomOptions: Equatable, Sendable {
         self.defaultAutoSubscribeDataTrack = defaultAutoSubscribeDataTrack
         self.automaticallyApplySubscriberAdaptiveTrackSettings = automaticallyApplySubscriberAdaptiveTrackSettings
         self.subscriberAdaptiveTrackSettingsPriority = subscriberAdaptiveTrackSettingsPriority
+        self.automaticallyDecodeSubscriberVideo = automaticallyDecodeSubscriberVideo
         self.automaticallyPlaySubscriberAudio = automaticallyPlaySubscriberAudio
     }
 }

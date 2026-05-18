@@ -221,9 +221,11 @@ sender/receiver report and bounded PLI/NACK subscriber feedback planning,
 H.264
 single-NAL/STAP-A/FU-A packetization, subscribe-side H.264 access-unit
 assembly, native camera track scaffolding, VideoToolbox H.264 encode output,
-H.264 publish RTP packetization, LiveKit `AddTrackRequest` construction,
+VideoToolbox H.264 subscriber decode-to-pixel-buffer smoke coverage, H.264
+publish RTP packetization, LiveKit `AddTrackRequest` construction,
 `TrackPublishedResponse` correlation, local video publication state, default
-camera publish pipeline startup, and mock transport tests.
+camera publish pipeline startup, opt-in subscriber video decode wiring, and mock
+transport tests.
 
 The audio groundwork now includes native microphone track scaffolding,
 AVAudioEngine capture and playout adapters, AudioToolbox Opus encode/decode
@@ -262,7 +264,7 @@ latest-value Room state and emitted as typed room events.
 The active implementation focus is now `1.0.0` hardening: validating the
 OpenSSL-backed DTLS-SRTP `use_srtp` handshake/exporter against LiveKit,
 completing LiveKit-validated default secure media transport, TURN TCP/TLS,
-live quality-control wiring, decoded subscriber video rendering,
+live quality-control wiring, subscriber video renderer handoff,
 standards-compliant DTLS-SCTP association behavior, meeting-grade audio session
 hardening, integration apps, and size gates.
 
@@ -369,9 +371,10 @@ recommendations, VideoToolbox bitrate/FPS recommendation application, camera
 publish backpressure/drop control, subscriber adaptive track-settings planning
 and opt-in automatic signaling, subscriber Receiver Report
 generation/cadence/sending, REMB packet/planner/sending, opt-in subscriber
-Opus playout scheduling, and matching `RequestResponse` failure
-mapping are unit-tested, while LiveKit E2E media validation, decoded subscriber
-video rendering, standards-compliant live SCTP association behavior, TURN
+Opus playout scheduling, opt-in subscriber H.264 VideoToolbox decode-to-pixel-buffer
+scheduling, and matching `RequestResponse` failure
+mapping are unit-tested, while LiveKit E2E media validation, subscriber video
+renderer handoff, standards-compliant live SCTP association behavior, TURN
 TCP/TLS execution, media recovery, meeting-grade audio session behavior, and
 end-to-end LiveKit hardening are still open.
 
@@ -422,7 +425,7 @@ unit/integration opt-in tests, benchmark smoke, and the compressed release
 binary size proxy. The strict gate additionally requires
 `LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
 That strict gate intentionally fails today because LiveKit E2E secure RTP/RTCP
-verification, full ICE/TURN hardening, decoded subscriber video rendering,
+verification, full ICE/TURN hardening, subscriber video renderer handoff,
 standards-compliant live SCTP, Apple-platform OpenSSL packaging validation,
 meeting-grade audio session behavior, full live congestion/adaptive-quality
 policy, and end-to-end LiveKit tests are still open.

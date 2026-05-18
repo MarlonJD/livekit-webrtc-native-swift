@@ -5,6 +5,8 @@ package struct SubscriberMediaReceiveResult: Equatable, Sendable {
     package var missingSequenceNumbers: [UInt16]
     package var droppedSequenceNumbers: [UInt16]
     package var h264AccessUnits: [H264AccessUnit]
+    package var decodedVideoFrameCount: Int
+    package var videoDecodeErrorCount: Int
     package var opusPackets: [OpusPacket]
     package var decodedAudioBufferCount: Int
     package var audioPlayoutErrorCount: Int
@@ -15,6 +17,8 @@ package struct SubscriberMediaReceiveResult: Equatable, Sendable {
         missingSequenceNumbers: [UInt16] = [],
         droppedSequenceNumbers: [UInt16] = [],
         h264AccessUnits: [H264AccessUnit] = [],
+        decodedVideoFrameCount: Int = 0,
+        videoDecodeErrorCount: Int = 0,
         opusPackets: [OpusPacket] = [],
         decodedAudioBufferCount: Int = 0,
         audioPlayoutErrorCount: Int = 0,
@@ -24,6 +28,8 @@ package struct SubscriberMediaReceiveResult: Equatable, Sendable {
         self.missingSequenceNumbers = missingSequenceNumbers
         self.droppedSequenceNumbers = droppedSequenceNumbers
         self.h264AccessUnits = h264AccessUnits
+        self.decodedVideoFrameCount = decodedVideoFrameCount
+        self.videoDecodeErrorCount = videoDecodeErrorCount
         self.opusPackets = opusPackets
         self.decodedAudioBufferCount = decodedAudioBufferCount
         self.audioPlayoutErrorCount = audioPlayoutErrorCount
@@ -36,6 +42,7 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
     package let videoPayloadType: UInt8
     package let feedbackSenderSSRC: UInt32
     private let maxBufferedPackets: Int
+    private let isVideoDecodeEnabled: Bool
     private let lock = NSLock()
     private var jitterBuffersBySSRC: [UInt32: RTPJitterBuffer] = [:]
     private var h264PipelinesBySSRC: [UInt32: H264SubscribePipeline] = [:]
@@ -49,12 +56,14 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
         videoPayloadType: UInt8 = 102,
         feedbackSenderSSRC: UInt32 = 0,
         maxBufferedPackets: Int = 64,
+        videoDecodeEnabled: Bool = false,
         audioPlayoutPipeline: OpusAudioPlayoutPipeline? = nil
     ) {
         self.audioPayloadType = audioPayloadType
         self.videoPayloadType = videoPayloadType
         self.feedbackSenderSSRC = feedbackSenderSSRC
         self.maxBufferedPackets = maxBufferedPackets
+        self.isVideoDecodeEnabled = videoDecodeEnabled
         self.audioPlayoutPipeline = audioPlayoutPipeline
     }
 
@@ -92,6 +101,12 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
 
     package var audioPlayoutScheduledBufferCount: Int {
         audioPlayoutPipeline?.scheduledBufferCount ?? 0
+    }
+
+    package var decodedVideoFrameCount: Int {
+        lock.withLock {
+            h264DecodersBySSRC.values.reduce(0) { $0 + $1.decodedFrameCount }
+        }
     }
 
     private func appendLocked(_ packet: RTPPacket) -> SubscriberMediaReceiveResult {
@@ -148,6 +163,18 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
             for accessUnit in accessUnits {
                 decoder.configureIfPossible(from: accessUnit)
                 if !decoder.isConfigured {
+                    signals.append(.keyFrameRequest)
+                    continue
+                }
+
+                guard isVideoDecodeEnabled else {
+                    continue
+                }
+
+                do {
+                    result.decodedVideoFrameCount += try decoder.decode(accessUnit).count
+                } catch {
+                    result.videoDecodeErrorCount += 1
                     signals.append(.keyFrameRequest)
                 }
             }

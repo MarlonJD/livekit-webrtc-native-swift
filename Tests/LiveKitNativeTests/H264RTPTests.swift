@@ -170,6 +170,26 @@ final class H264RTPTests: XCTestCase {
         XCTAssertEqual(frames.first?.rtpTimestamp, 0)
     }
 
+    func testVideoToolboxDecoderProducesPixelBufferFromEncodedFrame() throws {
+        let encodedFrame = try makeEncodedH264Frame()
+        let decoder = H264VideoToolboxSubscribeDecoder()
+        let accessUnit = H264AccessUnit(timestamp: encodedFrame.rtpTimestamp, nalUnits: encodedFrame.nalUnits)
+
+        let decodedFrames: [H264DecodedFrame]
+        do {
+            decodedFrames = try decoder.decode(accessUnit)
+        } catch let error as H264VideoToolboxSubscribeDecoderError {
+            throw XCTSkip("VideoToolbox H.264 decoder unavailable in this environment: \(error)")
+        }
+
+        let decodedFrame = try XCTUnwrap(decodedFrames.first)
+        XCTAssertEqual(decoder.decodedFrameCount, 1)
+        XCTAssertEqual(decodedFrame.timestamp, encodedFrame.rtpTimestamp)
+        XCTAssertEqual(CVPixelBufferGetWidth(decodedFrame.pixelBuffer), 16)
+        XCTAssertEqual(CVPixelBufferGetHeight(decodedFrame.pixelBuffer), 16)
+        XCTAssertNotNil(decoder.lastDecodedFrame)
+    }
+
     func testVideoToolboxEncoderAppliesAdaptiveQualityRecommendation() {
         let encoder = H264VideoToolboxEncoder(
             settings: H264EncoderSettings(
@@ -207,6 +227,37 @@ final class H264RTPTests: XCTestCase {
         XCTAssertThrowsError(try H264RTPDepacketizer().append(packet)) { error in
             XCTAssertEqual(error as? H264RTPError, .missingFragmentStart)
         }
+    }
+
+    private func makeEncodedH264Frame() throws -> H264EncodedFrame {
+        let recorder = H264EncodedFrameRecorder()
+        let didEncode = expectation(description: "VideoToolbox encoder produced a frame for decode")
+        let encoder = H264VideoToolboxEncoder(
+            settings: H264EncoderSettings(
+                width: 16,
+                height: 16,
+                framesPerSecond: 30,
+                bitrate: 100_000
+            )
+        )
+
+        do {
+            try encoder.configure { frame in
+                recorder.record(frame)
+                didEncode.fulfill()
+            }
+            try encoder.encode(
+                pixelBuffer: Self.makeNV12PixelBuffer(width: 16, height: 16),
+                presentationTimeStamp: CMTime(value: 1, timescale: 30),
+                duration: CMTime(value: 1, timescale: 30)
+            )
+            try encoder.completeFrames()
+        } catch let error as H264VideoToolboxEncoderError {
+            throw XCTSkip("VideoToolbox H.264 encoder unavailable in this environment: \(error)")
+        }
+
+        wait(for: [didEncode], timeout: 2.0)
+        return try XCTUnwrap(recorder.frames.first)
     }
 
     private static func makeNV12PixelBuffer(width: Int, height: Int) throws -> CVPixelBuffer {

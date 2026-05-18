@@ -102,7 +102,8 @@ receive decoded inbound RTCP from the injected secure media transport, and the
 default subscriber RTP receive loop now feeds protected RTP through jitter
 buffering, H.264/Opus packet assembly, and bounded NACK/PLI feedback dispatch.
 `RoomOptions` can opt into decoding subscriber Opus packets and scheduling
-PCM buffers into native audio playout.
+PCM buffers into native audio playout, and can opt into decoding subscriber
+H.264 access units through VideoToolbox into `CVPixelBuffer` frames.
 A deterministic RTCP receiver-report bandwidth estimator maps packet loss into
 adaptive video quality recommendations, and the camera publish pipeline applies
 bounded frame backpressure/drop control before queuing VideoToolbox encode
@@ -197,7 +198,7 @@ startup is configured, send LiveKit `SyncState` for retained media subscription
 preferences, disabled subscribed tracks, and local media/data publications at
 unit-test level, and keep publisher offer track state so a later local publish
 after resume still includes existing local media sections. LiveKit E2E
-verification for the OpenSSL DTLS-SRTP path, decoded subscriber video rendering,
+verification for the OpenSSL DTLS-SRTP path, subscriber video renderer handoff,
 standards-compliant live SCTP association behavior, TURN TCP/TLS execution,
 real-device media timing, meeting-grade audio session behavior,
 complete live congestion/adaptive-quality control,

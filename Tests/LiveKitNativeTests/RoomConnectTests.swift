@@ -1,5 +1,7 @@
 import Foundation
 import AVFoundation
+import CoreMedia
+import CoreVideo
 import Darwin
 import LiveKitNativeProtocol
 import LiveKitNativeWebRTC
@@ -2173,6 +2175,35 @@ final class RoomConnectTests: XCTestCase {
 
         let scheduledBufferCount = await waitForSubscriberAudioPlayoutScheduledBufferCount(room, count: 1)
         XCTAssertEqual(scheduledBufferCount, 1)
+    }
+
+    func testSubscriberReceiveLoopDecodesVideoWhenEnabled() async throws {
+        let mediaSSRC: UInt32 = 0x0506_0708
+        let encodedFrame = try makeEncodedH264Frame()
+        let packets = try H264PublishRTPPacketizer(
+            payloadType: 102,
+            mtu: 1_200,
+            ssrc: mediaSSRC
+        ).packetize(encodedFrame)
+
+        do {
+            _ = try H264VideoToolboxSubscribeDecoder().decode(
+                H264AccessUnit(timestamp: encodedFrame.rtpTimestamp, nalUnits: encodedFrame.nalUnits)
+            )
+        } catch let error as H264VideoToolboxSubscribeDecoderError {
+            throw XCTSkip("VideoToolbox H.264 decoder unavailable in this environment: \(error)")
+        }
+
+        let (room, datagramTransport, _) = try await makeStartedSubscriberRTCPFeedbackRoomWithSignalTransport(
+            roomOptions: RoomOptions(automaticallyDecodeSubscriberVideo: true)
+        )
+
+        for packet in packets {
+            datagramTransport.enqueueIncomingDatagram(try await protectedSubscriberInboundRTPDatagram(packet))
+        }
+
+        let decodedFrameCount = await waitForSubscriberDecodedVideoFrameCount(room, count: 1)
+        XCTAssertEqual(decodedFrameCount, 1)
     }
 
     func testSubscriberReceiverReportLoopSendsCadencedReportsAfterObservedRTP() async throws {
@@ -5559,6 +5590,19 @@ private func waitForSubscriberAudioPlayoutScheduledBufferCount(_ room: Room, cou
     return room.subscriberAudioPlayoutScheduledBufferCount
 }
 
+private func waitForSubscriberDecodedVideoFrameCount(_ room: Room, count: Int) async -> Int {
+    for _ in 0..<100 {
+        let decodedFrameCount = room.subscriberDecodedVideoFrameCount
+        if decodedFrameCount >= count {
+            return decodedFrameCount
+        }
+
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+
+    return room.subscriberDecodedVideoFrameCount
+}
+
 private func waitForSubscriberMediaStartupError(_ room: Room) async -> (any Error)? {
     for _ in 0..<100 {
         if let error = room.lastSubscriberMediaStartupError {
@@ -5724,8 +5768,96 @@ private func makeEncodedOpusPacket() throws -> OpusPacket {
     return try OpusAudioConverterEncoder().encode(buffer)
 }
 
+private func makeEncodedH264Frame() throws -> H264EncodedFrame {
+    let recorder = RoomH264EncodedFrameRecorder()
+    let encoder = H264VideoToolboxEncoder(
+        settings: H264EncoderSettings(
+            width: 16,
+            height: 16,
+            framesPerSecond: 30,
+            bitrate: 100_000
+        )
+    )
+
+    do {
+        try encoder.configure { frame in
+            recorder.record(frame)
+        }
+        try encoder.encode(
+            pixelBuffer: makeNV12PixelBuffer(width: 16, height: 16),
+            presentationTimeStamp: CMTime(value: 1, timescale: 30),
+            duration: CMTime(value: 1, timescale: 30)
+        )
+        try encoder.completeFrames()
+    } catch let error as H264VideoToolboxEncoderError {
+        throw XCTSkip("VideoToolbox H.264 encoder unavailable in this environment: \(error)")
+    }
+
+    for _ in 0..<100 {
+        if let frame = recorder.frames.first {
+            return frame
+        }
+
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+
+    return try XCTUnwrap(recorder.frames.first)
+}
+
+private func makeNV12PixelBuffer(width: Int, height: Int) throws -> CVPixelBuffer {
+    var pixelBuffer: CVPixelBuffer?
+    let status = CVPixelBufferCreate(
+        kCFAllocatorDefault,
+        width,
+        height,
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        [
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+        ] as CFDictionary,
+        &pixelBuffer
+    )
+    guard status == kCVReturnSuccess, let pixelBuffer else {
+        throw RoomH264TestError.pixelBufferCreationFailed(status)
+    }
+
+    CVPixelBufferLockBaseAddress(pixelBuffer, [])
+    defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+    for plane in 0..<CVPixelBufferGetPlaneCount(pixelBuffer) {
+        guard let baseAddress = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, plane) else {
+            continue
+        }
+        let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, plane)
+        let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, plane)
+        memset(baseAddress, 0x80, height * bytesPerRow)
+    }
+
+    return pixelBuffer
+}
+
 private func roomMediaStartupExportedKeyingMaterial() -> Data {
     Data((0..<SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount).map(UInt8.init))
+}
+
+private final class RoomH264EncodedFrameRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var mutableFrames: [H264EncodedFrame] = []
+
+    var frames: [H264EncodedFrame] {
+        lock.withLock {
+            mutableFrames
+        }
+    }
+
+    func record(_ frame: H264EncodedFrame) {
+        lock.withLock {
+            mutableFrames.append(frame)
+        }
+    }
+}
+
+private enum RoomH264TestError: Error {
+    case pixelBufferCreationFailed(CVReturn)
 }
 
 private actor PublisherRTCPRecorder {

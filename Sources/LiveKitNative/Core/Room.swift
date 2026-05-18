@@ -423,6 +423,10 @@ public final class Room: @unchecked Sendable {
         subscriberMediaReceivePipeline.audioPlayoutScheduledBufferCount
     }
 
+    var subscriberDecodedVideoFrameCount: Int {
+        subscriberMediaReceivePipeline.decodedVideoFrameCount
+    }
+
     var lastSubscriberMediaStartupResult: PeerConnectionMediaStartupResult? {
         subscriberMediaStartupLock.withLock {
             subscriberMediaStartupResult
@@ -687,6 +691,7 @@ public final class Room: @unchecked Sendable {
         self.publisherDataChannelIsInjected = publisherDataChannel != nil
         self.publisherDataChannel = publisherDataChannel
         self.subscriberMediaReceivePipeline = SubscriberMediaReceivePipeline(
+            videoDecodeEnabled: options.automaticallyDecodeSubscriberVideo,
             audioPlayoutPipeline: options.automaticallyPlaySubscriberAudio ? OpusAudioPlayoutPipeline() : nil
         )
 

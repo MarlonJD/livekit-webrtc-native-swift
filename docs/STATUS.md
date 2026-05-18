@@ -28,8 +28,10 @@ stored publisher RTP sender after secure publisher media startup, and native
 microphone-backed tracks can feed AudioToolbox Opus packets into the same
 publisher RTP/SRTP path. Subscriber Opus packets can now be decoded through
 AudioToolbox and scheduled into an opt-in `AVAudioPlayerNode` playout pipeline
-from the default subscriber receive loop. LiveKit E2E media validation, decoded
-subscriber video rendering, complete live congestion-control policy,
+from the default subscriber receive loop. Subscriber H.264 access units can now
+be decoded through VideoToolbox into `CVPixelBuffer` frames when
+`RoomOptions.automaticallyDecodeSubscriberVideo` is enabled. LiveKit E2E media
+validation, subscriber video renderer handoff, complete live congestion-control policy,
 meeting-grade audio session behavior, and production runtime pacing are still
 open.
 Data-track publish/unpublish/update-subscription signaling is also wired at
@@ -155,8 +157,9 @@ injected subscriber RTCP transport. The default subscriber RTP receive pipeline
 now runs inbound RTP through bounded jitter buffers, assembles H.264 access
 units or Opus packets, and emits NACK/PLI feedback through subscriber RTCP
 when packet loss or keyframe requirements are detected; opt-in subscriber Opus
-decode-to-playout scheduling is wired, while decoded video render and complete
-adaptive recovery policy remain open.
+decode-to-playout scheduling and opt-in subscriber H.264 decode-to-pixel-buffer
+scheduling are wired, while renderer handoff and complete adaptive recovery
+policy remain open.
 Subscriber RTP/Sender Report observations can now generate RTCP Receiver
 Reports with DLSR timing, and Room can send them manually or on a deterministic
 cadence through the injected subscriber RTCP transport. The RTCP codec also
@@ -713,7 +716,10 @@ The old binary WebRTC dependency path has been removed from the package model.
   - missing fragment start and sequence gap error paths
   - subscribe-side RTP to H.264 access-unit assembly
   - Annex-B byte-stream output for decoder handoff
-  - VideoToolbox subscribe decoder adapter scaffold with SPS/PPS detection
+  - VideoToolbox subscribe decoder adapter with SPS/PPS detection,
+    `VTDecompressionSession` decode, `CVPixelBuffer` output, and opt-in default
+    subscriber receive-loop wiring through
+    `RoomOptions.automaticallyDecodeSubscriberVideo`
 - H.264 camera publish groundwork:
   - `CameraCaptureOptions` carries position, resolution, and frame-rate intent
   - `LocalVideoTrack.createCameraTrack` creates a native camera-backed track
@@ -811,7 +817,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 466 tests passed
+  - 469 tests passed
   - 1 test skipped by opt-in guard
 - Release-mode benchmark smoke:
   - `swift run -c release LiveKitNativeBenchmarks`
@@ -820,7 +826,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,811,666 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,823,187 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -897,7 +903,8 @@ The following checks passed after the latest implementation pass:
 ### Media
 
 - Full device camera permission UX and production runtime capture integration.
-- Full VideoToolbox H.264 decode/render path using `VTDecompressionSession`.
+- Full VideoToolbox H.264 renderer handoff after the current opt-in
+  `VTDecompressionSession` decode-to-`CVPixelBuffer` path.
 - Production H.264 hardware-acceleration verification where the OS exposes
   `UsingHardwareAcceleratedVideoEncoder` / `UsingHardwareAcceleratedVideoDecoder`
   signals, plus an explicit fallback policy for unsupported devices, profiles,
@@ -977,8 +984,8 @@ The following checks passed after the latest implementation pass:
    live encoder/subscriber control, multi-layer simulcast/SVC publish presets,
    bandwidth-aware layer selection, Dynacast-style layer pausing, and manual
    subscriber quality controls for low/medium/high video reception.
-6. Complete VideoToolbox-backed H.264 decode/render, hardware-path detection,
-   and fallback policy before production readiness.
+6. Complete VideoToolbox-backed H.264 renderer handoff, hardware-path
+   detection, and fallback policy before production readiness.
 7. Track H.265/HEVC as a post-`1.0.0` optional Apple-focused codec profile,
    gated by hardware/fallback behavior, LiveKit negotiation, and cross-client
    compatibility.
