@@ -1109,6 +1109,7 @@ final class RoomConnectTests: XCTestCase {
                 },
                 bindAddress: "127.0.0.1",
                 receiveTimeoutMilliseconds: 250,
+                handshaker: UnavailableAppleDTLSSRTPHandshaker(),
                 consentFreshnessPolicy: .disabled
             )
         )
@@ -1353,6 +1354,7 @@ final class RoomConnectTests: XCTestCase {
                 },
                 bindAddress: "127.0.0.1",
                 receiveTimeoutMilliseconds: 250,
+                handshaker: UnavailableAppleDTLSSRTPHandshaker(),
                 consentFreshnessPolicy: .disabled
             )
         )

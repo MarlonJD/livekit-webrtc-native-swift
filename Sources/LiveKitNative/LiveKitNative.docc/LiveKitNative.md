@@ -110,7 +110,9 @@ bound-socket startup can use supported `stun:` UDP URLs to add server-reflexive
 candidates while preserving socket reuse. Public `Room` initialization now
 installs default socket-backed subscriber and publisher media startup
 configurations, so live signaling can gather and trickle local ICE candidates
-before reaching the explicit unavailable Apple DTLS-SRTP handshaker boundary.
+and then use the package-internal OpenSSL DTLS-SRTP handshaker to negotiate
+WebRTC `use_srtp`, export SRTP keying material, and bind secure RTP/RTCP
+transport when the remote peer completes the same path.
 Deterministic ICE consent freshness planning can now schedule
 selected-pair checks, timeout expiry, failure expiry, disabled policy behavior,
 and clamped jitter without a wall-clock dependency, and an injectable executor
@@ -155,11 +157,11 @@ Resume reconnects now send LiveKit `SyncState` for retained media subscription
 preferences, disabled subscribed tracks, local media/data publications, and
 the latest negotiated subscriber answer / publisher offer SDP state at
 unit-test level, and keep publisher offer track state so a later local publish
-after resume still includes existing local media sections. Real DTLS
-handshake/exporter implementation, default Room media transport wiring, default
-live consent execution, default subscriber jitter-buffer integration, RTP sender
-capture/encode startup, subscriber-pipeline RTCP feedback dispatch, and
-reconnect media recovery remain part of production hardening.
+after resume still includes existing local media sections. LiveKit E2E
+verification for the OpenSSL DTLS-SRTP path, default subscriber jitter-buffer
+integration, RTP sender capture/encode startup, subscriber-pipeline RTCP
+feedback dispatch, and reconnect media recovery remain part of production
+hardening.
 
 Release-mode microbenchmarks are available with
 `swift run -c release LiveKitNativeBenchmarks`. The benchmark suite covers the

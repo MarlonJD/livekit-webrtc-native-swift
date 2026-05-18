@@ -141,6 +141,44 @@ final class DTLSSRTPTests: XCTestCase {
         }
     }
 
+    func testOpenSSLDTLSSRTPHandshakersNegotiateProfileAndExporter() async throws {
+        let clientIdentity = DTLSSRTPIdentity.generated()
+        let serverIdentity = DTLSSRTPIdentity.generated()
+        let datagrams = PairedDTLSDatagramTransport.makePair()
+        let client = OpenSSLDTLSSRTPHandshaker(identity: clientIdentity)
+        let server = OpenSSLDTLSSRTPHandshaker(identity: serverIdentity)
+        let clientConfiguration = try DTLSSRTPHandshakeConfiguration(
+            role: .client,
+            remoteFingerprint: serverIdentity.fingerprint
+        )
+        let serverConfiguration = try DTLSSRTPHandshakeConfiguration(
+            role: .server,
+            remoteFingerprint: clientIdentity.fingerprint
+        )
+
+        async let clientResult = client.performHandshake(
+            configuration: clientConfiguration,
+            transport: datagrams.client
+        )
+        async let serverResult = server.performHandshake(
+            configuration: serverConfiguration,
+            transport: datagrams.server
+        )
+
+        let results = try await (clientResult, serverResult)
+
+        XCTAssertEqual(results.0.role, .client)
+        XCTAssertEqual(results.1.role, .server)
+        XCTAssertEqual(results.0.protectionProfile, .aes128CMHMACSHA180)
+        XCTAssertEqual(results.1.protectionProfile, .aes128CMHMACSHA180)
+        XCTAssertEqual(results.0.remoteFingerprint, serverIdentity.fingerprint)
+        XCTAssertEqual(results.1.remoteFingerprint, clientIdentity.fingerprint)
+        XCTAssertEqual(results.0.exportedKeyingMaterial, results.1.exportedKeyingMaterial)
+        XCTAssertEqual(results.0.exportedKeyingMaterial.count, SRTPProtectionProfile.aes128CMHMACSHA180.exporterByteCount)
+        XCTAssertGreaterThan(datagrams.client.sentDatagramCount, 0)
+        XCTAssertGreaterThan(datagrams.server.sentDatagramCount, 0)
+    }
+
     func testShortAuthenticationTagProfileUsesSameExporterByteCount() throws {
         let profile = try SRTPProtectionProfile(identifier: 0x0002)
         let exported = Data((0..<60).map(UInt8.init))
@@ -294,4 +332,79 @@ private struct NoopDTLSDatagramTransport: MediaDatagramTransport {
     func receive() async throws -> Data {
         Data()
     }
+}
+
+private final class PairedDTLSDatagramTransport: MediaDatagramTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var incomingDatagrams: [Data] = []
+    private var receiveContinuations: [UUID: CheckedContinuation<Data, Error>] = [:]
+    private var peer: PairedDTLSDatagramTransport?
+    private var mutableSentDatagramCount = 0
+
+    var sentDatagramCount: Int {
+        lock.withLock {
+            mutableSentDatagramCount
+        }
+    }
+
+    static func makePair() -> (client: PairedDTLSDatagramTransport, server: PairedDTLSDatagramTransport) {
+        let client = PairedDTLSDatagramTransport()
+        let server = PairedDTLSDatagramTransport()
+        client.peer = server
+        server.peer = client
+        return (client, server)
+    }
+
+    func send(_ datagram: Data) async throws {
+        let destination = try lock.withLock {
+            mutableSentDatagramCount += 1
+            guard let currentPeer = peer else {
+                throw PairedDTLSDatagramTransportError.missingPeer
+            }
+            return currentPeer
+        }
+        destination.enqueue(datagram)
+    }
+
+    func receive() async throws -> Data {
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let immediateDatagram: Data? = lock.withLock {
+                    guard incomingDatagrams.isEmpty else {
+                        return incomingDatagrams.removeFirst()
+                    }
+
+                    receiveContinuations[id] = continuation
+                    return nil
+                }
+
+                if let immediateDatagram {
+                    continuation.resume(returning: immediateDatagram)
+                }
+            }
+        } onCancel: {
+            let continuation = lock.withLock {
+                receiveContinuations.removeValue(forKey: id)
+            }
+            continuation?.resume(throwing: CancellationError())
+        }
+    }
+
+    private func enqueue(_ datagram: Data) {
+        let continuation: CheckedContinuation<Data, Error>? = lock.withLock {
+            if let id = receiveContinuations.keys.first,
+               let continuation = receiveContinuations.removeValue(forKey: id) {
+                return continuation
+            }
+
+            incomingDatagrams.append(datagram)
+            return nil
+        }
+        continuation?.resume(returning: datagram)
+    }
+}
+
+private enum PairedDTLSDatagramTransportError: Error {
+    case missingPeer
 }

@@ -10,9 +10,10 @@ client.
 
 Production readiness is intentionally represented in code through
 `LiveKitNative.productionReadiness` and `LiveKitNative.assertProductionReady()`.
-The current status is `developerPreview`, with explicit blockers for the real
-DTLS-SRTP `use_srtp` handshake/exporter implementation, TURN/ICE hardening,
-default live secure media completion, VideoToolbox-backed production H.264
+The current status is `developerPreview`, with explicit blockers for LiveKit
+server E2E secure RTP/RTCP verification, TURN/ICE hardening,
+default live media send/receive completion, Apple-platform OpenSSL packaging,
+VideoToolbox-backed production H.264
 encode/decode with hardware path verification and fallback policy, DTLS-backed SCTP, media
 recovery during reconnect, meeting-grade audio, jitter buffering, packet-loss
 recovery, congestion control, adaptive quality, real-device iOS
@@ -68,11 +69,13 @@ freshness executor can advance success/failure/expiry state in unit tests.
 Injected Room media startup now starts a selected-pair consent freshness loop
 after secure transport binding and closes the protected transport when consent
 expires. Public `Room` initialization now installs default socket-backed
-subscriber and publisher media startup configurations, so the live path can
-gather host candidates lazily, add supported STUN server-reflexive candidates,
-send local trickle/final-trickle signaling, reuse the bound ICE socket for
-checks/media datagrams, and then fail explicitly at the unavailable Apple
-DTLS-SRTP handshaker boundary instead of silently skipping media startup.
+subscriber and publisher media startup configurations backed by the local
+OpenSSL DTLS-SRTP handshaker, so the live path can gather host candidates
+lazily, add supported STUN server-reflexive candidates, send local
+trickle/final-trickle signaling, reuse the bound ICE socket for checks/media
+datagrams, negotiate WebRTC `use_srtp`, export SRTP keying material, and bind
+secure RTP/RTCP transport when the remote peer completes the same DTLS-SRTP
+path.
 Fresh
 join, reconnect, and disconnect paths now
 reset stale
@@ -122,8 +125,9 @@ The old binary WebRTC dependency path has been removed from the package model.
 - Test targets:
   - `LiveKitNativeTests`
   - `LiveKitNativeIntegrationTests`
-- External dependency:
+- External dependencies:
   - `swift-protobuf`
+  - system OpenSSL 3 for the package-internal DTLS-SRTP backend
 - Explicitly forbidden:
   - Rust toolchain or `.rs` sources
   - UniFFI bridge dependencies
@@ -560,10 +564,11 @@ The old binary WebRTC dependency path has been removed from the package model.
     local candidate gathering so supported `stun:` UDP endpoints add
     server-reflexive candidates that still map back to the same local socket
   - public default `Room` startup installs socket-backed subscriber/publisher
-    media startup configurations and an explicit unavailable Apple DTLS-SRTP
-    handshaker boundary
-  - explicit boundary before full DTLS `use_srtp` handshake implementation can
-    complete default live secure RTP/RTCP transport
+    media startup configurations and per-peer OpenSSL DTLS-SRTP identities so
+    SDP fingerprints match the handshaker certificate
+  - OpenSSL-backed DTLS 1.2 `use_srtp` negotiation and exporter binding can
+    complete default live secure RTP/RTCP transport when the remote peer
+    completes the same DTLS-SRTP path
 - RTP basics:
   - RTP v2 header encode/decode
   - marker bit, payload type, sequence number, timestamp, SSRC, and payload
@@ -669,7 +674,8 @@ The following checks passed after the latest implementation pass:
     artifacts found
 - SwiftPM package description:
   - one public product: `LiveKitNative`
-  - one external dependency: `swift-protobuf`
+  - one external Swift package dependency: `swift-protobuf`
+  - one package-internal system-library backend for DTLS-SRTP: OpenSSL 3
 
 ## Not Implemented Yet
 
@@ -706,14 +712,13 @@ The following checks passed after the latest implementation pass:
 
 ### DTLS, SRTP, RTP, and RTCP
 
-- DTLS 1.2 handshake with WebRTC `use_srtp` extension negotiation. The current
-  Apple public API surface exposes DTLS and exporter primitives, but not
-  `use_srtp` extension injection or selected SRTP profile reporting for this
-  package's selected datagram transport model.
-- Invoking the real DTLS exporter from a completed WebRTC-compatible handshake.
-- Completing the handshaker-backed secure RTP/RTCP media session binder in the
-  default live Room runtime after the explicit unavailable Apple DTLS-SRTP
-  boundary is replaced.
+- LiveKit server E2E verification for the OpenSSL-backed DTLS 1.2
+  WebRTC `use_srtp` extension negotiation and exporter now wired into the
+  default live Room path.
+- Apple-platform OpenSSL packaging/signing validation for iOS and macOS release
+  builds.
+- Completing default live RTP/RTCP media send/receive integration on top of the
+  handshaker-backed secure media session binder.
 - Connecting the tested Room publisher RTP bridge, sender registry, and
   stateful packetizer helpers to the default camera/audio capture and encode
   loops.
@@ -791,10 +796,10 @@ The following checks passed after the latest implementation pass:
 
 ## Next Recommended Work
 
-1. Continue `1.0.0` hardening by resolving the DTLS-SRTP dependency/API
-   boundary: implement a real WebRTC `use_srtp` handshake/exporter or revise the
-   no-external-DTLS-stack constraint, then let the now-default Room
-   subscriber/publisher startup complete secure RTP/RTCP transport.
+1. Continue `1.0.0` hardening by running the new OpenSSL-backed DTLS-SRTP
+   default Room path against a local LiveKit server, then capture the result in
+   an opt-in integration test and validate the OpenSSL packaging story for iOS
+   release builds.
 2. Connect queued local data publish plans to the publisher peer connection
    once data channels are open.
 3. Add full LiveKit ICE restart signaling, media/data recovery after signal
@@ -818,8 +823,9 @@ The following checks passed after the latest implementation pass:
    recovery, and real-device iOS soak/performance testing production blockers.
 10. Keep full VP8 pixel reconstruction, full CELT/SILK Opus codec work,
    publisher transceiver negotiation, default capture/encode startup into the
-   tested RTP sender bridge, and real DTLS handshake/exporter integration as
-   the hardening path before a usable end-to-end release.
+   tested RTP sender bridge, LiveKit E2E secure RTP/RTCP verification, and
+   Apple-platform OpenSSL packaging validation as the hardening path before a
+   usable end-to-end release.
 
 ## Practical Release Status
 

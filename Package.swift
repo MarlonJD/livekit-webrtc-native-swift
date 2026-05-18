@@ -44,6 +44,9 @@ let package = Package(
         ),
         .target(
             name: "LiveKitNativeWebRTC",
+            dependencies: [
+                "CLiveKitNativeOpenSSL",
+            ],
             linkerSettings: [
                 .linkedFramework("AVFoundation", .when(platforms: [.iOS, .macOS])),
                 .linkedFramework("AudioToolbox", .when(platforms: [.iOS, .macOS])),
@@ -51,6 +54,19 @@ let package = Package(
                 .linkedFramework("Network", .when(platforms: [.iOS, .macOS])),
                 .linkedFramework("Security", .when(platforms: [.iOS, .macOS])),
                 .linkedFramework("VideoToolbox", .when(platforms: [.iOS, .macOS])),
+            ]
+        ),
+        .systemLibrary(
+            name: "COpenSSL",
+            pkgConfig: "openssl",
+            providers: [
+                .brew(["openssl@3"]),
+            ]
+        ),
+        .target(
+            name: "CLiveKitNativeOpenSSL",
+            dependencies: [
+                "COpenSSL",
             ]
         ),
         .executableTarget(

@@ -223,12 +223,11 @@ request/response signaling, data subscription update signaling, and
 Media section requirements and data-track subscriber handles are retained as
 latest-value Room state and emitted as typed room events.
 
-The active implementation focus is now `1.0.0` hardening: replacing the
-explicit unavailable Apple DTLS-SRTP handshaker boundary with a production
-`use_srtp` handshake/exporter, completing default live secure media transport,
-reconnect, TURN, quality controls, default capture/encode startup into the
-tested RTP sender bridge, DTLS-SCTP network transport, integration apps, and
-size gates.
+The active implementation focus is now `1.0.0` hardening: validating the
+OpenSSL-backed DTLS-SRTP `use_srtp` handshake/exporter against LiveKit,
+completing default live secure media transport, reconnect, TURN, quality
+controls, default capture/encode startup into the tested RTP sender bridge,
+DTLS-SCTP network transport, integration apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
 `LiveKitNative.assertProductionReady()` so applications and release automation
@@ -348,10 +347,10 @@ The default gate checks package shape, forbidden runtime dependencies,
 unit/integration opt-in tests, benchmark smoke, and the compressed release
 binary size proxy. The strict gate additionally requires
 `LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
-That strict gate intentionally fails today because DTLS handshake/exporter
-implementation, full ICE/TURN hardening, Room runtime media startup, publisher
-capture/encode startup, subscriber-pipeline RTCP feedback dispatch, live SCTP, and
-end-to-end LiveKit tests are still open.
+That strict gate intentionally fails today because LiveKit E2E secure RTP/RTCP
+verification, full ICE/TURN hardening, publisher capture/encode startup,
+subscriber-pipeline RTCP feedback dispatch, live SCTP, Apple-platform OpenSSL
+packaging validation, and end-to-end LiveKit tests are still open.
 
 ## Requirements
 
@@ -424,7 +423,8 @@ try await room.connect(
   of scope for v1 in this package.
 - The repository intentionally contains no Rust toolchain, no `.rs` sources, no
   UniFFI bridge dependency, no `LiveKitWebRTC.xcframework`, no BoringSSL, no
-  libopus, and no libvpx.
+  libopus, and no libvpx. DTLS-SRTP uses a small package-internal OpenSSL 3
+  bridge instead of the forbidden WebRTC/BoringSSL runtime.
 
 ## Milestones
 

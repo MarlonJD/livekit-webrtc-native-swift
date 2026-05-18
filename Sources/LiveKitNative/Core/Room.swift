@@ -124,7 +124,7 @@ struct RoomMediaStartupConfiguration: Sendable {
         iceRole: ICEAgentRole = .controlling,
         tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
-        handshaker: any DTLSSRTPHandshaking = UnavailableAppleDTLSSRTPHandshaker(),
+        handshaker: any DTLSSRTPHandshaking = OpenSSLDTLSSRTPHandshaker(),
         consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
         consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
     ) -> Self {
@@ -507,11 +507,29 @@ public final class Room: @unchecked Sendable {
     }
 
     public convenience init(options: RoomOptions = .init()) {
+        let subscriberDTLSIdentity = DTLSSRTPIdentity.generated()
+        let publisherDTLSIdentity = DTLSSRTPIdentity.generated()
         self.init(
             options: options,
             signalConnection: SignalConnection(),
-            subscriberMediaStartupConfiguration: .defaultLive(),
-            publisherMediaStartupConfiguration: .defaultLive()
+            subscriberPeerConnection: PeerConnectionCoordinator(
+                configuration: NativeWebRTCConfiguration(
+                    role: .subscriber,
+                    dtlsIdentity: subscriberDTLSIdentity
+                )
+            ),
+            publisherPeerConnection: PeerConnectionCoordinator(
+                configuration: NativeWebRTCConfiguration(
+                    role: .publisher,
+                    dtlsIdentity: publisherDTLSIdentity
+                )
+            ),
+            subscriberMediaStartupConfiguration: .defaultLive(
+                handshaker: OpenSSLDTLSSRTPHandshaker(identity: subscriberDTLSIdentity)
+            ),
+            publisherMediaStartupConfiguration: .defaultLive(
+                handshaker: OpenSSLDTLSSRTPHandshaker(identity: publisherDTLSIdentity)
+            )
         )
     }
 

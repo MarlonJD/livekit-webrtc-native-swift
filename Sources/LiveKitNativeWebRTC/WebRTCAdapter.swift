@@ -233,19 +233,25 @@ package struct NativeWebRTCConfiguration: Equatable, Sendable {
     package var mediaProfile: NativeWebRTCMediaProfile
     package var iceCredentials: ICECredentials
     package var dtlsFingerprint: DTLSSignature
+    package var dtlsIdentity: DTLSSRTPIdentity
 
     package init(
         role: PeerConnectionRole,
         iceServers: [ICEServer] = [],
         mediaProfile: NativeWebRTCMediaProfile = .liveKitTiny,
         iceCredentials: ICECredentials = .random(),
-        dtlsFingerprint: DTLSSignature = .ephemeralIdentityFingerprint()
+        dtlsFingerprint: DTLSSignature? = nil,
+        dtlsIdentity: DTLSSRTPIdentity? = nil
     ) {
+        let identity = dtlsIdentity ?? dtlsFingerprint.map {
+            DTLSSRTPIdentity(fingerprint: $0)
+        } ?? .generated()
         self.role = role
         self.iceServers = iceServers
         self.mediaProfile = mediaProfile
         self.iceCredentials = iceCredentials
-        self.dtlsFingerprint = dtlsFingerprint
+        self.dtlsFingerprint = dtlsFingerprint ?? identity.fingerprint
+        self.dtlsIdentity = identity
     }
 }
 
