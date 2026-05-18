@@ -114,13 +114,18 @@ work. Publisher RTCP receiver reports now feed the estimator even without an
 external app RTCP handler, and matching H.264 camera pipelines can apply
 recommended bitrate/FPS caps to VideoToolbox. Subscriber-side recommendations
 can be planned and sent as LiveKit `UpdateTrackSettings` requests for
-low/medium/high/off reception, and observed subscriber RTP/Sender Report state
-can produce scheduled RTCP Receiver Reports with DLSR timing plus REMB bitrate
-feedback over the subscriber secure RTCP transport. `RoomOptions` can opt into
-deduplicated automatic subscriber `UpdateTrackSettings` dispatch from the
-current receiver-report estimate.
-`Room.updateSubscription` and `Room.updateTrackSettings` expose media
-subscription and subscribed track settings signaling.
+low/medium/high/off reception, and apps can use public subscriber
+video-quality presets without hand-coding dimensions or FPS caps. Observed
+subscriber RTP/Sender Report state can produce scheduled RTCP Receiver Reports
+with DLSR timing plus REMB bitrate feedback over the subscriber secure RTCP
+transport. `RoomOptions` can opt into deduplicated automatic subscriber
+`UpdateTrackSettings` dispatch from the current receiver-report estimate, and
+publisher active video-layer `UpdateVideoLayers` signaling is available for
+Dynacast-style layer availability updates once real multi-layer media is
+validated.
+`Room.updateSubscription`, `Room.updateTrackSettings`, and
+`Room.setSubscribedVideoQuality` expose media subscription and subscribed track
+settings signaling.
 `LocalParticipant.setTrackSubscriptionPermissions` exposes publisher-controlled
 subscription permission signaling, and `LocalParticipant.updateAudioTrack` /
 `LocalParticipant.updateVideoTrack` expose local publisher track update

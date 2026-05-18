@@ -836,6 +836,51 @@ public final class Room: @unchecked Sendable {
         storeReconnectTrackSettingsUpdate(trackSIDs: trackSIDs, disabled: disabled)
     }
 
+    public func setSubscribedVideoQuality(
+        trackSIDs: [String],
+        quality: VideoQuality,
+        priority: UInt32 = 0
+    ) async throws {
+        try await setSubscribedVideoQuality(
+            trackSIDs: trackSIDs,
+            preset: .preset(for: quality),
+            priority: priority
+        )
+    }
+
+    public func setSubscribedVideoQuality(
+        trackSIDs: [String],
+        preset: SubscribedVideoQualityPreset,
+        priority: UInt32 = 0
+    ) async throws {
+        try await updateTrackSettings(
+            trackSIDs: trackSIDs,
+            disabled: preset.disabled,
+            quality: preset.quality,
+            width: preset.width,
+            height: preset.height,
+            fps: preset.framesPerSecond,
+            priority: priority
+        )
+    }
+
+    public func updatePublishedVideoLayers(
+        trackSID: String,
+        activeLayers: [PublishedVideoLayer]
+    ) async throws {
+        guard !trackSID.isEmpty else {
+            return
+        }
+
+        var update = Livekit_UpdateVideoLayers()
+        update.trackSid = trackSID
+        update.layers = activeLayers.map(\.protocolLayer)
+
+        var request = Livekit_SignalRequest()
+        request.updateLayers = update
+        try await signalConnection.send(request)
+    }
+
     @discardableResult
     func updateAdaptiveTrackSettings(
         trackSIDs: [String],

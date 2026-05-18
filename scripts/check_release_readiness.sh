@@ -59,6 +59,27 @@ if [[ "$require_production_ready" == "1" ]]; then
     echo "Production release gate failed: blockers are not empty."
     exit 1
   fi
+
+  if [[ "$run_tests" != "1" ]]; then
+    echo "Production release gate failed: tests must run in strict production mode."
+    exit 1
+  fi
+
+  if [[ "${LIVEKIT_NATIVE_RUN_INTEGRATION:-0}" != "1" ]]; then
+    echo "Production release gate failed: set LIVEKIT_NATIVE_RUN_INTEGRATION=1 so LiveKit integration tests run."
+    exit 1
+  fi
+
+  for required_integration_env in \
+    LIVEKIT_NATIVE_LIVEKIT_URL \
+    LIVEKIT_NATIVE_API_KEY \
+    LIVEKIT_NATIVE_API_SECRET
+  do
+    if [[ -z "${!required_integration_env:-}" ]]; then
+      echo "Production release gate failed: missing $required_integration_env for LiveKit integration tests."
+      exit 1
+    fi
+  done
 else
   if grep -q 'status: \.productionReady' "$readiness_file" && ! grep -q 'blockers: \[\]' "$readiness_file"; then
     echo "Readiness marker is inconsistent: productionReady status with non-empty blockers."
@@ -70,6 +91,11 @@ fi
 
 if [[ "$run_tests" == "1" ]]; then
   echo "==> Running tests"
+  if [[ "${LIVEKIT_NATIVE_RUN_INTEGRATION:-0}" == "1" ]]; then
+    echo "LiveKit integration tests enabled for ${LIVEKIT_NATIVE_LIVEKIT_URL:-<missing-url>}."
+  else
+    echo "LiveKit integration tests not requested; opt-in tests will skip."
+  fi
   swift test --jobs 1
 fi
 

@@ -17,8 +17,9 @@ VideoToolbox-backed production H.264
 encode/decode with hardware path verification and fallback policy,
 standards-compliant DTLS-backed SCTP, media
 recovery during reconnect, real-device audio-session validation, jitter buffering, packet-loss
-recovery, live congestion control, applied adaptive quality, real-device iOS
-soak/performance tests, and end-to-end LiveKit compatibility testing.
+recovery, live congestion control, applied adaptive quality, actual multi-layer
+simulcast/SVC media production, real-device iOS soak/performance tests, and
+end-to-end LiveKit compatibility testing.
 Publisher `AddTrackRequest` signaling is now wired for local audio/video
 publishes, publisher SDP offers are generated and sent after
 `TrackPublishedResponse`, and publisher answers and publisher-targeted trickle
@@ -38,8 +39,8 @@ voice-chat audio session for Room connect/disconnect lifecycle on iOS while
 remaining a no-op on macOS unit tests.
 LiveKit E2E media
 validation, real-device video display validation, complete live congestion-control policy,
-route/interruption audio recovery, and production runtime pacing are still
-open.
+actual multi-encoder simulcast/SVC production, route/interruption audio
+recovery, and production runtime pacing are still open.
 Data-track publish/unpublish/update-subscription signaling is also wired at
 unit-test level, including server/SFU data-track unpublish cleanup for local
 publication and reconnect state; full standards-compliant SCTP behavior remains
@@ -179,7 +180,9 @@ encode work. Publisher RTCP receiver reports now feed the bandwidth estimator
 without requiring an external RTCP handler, and matching H.264 camera pipelines
 can apply recommended bitrate/FPS caps to VideoToolbox.
 Subscriber-side recommendations can also be planned and sent as LiveKit
-`UpdateTrackSettings` requests for low/medium/high/off reception, and
+`UpdateTrackSettings` requests for low/medium/high/off reception, public
+subscriber video-quality presets cover manual selection, and publisher active
+layer availability can be signaled with `UpdateVideoLayers`.
 `RoomOptions` can opt into deduplicated automatic subscriber track-settings
 dispatch for remote video tracks from the current receiver-report estimate.
 `RoomOptions` can now set default LiveKit adaptive stream, subscriber pause,
@@ -628,9 +631,17 @@ The old binary WebRTC dependency path has been removed from the package model.
   - subscriber adaptive track-settings planner that maps quality
     recommendations into LiveKit low/medium/high/off `UpdateTrackSettings`
     requests with bounded resolution and FPS caps
+  - public manual subscriber video-quality presets for low/medium/high/off
+    reception without requiring apps to hand-code dimensions and FPS caps
   - opt-in Room subscriber adaptive track-settings dispatch that applies the
     lowest current receiver-report bandwidth recommendation to remote video
     tracks and suppresses duplicate plans
+  - publisher active video-layer `UpdateVideoLayers` signaling for
+    Dynacast-style layer availability updates once real multi-layer media is
+    validated
+  - single-layer H.264 `AddTrackRequest` metadata now marks the advertised
+    layer as high quality, and simulcast codec metadata is omitted when
+    `TrackPublishOptions.simulcast` is disabled
   - first-class `RoomOptions` defaults and `ConnectOptions` overrides for
     LiveKit adaptive stream, subscriber pause, and data-track auto-subscribe
     connection settings
@@ -968,7 +979,12 @@ The following checks passed after the latest implementation pass:
 
 ### Integration
 
-- End-to-end connection to a LiveKit server.
+- Opt-in LiveKit integration harness using `LIVEKIT_NATIVE_RUN_INTEGRATION=1`,
+  `LIVEKIT_NATIVE_LIVEKIT_URL`, `LIVEKIT_NATIVE_API_KEY`,
+  `LIVEKIT_NATIVE_API_SECRET`, generated `lknative-` room prefixes, and
+  short-lived room-scoped participant tokens.
+- End-to-end one-client connection and disconnect against a configured LiveKit
+  server.
 - Subscribe path.
 - Publish path.
 - Two-client media/data test.
@@ -1000,11 +1016,12 @@ The following checks passed after the latest implementation pass:
    `SyncState` state/SDP unit coverage.
 4. Add text streams, byte streams, RPC, and two-client data integration tests.
 5. Expand adaptive video quality from the current receiver-report estimator,
-   publisher RTCP report ingestion, and H.264 encoder bitrate/FPS
-   recommendation hook plus subscriber track-settings planner into complete
-   live encoder/subscriber control, multi-layer simulcast/SVC publish presets,
-   bandwidth-aware layer selection, Dynacast-style layer pausing, and manual
-   subscriber quality controls for low/medium/high video reception.
+   publisher RTCP report ingestion, H.264 encoder bitrate/FPS recommendation
+   hook, manual subscriber quality presets, publisher `UpdateVideoLayers`
+   active-layer signaling, and subscriber track-settings planner into complete
+   live encoder/subscriber control, actual multi-layer simulcast/SVC media
+   production, bandwidth-aware layer selection, and LiveKit-validated
+   Dynacast-style layer pausing.
 6. Complete VideoToolbox-backed H.264 real-device display validation,
    hardware-path detection, and fallback policy before production readiness.
 7. Track H.265/HEVC as a post-`1.0.0` optional Apple-focused codec profile,
@@ -1048,3 +1065,6 @@ For an actual production tag gate, use:
 ```sh
 REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh
 ```
+
+Strict production mode also requires the opt-in LiveKit integration variables
+so a production tag cannot pass with the live server tests skipped.

@@ -4632,6 +4632,99 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(settings.priority, 2)
     }
 
+    func testSetSubscribedVideoQualitySendsPresetTrackSettings() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        try await room.setSubscribedVideoQuality(
+            trackSIDs: ["TR_camera"],
+            quality: .medium,
+            priority: 3
+        )
+
+        let sentFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(data) = try XCTUnwrap(sentFrames.first) else {
+            return XCTFail("Expected binary UpdateTrackSettings request.")
+        }
+
+        let request = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: data)
+        guard case let .trackSetting(settings)? = request.message else {
+            return XCTFail("Expected SignalRequest.trackSetting.")
+        }
+        XCTAssertEqual(settings.trackSids, ["TR_camera"])
+        XCTAssertFalse(settings.disabled)
+        XCTAssertEqual(settings.quality, .medium)
+        XCTAssertEqual(settings.width, 1_280)
+        XCTAssertEqual(settings.height, 720)
+        XCTAssertEqual(settings.fps, 24)
+        XCTAssertEqual(settings.priority, 3)
+    }
+
+    func testUpdatePublishedVideoLayersSendsSignalRequest() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        try await room.updatePublishedVideoLayers(
+            trackSID: "TR_camera",
+            activeLayers: [
+                PublishedVideoLayer(
+                    quality: .low,
+                    width: 320,
+                    height: 180,
+                    bitrate: 150_000,
+                    ssrc: 0x1111,
+                    spatialLayer: 0,
+                    rid: "q"
+                ),
+                PublishedVideoLayer(
+                    quality: .high,
+                    width: 1_280,
+                    height: 720,
+                    bitrate: 1_500_000,
+                    ssrc: 0x3333,
+                    spatialLayer: 2,
+                    rid: "f"
+                ),
+            ]
+        )
+
+        let sentFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(data) = try XCTUnwrap(sentFrames.first) else {
+            return XCTFail("Expected binary UpdateVideoLayers request.")
+        }
+
+        let request = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: data)
+        guard case let .updateLayers(update)? = request.message else {
+            return XCTFail("Expected SignalRequest.updateLayers.")
+        }
+        XCTAssertEqual(update.trackSid, "TR_camera")
+        XCTAssertEqual(update.layers.count, 2)
+        XCTAssertEqual(update.layers[0].quality, .low)
+        XCTAssertEqual(update.layers[0].width, 320)
+        XCTAssertEqual(update.layers[0].height, 180)
+        XCTAssertEqual(update.layers[0].bitrate, 150_000)
+        XCTAssertEqual(update.layers[0].ssrc, 0x1111)
+        XCTAssertEqual(update.layers[0].spatialLayer, 0)
+        XCTAssertEqual(update.layers[0].rid, "q")
+        XCTAssertEqual(update.layers[1].quality, .high)
+        XCTAssertEqual(update.layers[1].width, 1_280)
+        XCTAssertEqual(update.layers[1].height, 720)
+        XCTAssertEqual(update.layers[1].bitrate, 1_500_000)
+        XCTAssertEqual(update.layers[1].ssrc, 0x3333)
+        XCTAssertEqual(update.layers[1].spatialLayer, 2)
+        XCTAssertEqual(update.layers[1].rid, "f")
+    }
+
     func testAdaptiveTrackSettingsSendsRecommendedUpdateTrackSettings() async throws {
         let frames = try [
             makeJoinResponse(),

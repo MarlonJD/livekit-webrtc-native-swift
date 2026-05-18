@@ -80,8 +80,8 @@ struct LocalVideoPublishPlan: Equatable, Sendable {
         request.width = width
         request.height = height
         request.source = source.protocolTrackSource
-        request.layers = videoLayers
-        request.simulcastCodecs = [simulcastCodec]
+        request.layers = videoLayers.map(\.protocolLayer)
+        request.simulcastCodecs = simulcast ? [simulcastCodec] : []
         return request
     }
 
@@ -96,20 +96,23 @@ struct LocalVideoPublishPlan: Equatable, Sendable {
         }
     }
 
-    private var videoLayers: [Livekit_VideoLayer] {
-        var layer = Livekit_VideoLayer()
-        layer.width = width
-        layer.height = height
-        layer.bitrate = UInt32(recommendedBitrate)
-        layer.ssrc = ssrc
-        return [layer]
+    private var videoLayers: [PublishedVideoLayer] {
+        [
+            .singleH264(
+                width: width,
+                height: height,
+                bitrate: UInt32(recommendedBitrate),
+                ssrc: ssrc
+            ),
+        ]
     }
 
     private var simulcastCodec: Livekit_SimulcastCodec {
         var simulcastCodec = Livekit_SimulcastCodec()
         simulcastCodec.codec = "video/H264"
         simulcastCodec.cid = cid
-        simulcastCodec.layers = videoLayers
+        simulcastCodec.layers = videoLayers.map(\.protocolLayer)
+        simulcastCodec.videoLayerMode = .oneSpatialLayerPerStream
         return simulcastCodec
     }
 }

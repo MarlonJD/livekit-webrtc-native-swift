@@ -40,11 +40,31 @@ final class LocalVideoPublishPlanTests: XCTestCase {
         XCTAssertEqual(request.layers[0].ssrc, 1234)
         XCTAssertEqual(request.layers[0].width, 1_280)
         XCTAssertEqual(request.layers[0].height, 720)
+        XCTAssertEqual(request.layers[0].quality, .high)
         XCTAssertEqual(request.simulcastCodecs.count, 1)
         XCTAssertEqual(request.simulcastCodecs[0].codec, "video/H264")
+        XCTAssertEqual(request.simulcastCodecs[0].videoLayerMode, .oneSpatialLayerPerStream)
         XCTAssertEqual(plan.codec, .h264)
         XCTAssertEqual(plan.encoderSettings.width, 1_280)
         XCTAssertEqual(plan.encoderSettings.height, 720)
         XCTAssertEqual(plan.encoderSettings.framesPerSecond, 30)
+    }
+
+    func testLocalVideoPublishPlanCanDisableSimulcastCodecAdvertisement() throws {
+        let track = try LocalVideoTrack.createCameraTrack(
+            options: CameraCaptureOptions(width: 640, height: 360, framesPerSecond: 15)
+        )
+        let plan = LocalVideoPublishPlan(
+            track: track,
+            options: TrackPublishOptions(simulcast: false),
+            ssrc: 5678
+        )
+        let request = plan.addTrackRequest
+
+        XCTAssertEqual(request.layers.count, 1)
+        XCTAssertEqual(request.layers[0].quality, .high)
+        XCTAssertEqual(request.layers[0].width, 640)
+        XCTAssertEqual(request.layers[0].height, 360)
+        XCTAssertEqual(request.simulcastCodecs, [])
     }
 }

@@ -334,12 +334,14 @@ RTCP handler, matching H.264 camera pipelines can apply recommended
 bitrate/FPS caps to VideoToolbox, and the camera publish pipeline applies a
 bounded frame backpressure/drop controller before VideoToolbox encode work is
 queued. Subscriber-side recommendations can be turned into LiveKit
-`UpdateTrackSettings` requests for low/medium/high/off reception, and the
-subscriber RTP receive pipeline now tracks RTP/Sender Report state to emit
-cadenced RTCP Receiver Reports with DLSR timing and REMB bitrate feedback
-through the subscriber secure RTCP path; `RoomOptions` can also opt into
-deduplicated automatic `UpdateTrackSettings` dispatch for subscribed remote
-video tracks from those estimates. Connection setup can now advertise LiveKit
+`UpdateTrackSettings` requests for low/medium/high/off reception, public
+subscriber video-quality presets cover manual selection, and publisher active
+layer availability can be signaled with `UpdateVideoLayers`. The subscriber RTP
+receive pipeline now tracks RTP/Sender Report state to emit cadenced RTCP
+Receiver Reports with DLSR timing and REMB bitrate feedback through the
+subscriber secure RTCP path; `RoomOptions` can also opt into deduplicated
+automatic `UpdateTrackSettings` dispatch for subscribed remote video tracks
+from those estimates. Connection setup can now advertise LiveKit
 adaptive stream, subscriber pause, and data-track auto-subscribe preferences
 through `RoomOptions` defaults or per-call `ConnectOptions`.
 Server-initiated mute messages update local/remote track publication state and emit
@@ -369,8 +371,9 @@ encode/decode smoke coverage, subscriber RTP
 jitter-buffer/feedback behavior, deterministic receiver-report bandwidth
 estimation, publisher RTCP report ingestion, adaptive video quality
 recommendations, VideoToolbox bitrate/FPS recommendation application, camera
-publish backpressure/drop control, subscriber adaptive track-settings planning
-and opt-in automatic signaling, subscriber Receiver Report
+publish backpressure/drop control, subscriber adaptive track-settings planning,
+manual subscriber video-quality preset signaling, publisher active video-layer
+`UpdateVideoLayers` signaling, and opt-in automatic signaling, subscriber Receiver Report
 generation/cadence/sending, REMB packet/planner/sending, opt-in subscriber
 Opus playout scheduling, opt-in subscriber H.264 VideoToolbox decode-to-pixel-buffer
 scheduling, public `SubscriberVideoFrameRenderer` handoff, UIKit/AppKit
@@ -379,8 +382,9 @@ configuration through `RoomOptions.automaticallyConfigureAudioSession`, and matc
 `RequestResponse` failure
 mapping are unit-tested, while LiveKit E2E media validation, real-device video
 display validation, standards-compliant live SCTP association behavior, TURN
-TCP/TLS execution, media recovery, route/interruption audio recovery, and
-end-to-end LiveKit hardening are still open.
+TCP/TLS execution, actual multi-layer simulcast/SVC media production, media
+recovery, route/interruption audio recovery, and end-to-end LiveKit hardening
+are still open.
 
 ## Benchmarks
 
@@ -433,6 +437,22 @@ verification, full ICE/TURN hardening, real-device video display validation,
 standards-compliant live SCTP, Apple-platform OpenSSL packaging validation,
 real-device audio route/interruption recovery, full live congestion/adaptive-quality
 policy, and end-to-end LiveKit tests are still open.
+
+Opt-in LiveKit integration tests are disabled unless a local or cloud LiveKit
+server is explicitly configured:
+
+```sh
+LIVEKIT_NATIVE_RUN_INTEGRATION=1 \
+LIVEKIT_NATIVE_LIVEKIT_URL=ws://127.0.0.1:7880 \
+LIVEKIT_NATIVE_API_KEY=devkey \
+LIVEKIT_NATIVE_API_SECRET=secret \
+swift test --filter LiveKitNativeIntegrationTests
+```
+
+The harness generates per-run room names with an `lknative-` prefix and
+short-lived room-scoped participant tokens. Strict production release mode now
+requires those integration variables so the future `productionReady` marker
+cannot pass while live tests are silently skipped.
 
 ## Requirements
 
