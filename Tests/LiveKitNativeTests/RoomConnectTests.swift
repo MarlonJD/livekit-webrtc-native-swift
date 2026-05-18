@@ -3855,6 +3855,46 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(room.localParticipant.dataTrackPublications, [dataTrack])
     }
 
+    func testPublishDataUsesInjectedDataChannelPublisherAndFlushesAfterAck() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let signalTransport = MockSignalTransport(incomingFrames: frames)
+        let dataTransport = RecordingSCTPDataChannelPacketTransport()
+        let dataChannelPublisher = LocalDataChannelPublisher(transport: dataTransport)
+        let room = Room(
+            signalConnection: SignalConnection(transport: signalTransport),
+            publisherDataChannel: dataChannelPublisher
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        try await room.localParticipant.publish(
+            data: Data("hello".utf8),
+            options: DataPublishOptions(reliable: true, topic: "chat")
+        )
+
+        XCTAssertEqual(room.localParticipant.dataPublishPlans.count, 1)
+        XCTAssertEqual(dataTransport.sentPackets.count, 1)
+        XCTAssertEqual(dataTransport.sentPackets[0].ppid, .dataChannelControl)
+
+        try await dataChannelPublisher.acceptControlPacket(
+            SCTPDataChannelPacket(
+                streamID: LocalDataPublishPlan.reliableStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
+            )
+        )
+
+        XCTAssertEqual(dataTransport.sentPackets.count, 2)
+        let dataPacket = try Livekit_DataPacket(serializedBytes: dataTransport.sentPackets[1].payload)
+        XCTAssertEqual(dataPacket.kind, .reliable)
+        XCTAssertEqual(dataPacket.user.payload, Data("hello".utf8))
+        XCTAssertEqual(dataPacket.user.topic, "chat")
+        XCTAssertEqual(dataPacket.participantSid, "PA_local")
+        XCTAssertEqual(dataPacket.participantIdentity, "marlon")
+    }
+
     func testUpdateDataSubscriptionSendsSignalRequest() async throws {
         let frames = try [
             makeJoinResponse(),

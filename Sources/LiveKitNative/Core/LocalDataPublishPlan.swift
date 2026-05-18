@@ -99,6 +99,109 @@ struct LocalDataPublishPlan: Equatable, Sendable {
     }
 }
 
+protocol SCTPDataChannelPacketTransport: Sendable {
+    func send(_ packet: SCTPDataChannelPacket) async throws
+}
+
+actor LocalDataChannelPublisher {
+    private let manager: SCTPDataChannelManager
+    private let transport: any SCTPDataChannelPacketTransport
+    private var openedChannelStreamIDs: Set<UInt16> = []
+    private var pendingPlans: [LocalDataPublishPlan] = []
+    private var liveKitChannelsInitialized = false
+
+    init(
+        manager: SCTPDataChannelManager = SCTPDataChannelManager(),
+        transport: any SCTPDataChannelPacketTransport
+    ) {
+        self.manager = manager
+        self.transport = transport
+    }
+
+    var pendingPlanCount: Int {
+        pendingPlans.count
+    }
+
+    func publish(_ plan: LocalDataPublishPlan) async throws {
+        ensureLiveKitChannelsInitialized()
+        let channel = manager.ensureLiveKitChannel(for: plan.reliability)
+        if channel.state == .open {
+            try await transport.send(plan.sctpPacket)
+            return
+        }
+
+        pendingPlans.append(plan)
+        do {
+            try await sendOpenIfNeeded(channel)
+        } catch {
+            removePendingPlan(plan)
+            throw error
+        }
+    }
+
+    func acceptControlPacket(_ packet: SCTPDataChannelPacket) async throws {
+        ensureLiveKitChannelsInitialized()
+        try manager.acceptControlPacket(packet)
+        try await flushPendingPlans()
+    }
+
+    private func ensureLiveKitChannelsInitialized() {
+        guard !liveKitChannelsInitialized else {
+            return
+        }
+
+        _ = manager.ensureLiveKitChannel(for: .reliable)
+        _ = manager.ensureLiveKitChannel(for: .lossy)
+        liveKitChannelsInitialized = true
+    }
+
+    private func sendOpenIfNeeded(_ channel: SCTPDataChannel) async throws {
+        guard !openedChannelStreamIDs.contains(channel.streamID) else {
+            return
+        }
+
+        try await transport.send(channel.openPacket())
+        openedChannelStreamIDs.insert(channel.streamID)
+    }
+
+    private func flushPendingPlans() async throws {
+        var remainingPlans: [LocalDataPublishPlan] = []
+        var firstError: (any Error)?
+
+        for plan in pendingPlans {
+            guard isOpen(reliability: plan.reliability), firstError == nil else {
+                remainingPlans.append(plan)
+                continue
+            }
+
+            do {
+                try await transport.send(plan.sctpPacket)
+            } catch {
+                remainingPlans.append(plan)
+                firstError = error
+            }
+        }
+
+        pendingPlans = remainingPlans
+
+        if let firstError {
+            throw firstError
+        }
+    }
+
+    private func isOpen(reliability: SCTPDataChannelReliability) -> Bool {
+        manager.ensureLiveKitChannel(for: reliability).state == .open
+    }
+
+    private func removePendingPlan(_ plan: LocalDataPublishPlan) {
+        guard let index = pendingPlans.firstIndex(of: plan) else {
+            return
+        }
+
+        pendingPlans.remove(at: index)
+    }
+}
+
 struct LocalDataTrackPublishPlan: Equatable, Sendable {
     var pubHandle: UInt32
     var name: String

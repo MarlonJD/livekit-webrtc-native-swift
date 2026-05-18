@@ -218,7 +218,9 @@ Data channel groundwork now includes WebRTC DCEP open/ack encode/decode,
 reliable/lossy LiveKit data-channel labels, SCTP stream routing for local data
 channels, binary PPID envelopes, LiveKit `DataPacket` user-packet mapping,
 `publish(data:options:)` local publish planning, data-track publish/unpublish
-request/response signaling, data subscription update signaling, and
+request/response signaling, data subscription update signaling, queued local
+data publish flushing through an injected SCTP packet transport after
+reliable/lossy DCEP acknowledgement, and
 `RoomEvent.dataReceived` mapping for decoded packets.
 Media section requirements and data-track subscriber handles are retained as
 latest-value Room state and emitted as typed room events.
@@ -295,9 +297,10 @@ Publisher answer routing, data-track control event mapping, data-track
 publish/unpublish request flows, and server/SFU media/data-track unpublish cleanup
 for reconnect state, injected publisher transport teardown, consent-freshness
 execution primitives plus the media-startup consent loop, RTP jitter-buffer
-primitives, default socket-backed Room ICE trickle startup, and matching
-`RequestResponse` failure mapping are unit-tested, while real default secure
-media transport completion, default live consent execution after DTLS,
+primitives, default socket-backed Room ICE trickle startup, queued data publish
+flush after data-channel DCEP ack, and matching `RequestResponse` failure
+mapping are unit-tested, while real default secure media transport completion,
+default live consent execution after DTLS, live DTLS-backed SCTP association,
 subscriber jitter-buffer integration, capture/encode loop startup, media
 recovery, and end-to-end reconnect hardening are still open.
 

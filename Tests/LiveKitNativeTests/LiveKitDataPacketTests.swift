@@ -75,6 +75,66 @@ final class LiveKitDataPacketTests: XCTestCase {
         XCTAssertEqual(participant.dataPublishPlans[0].packet.participantIdentity, "local")
     }
 
+    func testLocalDataChannelPublisherFlushesQueuedReliablePacketAfterAck() async throws {
+        let transport = RecordingSCTPDataChannelPacketTransport()
+        let publisher = LocalDataChannelPublisher(transport: transport)
+        let plan = try LocalDataPublishPlan(
+            data: Data("hello".utf8),
+            options: DataPublishOptions(reliable: true, topic: "chat")
+        )
+
+        try await publisher.publish(plan)
+
+        let queuedCount = await publisher.pendingPlanCount
+        XCTAssertEqual(queuedCount, 1)
+        XCTAssertEqual(transport.sentPackets.count, 1)
+        let openPacket = try XCTUnwrap(transport.sentPackets.first)
+        XCTAssertEqual(openPacket.streamID, LocalDataPublishPlan.reliableStreamID)
+        XCTAssertEqual(openPacket.ppid, .dataChannelControl)
+        XCTAssertEqual(
+            try SCTPDataChannelControlMessage(decoding: openPacket.payload),
+            .open(SCTPDataChannelOpenMessage(reliability: .reliable, label: LiveKitSCTPDataChannelLabel.reliable))
+        )
+
+        try await publisher.acceptControlPacket(
+            SCTPDataChannelPacket(
+                streamID: LocalDataPublishPlan.reliableStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
+            )
+        )
+
+        let flushedCount = await publisher.pendingPlanCount
+        XCTAssertEqual(flushedCount, 0)
+        XCTAssertEqual(transport.sentPackets.count, 2)
+        XCTAssertEqual(transport.sentPackets[1], plan.sctpPacket)
+    }
+
+    func testLocalDataChannelPublisherSendsImmediatelyWhenChannelIsOpen() async throws {
+        let transport = RecordingSCTPDataChannelPacketTransport()
+        let publisher = LocalDataChannelPublisher(transport: transport)
+        let firstPlan = try LocalDataPublishPlan(data: Data([0x01]), options: DataPublishOptions(reliable: false))
+        let secondPlan = try LocalDataPublishPlan(data: Data([0x02]), options: DataPublishOptions(reliable: false))
+
+        try await publisher.publish(firstPlan)
+        try await publisher.acceptControlPacket(
+            SCTPDataChannelPacket(
+                streamID: LocalDataPublishPlan.lossyStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
+            )
+        )
+        try await publisher.publish(secondPlan)
+
+        let queuedCount = await publisher.pendingPlanCount
+        XCTAssertEqual(queuedCount, 0)
+        XCTAssertEqual(transport.sentPackets.count, 3)
+        XCTAssertEqual(transport.sentPackets[0].streamID, LocalDataPublishPlan.lossyStreamID)
+        XCTAssertEqual(transport.sentPackets[0].ppid, .dataChannelControl)
+        XCTAssertEqual(transport.sentPackets[1], firstPlan.sctpPacket)
+        XCTAssertEqual(transport.sentPackets[2], secondPlan.sctpPacket)
+    }
+
     func testDataTrackSignalPlansBuildProtocolRequests() {
         let publishPlan = LocalDataTrackPublishPlan(pubHandle: 42, name: "telemetry")
 

@@ -224,6 +224,7 @@ public final class Room: @unchecked Sendable {
     private let publisherPeerConnection: PeerConnectionCoordinator
     private let subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration?
     private let publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration?
+    private let publisherDataChannel: LocalDataChannelPublisher?
     private let snapshots: RoomSnapshotStore
     private let signalLoopLock = NSLock()
     private let connectionContextLock = NSLock()
@@ -543,7 +544,8 @@ public final class Room: @unchecked Sendable {
             configuration: NativeWebRTCConfiguration(role: .publisher)
         ),
         subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration? = nil,
-        publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration? = nil
+        publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration? = nil,
+        publisherDataChannel: LocalDataChannelPublisher? = nil
     ) {
         self.options = options
         self.signalConnection = signalConnection
@@ -551,6 +553,7 @@ public final class Room: @unchecked Sendable {
         self.publisherPeerConnection = publisherPeerConnection
         self.subscriberMediaStartupConfiguration = subscriberMediaStartupConfiguration
         self.publisherMediaStartupConfiguration = publisherMediaStartupConfiguration
+        self.publisherDataChannel = publisherDataChannel
 
         let localParticipant = LocalParticipant(identity: "local")
         self.actor = RoomActor(localParticipant: localParticipant)
@@ -1046,11 +1049,11 @@ public final class Room: @unchecked Sendable {
                     }
                     try await self.sendParticipantMetadataUpdate(update)
                 },
-                publishData: { [weak self] _ in
-                    guard self != nil else {
+                publishData: { [weak self] plan in
+                    guard let self else {
                         throw LiveKitNativeError.notConnected
                     }
-                    throw LiveKitNativeError.notImplemented("DTLS-backed SCTP data transport")
+                    try await self.sendPublisherData(plan)
                 },
                 publishDataTrack: { [weak self] plan in
                     guard let self else {
@@ -1178,6 +1181,14 @@ public final class Room: @unchecked Sendable {
             request: .publishDataTrack(plan.publishRequest)
         )
         return DataTrackInfo(info: response.info)
+    }
+
+    private func sendPublisherData(_ plan: LocalDataPublishPlan) async throws {
+        guard let publisherDataChannel else {
+            throw LiveKitNativeError.notImplemented("DTLS-backed SCTP data transport")
+        }
+
+        try await publisherDataChannel.publish(plan)
     }
 
     private func sendUnpublishDataTrack(_ plan: LocalDataTrackPublishPlan) async throws -> DataTrackInfo {

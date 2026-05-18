@@ -1,6 +1,6 @@
 # LiveKitNative Status
 
-Last updated: 2026-05-17
+Last updated: 2026-05-18
 
 ## Current State
 
@@ -27,6 +27,10 @@ open.
 Data-track publish/unpublish/update-subscription signaling is also wired at
 unit-test level, including server/SFU data-track unpublish cleanup for local
 publication and reconnect state; live SCTP transport remains open.
+Local data publish plans can now queue behind an injected SCTP data-channel
+packet transport, send deterministic LiveKit reliable/lossy DCEP open packets,
+and flush encoded `DataPacket` payloads once the matching data channel is
+acknowledged open; the live DTLS-backed SCTP association remains open.
 Server/SFU `TrackUnpublishedResponse` cleanup for local media publications also
 clears local publication state and cached publisher offer reconnect state so
 resume reconnects and later publisher offers do not replay removed media.
@@ -635,6 +639,8 @@ The old binary WebRTC dependency path has been removed from the package model.
   - LiveKit `DataPacket` user-packet mapping for reliable/lossy delivery
   - topic and destination-identity mapping through `DataPublishOptions`
   - `LocalParticipant.publish(data:options:)` local publish planning
+  - queued local data publish flushing through an injected SCTP packet
+    transport after LiveKit reliable/lossy data channels receive DCEP ack
   - incoming user-packet decode helper for future WebRTC receive plumbing
   - `RoomEvent.dataReceived` mapping from decoded data packets to remote
     participants
@@ -652,7 +658,7 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 386 tests passed
+  - 409 tests passed
   - 1 integration test skipped by opt-in guard
 - macOS `xcodebuild build`
 - iOS Simulator `xcodebuild build`
@@ -800,8 +806,8 @@ The following checks passed after the latest implementation pass:
    default Room path against a local LiveKit server, then capture the result in
    an opt-in integration test and validate the OpenSSL packaging story for iOS
    release builds.
-2. Connect queued local data publish plans to the publisher peer connection
-   once data channels are open.
+2. Wire the queued local data publisher to a real DTLS-backed SCTP association
+   and add inbound data-channel receive plumbing.
 3. Add full LiveKit ICE restart signaling, media/data recovery after signal
    reconnect, TURN UDP/TCP/TLS fallback, and automated local LiveKit
    integration tests beyond current local ICE credential restart plus signal
