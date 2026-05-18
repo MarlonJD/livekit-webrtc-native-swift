@@ -225,8 +225,8 @@ VideoToolbox H.264 subscriber decode-to-pixel-buffer smoke coverage, H.264
 publish RTP packetization, LiveKit `AddTrackRequest` construction,
 `TrackPublishedResponse` correlation, local video publication state, default
 camera publish pipeline startup, opt-in subscriber video decode wiring,
-application-provided subscriber video renderer handoff, and mock transport
-tests.
+application-provided subscriber video renderer handoff, UIKit/AppKit
+sample-buffer `VideoView` rendering, and mock transport tests.
 
 The audio groundwork now includes native microphone track scaffolding,
 AVAudioEngine capture and playout adapters, AudioToolbox Opus encode/decode
@@ -265,7 +265,7 @@ latest-value Room state and emitted as typed room events.
 The active implementation focus is now `1.0.0` hardening: validating the
 OpenSSL-backed DTLS-SRTP `use_srtp` handshake/exporter against LiveKit,
 completing LiveKit-validated default secure media transport, TURN TCP/TLS,
-live quality-control wiring, platform video display hardening,
+live quality-control wiring, real-device video display hardening,
 standards-compliant DTLS-SCTP association behavior, meeting-grade audio session
 hardening, integration apps, and size gates.
 
@@ -373,9 +373,10 @@ publish backpressure/drop control, subscriber adaptive track-settings planning
 and opt-in automatic signaling, subscriber Receiver Report
 generation/cadence/sending, REMB packet/planner/sending, opt-in subscriber
 Opus playout scheduling, opt-in subscriber H.264 VideoToolbox decode-to-pixel-buffer
-scheduling, public `SubscriberVideoFrameRenderer` handoff, and matching
+scheduling, public `SubscriberVideoFrameRenderer` handoff, UIKit/AppKit
+`VideoView` sample-buffer display, and matching
 `RequestResponse` failure
-mapping are unit-tested, while LiveKit E2E media validation, platform video
+mapping are unit-tested, while LiveKit E2E media validation, real-device video
 display validation, standards-compliant live SCTP association behavior, TURN
 TCP/TLS execution, media recovery, meeting-grade audio session behavior, and
 end-to-end LiveKit hardening are still open.
@@ -427,7 +428,7 @@ unit/integration opt-in tests, benchmark smoke, and the compressed release
 binary size proxy. The strict gate additionally requires
 `LiveKitNative.productionReadiness.status == .productionReady` and no blockers.
 That strict gate intentionally fails today because LiveKit E2E secure RTP/RTCP
-verification, full ICE/TURN hardening, platform video display validation,
+verification, full ICE/TURN hardening, real-device video display validation,
 standards-compliant live SCTP, Apple-platform OpenSSL packaging validation,
 meeting-grade audio session behavior, full live congestion/adaptive-quality
 policy, and end-to-end LiveKit tests are still open.
@@ -499,8 +500,9 @@ try await room.connect(
 - Production readiness is explicit through `LiveKitNative.productionReadiness`
   and `LiveKitNative.assertProductionReady()`.
 - Logging can be configured through `LiveKitNativeLogging.configure`.
-- UIKit and AppKit `VideoView` classes are included. SwiftUI components are out
-  of scope for v1 in this package.
+- UIKit and AppKit `VideoView` classes can render `SubscriberVideoFrame`
+  `CVPixelBuffer` output through `AVSampleBufferDisplayLayer`. SwiftUI
+  components are out of scope for v1 in this package.
 - The repository intentionally contains no Rust toolchain, no `.rs` sources, no
   UniFFI bridge dependency, no `LiveKitWebRTC.xcframework`, no BoringSSL, no
   libopus, and no libvpx. DTLS-SRTP uses a small package-internal OpenSSL 3
