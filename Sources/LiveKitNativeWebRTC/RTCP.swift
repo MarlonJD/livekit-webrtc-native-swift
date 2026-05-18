@@ -94,11 +94,44 @@ package struct RTCPTransportLayerNACK: Equatable, Sendable {
     }
 }
 
+package struct RTCPReceiverEstimatedMaximumBitrate: Equatable, Sendable {
+    package var senderSSRC: UInt32
+    package var mediaSSRC: UInt32
+    package var bitrateBps: UInt64
+    package var ssrcs: [UInt32]
+
+    package init(
+        senderSSRC: UInt32,
+        mediaSSRC: UInt32 = 0,
+        bitrateBps: UInt64,
+        ssrcs: [UInt32]
+    ) {
+        self.senderSSRC = senderSSRC
+        self.mediaSSRC = mediaSSRC
+        self.bitrateBps = bitrateBps
+        self.ssrcs = Array(Set(ssrcs)).sorted()
+    }
+}
+
+package struct RTCPApplicationLayerFeedback: Equatable, Sendable {
+    package var senderSSRC: UInt32
+    package var mediaSSRC: UInt32
+    package var fci: Data
+
+    package init(senderSSRC: UInt32, mediaSSRC: UInt32, fci: Data) {
+        self.senderSSRC = senderSSRC
+        self.mediaSSRC = mediaSSRC
+        self.fci = fci
+    }
+}
+
 package enum RTCPPacket: Equatable, Sendable {
     case senderReport(RTCPSenderReport)
     case receiverReport(RTCPReceiverReport)
     case pictureLossIndication(RTCPPictureLossIndication)
     case transportLayerNACK(RTCPTransportLayerNACK)
+    case receiverEstimatedMaximumBitrate(RTCPReceiverEstimatedMaximumBitrate)
+    case applicationLayerFeedback(RTCPApplicationLayerFeedback)
 
     package var senderSSRC: UInt32 {
         switch self {
@@ -109,6 +142,10 @@ package enum RTCPPacket: Equatable, Sendable {
         case let .pictureLossIndication(feedback):
             return feedback.senderSSRC
         case let .transportLayerNACK(feedback):
+            return feedback.senderSSRC
+        case let .receiverEstimatedMaximumBitrate(feedback):
+            return feedback.senderSSRC
+        case let .applicationLayerFeedback(feedback):
             return feedback.senderSSRC
         }
     }
@@ -128,10 +165,18 @@ package enum RTCPPacket: Equatable, Sendable {
             }
             self = .transportLayerNACK(try RTCPTransportLayerNACK(decodingPayload: payload))
         case RTCPPacketType.payloadSpecificFeedback:
-            guard header.count == RTCPFeedbackFormat.pictureLossIndication else {
+            switch header.count {
+            case RTCPFeedbackFormat.pictureLossIndication:
+                self = .pictureLossIndication(try RTCPPictureLossIndication(decodingPayload: payload))
+            case RTCPFeedbackFormat.applicationLayerFeedback:
+                if let remb = try? RTCPReceiverEstimatedMaximumBitrate(decodingPayload: payload) {
+                    self = .receiverEstimatedMaximumBitrate(remb)
+                } else {
+                    self = .applicationLayerFeedback(try RTCPApplicationLayerFeedback(decodingPayload: payload))
+                }
+            default:
                 throw RTCPError.unsupportedFeedbackFormat(header.packetType, header.count)
             }
-            self = .pictureLossIndication(try RTCPPictureLossIndication(decodingPayload: payload))
         default:
             throw RTCPError.unsupportedPacketType(header.packetType)
         }
@@ -155,6 +200,14 @@ package enum RTCPPacket: Equatable, Sendable {
             let payload = nack.encodedPayload()
             return try RTCPHeader(count: RTCPFeedbackFormat.genericNACK, packetType: RTCPPacketType.transportLayerFeedback, payloadByteCount: payload.count)
                 .encoded() + payload
+        case let .receiverEstimatedMaximumBitrate(remb):
+            let payload = try remb.encodedPayload()
+            return try RTCPHeader(count: RTCPFeedbackFormat.applicationLayerFeedback, packetType: RTCPPacketType.payloadSpecificFeedback, payloadByteCount: payload.count)
+                .encoded() + payload
+        case let .applicationLayerFeedback(feedback):
+            let payload = try feedback.encodedPayload()
+            return try RTCPHeader(count: RTCPFeedbackFormat.applicationLayerFeedback, packetType: RTCPPacketType.payloadSpecificFeedback, payloadByteCount: payload.count)
+                .encoded() + payload
         }
     }
 }
@@ -169,6 +222,7 @@ private enum RTCPPacketType {
 private enum RTCPFeedbackFormat {
     static let genericNACK: UInt8 = 1
     static let pictureLossIndication: UInt8 = 1
+    static let applicationLayerFeedback: UInt8 = 15
 }
 
 private struct RTCPHeader: Equatable {
@@ -374,6 +428,93 @@ private extension RTCPTransportLayerNACK {
             pending = remaining
         }
 
+        return data
+    }
+}
+
+private extension RTCPReceiverEstimatedMaximumBitrate {
+    static let uniqueIdentifier = Data([0x52, 0x45, 0x4D, 0x42])
+
+    init(decodingPayload payload: Data.SubSequence) throws {
+        guard payload.count >= 16, payload.count % 4 == 0 else {
+            throw RTCPError.invalidLength
+        }
+        let data = Data(payload)
+        senderSSRC = try data.networkUInt32(at: 0)
+        mediaSSRC = try data.networkUInt32(at: 4)
+        guard Data(data[8..<12]) == Self.uniqueIdentifier else {
+            throw RTCPError.invalidLength
+        }
+
+        let ssrcCount = Int(data[data.index(data.startIndex, offsetBy: 12)])
+        guard data.count == 16 + ssrcCount * 4 else {
+            throw RTCPError.invalidLength
+        }
+
+        let exponentAndMantissaHigh = data[data.index(data.startIndex, offsetBy: 13)]
+        let exponent = UInt64(exponentAndMantissaHigh >> 2)
+        let mantissa = UInt64(exponentAndMantissaHigh & 0x03) << 16 |
+            UInt64(data[data.index(data.startIndex, offsetBy: 14)]) << 8 |
+            UInt64(data[data.index(data.startIndex, offsetBy: 15)])
+        bitrateBps = mantissa << exponent
+
+        ssrcs = try (0..<ssrcCount).map {
+            try data.networkUInt32(at: 16 + $0 * 4)
+        }
+    }
+
+    func encodedPayload() throws -> Data {
+        guard ssrcs.count <= 255 else {
+            throw RTCPError.reportCountExceedsLimit(ssrcs.count)
+        }
+
+        var data = Data()
+        data.appendNetworkUInt32(senderSSRC)
+        data.appendNetworkUInt32(mediaSSRC)
+        data.append(Self.uniqueIdentifier)
+        data.append(UInt8(ssrcs.count))
+
+        let encodedBitrate = Self.encodeBitrate(bitrateBps)
+        data.append(UInt8((encodedBitrate.exponent << 2) | ((encodedBitrate.mantissa >> 16) & 0x03)))
+        data.append(UInt8((encodedBitrate.mantissa >> 8) & 0xFF))
+        data.append(UInt8(encodedBitrate.mantissa & 0xFF))
+
+        for ssrc in ssrcs {
+            data.appendNetworkUInt32(ssrc)
+        }
+        return data
+    }
+
+    private static func encodeBitrate(_ bitrateBps: UInt64) -> (exponent: UInt64, mantissa: UInt64) {
+        var exponent: UInt64 = 0
+        while exponent < 63, (bitrateBps >> exponent) > 0x3_FFFF {
+            exponent += 1
+        }
+        return (exponent, bitrateBps >> exponent)
+    }
+}
+
+private extension RTCPApplicationLayerFeedback {
+    init(decodingPayload payload: Data.SubSequence) throws {
+        guard payload.count >= 8, payload.count % 4 == 0 else {
+            throw RTCPError.invalidLength
+        }
+
+        let data = Data(payload)
+        senderSSRC = try data.networkUInt32(at: 0)
+        mediaSSRC = try data.networkUInt32(at: 4)
+        fci = Data(data.dropFirst(8))
+    }
+
+    func encodedPayload() throws -> Data {
+        guard fci.count % 4 == 0 else {
+            throw RTCPError.invalidLength
+        }
+
+        var data = Data()
+        data.appendNetworkUInt32(senderSSRC)
+        data.appendNetworkUInt32(mediaSSRC)
+        data.append(fci)
         return data
     }
 }

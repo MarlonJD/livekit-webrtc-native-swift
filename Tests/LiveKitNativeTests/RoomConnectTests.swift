@@ -1695,6 +1695,76 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(receivedPackets, [packet])
     }
 
+    func testPublisherRTCPReceiverReportsUpdateBandwidthEstimateWithoutExternalHandler() async throws {
+        let frames = try [
+            makeJoinResponse(),
+            makePublisherAnswerResponse(),
+            makePublisherTrickleResponse(),
+            makePublisherTrickleCompleteResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let localCandidate = ICECandidate(
+            foundation: "local",
+            componentID: .rtp,
+            transport: .udp,
+            priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+            address: "192.0.2.10",
+            port: 55000,
+            type: .host
+        )
+        let datagramTransport = RoomMediaStartupDatagramTransport()
+        let binder = DTLSSRTPMediaSessionBinder(
+            datagramTransportFactory: RoomMediaStartupDatagramTransportFactory(transport: datagramTransport),
+            handshaker: RoomMediaStartupDTLSHandshaker(
+                result: try DTLSSRTPHandshakeResult(
+                    role: .server,
+                    exportedKeyingMaterial: roomMediaStartupExportedKeyingMaterial(),
+                    remoteFingerprint: DTLSSignature(hashFunction: "sha-256", value: "AA:BB:CC")
+                )
+            )
+        )
+        let room = Room(
+            signalConnection: SignalConnection(transport: transport),
+            publisherPeerConnection: PeerConnectionCoordinator(configuration: NativeWebRTCConfiguration(role: .publisher)),
+            publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 42,
+                checker: RoomMediaStartupICEChecker(),
+                binder: binder
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let startupResult = await waitForPublisherMediaStartupResult(room)
+        _ = try XCTUnwrap(startupResult)
+        XCTAssertTrue(room.isPublisherRTCPReceiveLoopActive)
+
+        let report = RTCPPacket.receiverReport(RTCPReceiverReport(
+            senderSSRC: 0x0102_0304,
+            reports: [
+                RTCPReceptionReport(
+                    ssrc: 0x1122_3344,
+                    fractionLost: 64,
+                    cumulativePacketsLost: 0,
+                    highestSequenceNumber: 100,
+                    jitter: 0,
+                    lastSenderReport: 0,
+                    delaySinceLastSenderReport: 0
+                ),
+            ]
+        ))
+        let protectedDatagram = try await protectedPublisherInboundRTCPDatagram(report)
+
+        datagramTransport.enqueueIncomingDatagram(protectedDatagram)
+
+        let maybeSnapshot = await waitForPublisherBandwidthEstimate(room, ssrc: 0x1122_3344)
+        let snapshot = try XCTUnwrap(maybeSnapshot)
+        XCTAssertEqual(snapshot.estimate.lossFraction, 0.25, accuracy: 0.001)
+        XCTAssertEqual(snapshot.estimate.estimatedBitrateBps, 975_000)
+        XCTAssertEqual(snapshot.estimate.recommendation.level, .medium)
+    }
+
     func testSubscriberRTCPSendsThroughStartedSecureMediaTransport() async throws {
         let frames = try [
             makeJoinResponse(),
@@ -1817,6 +1887,140 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(plannedPackets, expectedPackets)
         let decodedPackets = try await decodedSubscriberOutboundRTCPPackets(from: datagramTransport.sentDatagrams)
         XCTAssertEqual(decodedPackets, expectedPackets)
+    }
+
+    func testSubscriberReceiverReportSendsObservedRTPStatsThroughStartedSecureMediaTransport() async throws {
+        let (room, datagramTransport) = try await makeStartedSubscriberRTCPFeedbackRoom()
+        let mediaSSRC: UInt32 = 0x0506_0708
+
+        datagramTransport.enqueueIncomingDatagram(
+            try await protectedSubscriberInboundRTPDatagram(
+                RTPPacket(
+                    marker: false,
+                    payloadType: 111,
+                    sequenceNumber: 1,
+                    timestamp: 960,
+                    ssrc: mediaSSRC,
+                    payload: Data([0x08])
+                )
+            )
+        )
+        datagramTransport.enqueueIncomingDatagram(
+            try await protectedSubscriberInboundRTPDatagram(
+                RTPPacket(
+                    marker: false,
+                    payloadType: 111,
+                    sequenceNumber: 2,
+                    timestamp: 1_920,
+                    ssrc: mediaSSRC,
+                    payload: Data([0x08])
+                )
+            )
+        )
+
+        let snapshots = await waitForSubscriberReceiverReportSnapshots(
+            room,
+            mediaSSRC: mediaSSRC,
+            receivedPackets: 2
+        )
+        XCTAssertEqual(snapshots.first?.report.highestSequenceNumber, 2)
+
+        let plannedPacket = try await room.sendSubscriberRTCPReceiverReport(senderSSRC: 0x0102_0304)
+        let decodedPackets = try await decodedSubscriberOutboundRTCPPackets(from: datagramTransport.sentDatagrams)
+        XCTAssertEqual(decodedPackets, plannedPacket.map { [$0] } ?? [])
+
+        guard case let .receiverReport(report) = plannedPacket else {
+            return XCTFail("Expected receiver report.")
+        }
+        let receptionReport = try XCTUnwrap(report.reports.first)
+        XCTAssertEqual(report.senderSSRC, 0x0102_0304)
+        XCTAssertEqual(receptionReport.ssrc, mediaSSRC)
+        XCTAssertEqual(receptionReport.highestSequenceNumber, 2)
+        XCTAssertEqual(receptionReport.cumulativePacketsLost, 0)
+        XCTAssertEqual(receptionReport.fractionLost, 0)
+    }
+
+    func testSubscriberReceiverEstimatedMaximumBitrateSendsFromReceiverReportEstimate() async throws {
+        let (room, datagramTransport) = try await makeStartedSubscriberRTCPFeedbackRoom()
+        let mediaSSRC: UInt32 = 0x0506_0708
+
+        datagramTransport.enqueueIncomingDatagram(
+            try await protectedSubscriberInboundRTPDatagram(
+                RTPPacket(
+                    marker: false,
+                    payloadType: 111,
+                    sequenceNumber: 1,
+                    timestamp: 960,
+                    ssrc: mediaSSRC,
+                    payload: Data([0x08])
+                )
+            )
+        )
+        datagramTransport.enqueueIncomingDatagram(
+            try await protectedSubscriberInboundRTPDatagram(
+                RTPPacket(
+                    marker: false,
+                    payloadType: 111,
+                    sequenceNumber: 2,
+                    timestamp: 1_920,
+                    ssrc: mediaSSRC,
+                    payload: Data([0x08])
+                )
+            )
+        )
+
+        _ = await waitForSubscriberReceiverReportSnapshots(
+            room,
+            mediaSSRC: mediaSSRC,
+            receivedPackets: 2
+        )
+
+        let receiverReportPacket = try await room.sendSubscriberRTCPReceiverReport(senderSSRC: 0x0102_0304)
+        let estimate = try XCTUnwrap(room.subscriberBandwidthEstimateSnapshots.first(where: { $0.ssrc == mediaSSRC }))
+        XCTAssertEqual(estimate.estimate.estimatedBitrateBps, 1_620_000)
+
+        let rembPacket = try await room.sendSubscriberRTCPReceiverEstimatedMaximumBitrate(senderSSRC: 0x0102_0304)
+        let decodedPackets = try await decodedSubscriberOutboundRTCPPackets(from: datagramTransport.sentDatagrams)
+        XCTAssertEqual(decodedPackets, [try XCTUnwrap(receiverReportPacket), try XCTUnwrap(rembPacket)])
+
+        guard case let .receiverEstimatedMaximumBitrate(remb) = rembPacket else {
+            return XCTFail("Expected REMB packet.")
+        }
+        XCTAssertEqual(remb.senderSSRC, 0x0102_0304)
+        XCTAssertEqual(remb.bitrateBps, 1_620_000)
+        XCTAssertEqual(remb.ssrcs, [mediaSSRC])
+    }
+
+    func testSubscriberReceiverReportLoopSendsCadencedReportsAfterObservedRTP() async throws {
+        let (room, datagramTransport) = try await makeStartedSubscriberRTCPFeedbackRoom(
+            receiverReportPolicy: RTCPReceiverReportSchedulePolicy(intervalSeconds: 0.01)
+        )
+        let mediaSSRC: UInt32 = 0x0506_0708
+        XCTAssertTrue(room.isSubscriberRTCPReceiverReportLoopActive)
+
+        datagramTransport.enqueueIncomingDatagram(
+            try await protectedSubscriberInboundRTPDatagram(
+                RTPPacket(
+                    marker: false,
+                    payloadType: 111,
+                    sequenceNumber: 10,
+                    timestamp: 960,
+                    ssrc: mediaSSRC,
+                    payload: Data([0x08])
+                )
+            )
+        )
+
+        let sentDatagrams = await waitForSentDatagramCount(1, transport: datagramTransport)
+        let decodedPackets = try await decodedSubscriberOutboundRTCPPackets(from: [try XCTUnwrap(sentDatagrams.first)])
+
+        guard case let .receiverReport(report) = try XCTUnwrap(decodedPackets.first) else {
+            return XCTFail("Expected receiver report.")
+        }
+        let receptionReport = try XCTUnwrap(report.reports.first)
+        XCTAssertEqual(receptionReport.ssrc, mediaSSRC)
+        XCTAssertEqual(receptionReport.highestSequenceNumber, 10)
+        XCTAssertEqual(receptionReport.cumulativePacketsLost, 0)
     }
 
     func testSubscriberRTCPReceiveHandlerReceivesDecodedPacket() async throws {
@@ -4138,6 +4342,63 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(settings.priority, 2)
     }
 
+    func testAdaptiveTrackSettingsSendsRecommendedUpdateTrackSettings() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let transport = MockSignalTransport(incomingFrames: frames)
+        let room = Room(signalConnection: SignalConnection(transport: transport))
+        let estimate = BandwidthEstimate(
+            estimatedBitrateBps: 500_000,
+            lossFraction: 0.10,
+            recommendation: AdaptiveVideoQualityRecommendation(
+                level: .low,
+                targetBitrateBps: 500_000,
+                maxWidth: 640,
+                maxHeight: 360,
+                maxFramesPerSecond: 15
+            )
+        )
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        let plan = try await room.updateAdaptiveTrackSettings(
+            trackSIDs: ["TR_camera"],
+            estimate: estimate,
+            priority: 1
+        )
+
+        XCTAssertEqual(
+            plan,
+            AdaptiveTrackSettingsPlan(
+                trackSIDs: ["TR_camera"],
+                disabled: false,
+                quality: .low,
+                width: 640,
+                height: 360,
+                fps: 15,
+                priority: 1
+            )
+        )
+
+        let sentFrames = await waitForSentFrameCount(1, transport: transport)
+        guard case let .binary(data) = try XCTUnwrap(sentFrames.first) else {
+            return XCTFail("Expected binary UpdateTrackSettings request.")
+        }
+
+        let request = try SignalFrameCodec().decode(Livekit_SignalRequest.self, from: data)
+        guard case let .trackSetting(settings)? = request.message else {
+            return XCTFail("Expected SignalRequest.trackSetting.")
+        }
+        XCTAssertEqual(settings.trackSids, ["TR_camera"])
+        XCTAssertFalse(settings.disabled)
+        XCTAssertEqual(settings.quality, .low)
+        XCTAssertEqual(settings.width, 640)
+        XCTAssertEqual(settings.height, 360)
+        XCTAssertEqual(settings.fps, 15)
+        XCTAssertEqual(settings.priority, 1)
+    }
+
     func testSetTrackSubscriptionPermissionsSendsSignalRequest() async throws {
         let frames = try [
             makeJoinResponse(),
@@ -5053,6 +5314,54 @@ private func waitForSubscriberMediaStartupResult(_ room: Room) async -> PeerConn
     return room.lastSubscriberMediaStartupResult
 }
 
+private func waitForPublisherBandwidthEstimate(
+    _ room: Room,
+    ssrc: UInt32
+) async -> MediaQualityEstimateSnapshot? {
+    for _ in 0..<100 {
+        if let snapshot = room.publisherBandwidthEstimateSnapshots.first(where: { $0.ssrc == ssrc }) {
+            return snapshot
+        }
+
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+
+    return room.publisherBandwidthEstimateSnapshots.first(where: { $0.ssrc == ssrc })
+}
+
+private func waitForSentDatagramCount(
+    _ expectedCount: Int,
+    transport: RoomMediaStartupDatagramTransport
+) async -> [Data] {
+    for _ in 0..<100 {
+        let sentDatagrams = transport.sentDatagrams
+        if sentDatagrams.count >= expectedCount {
+            return sentDatagrams
+        }
+
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+
+    return transport.sentDatagrams
+}
+
+private func waitForSubscriberReceiverReportSnapshots(
+    _ room: Room,
+    mediaSSRC: UInt32,
+    receivedPackets: UInt32
+) async -> [RTCPReceiverReportSnapshot] {
+    for _ in 0..<100 {
+        let snapshots = room.subscriberReceiverReportSnapshots
+        if snapshots.contains(where: { $0.mediaSSRC == mediaSSRC && $0.receivedPackets >= receivedPackets }) {
+            return snapshots
+        }
+
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+
+    return room.subscriberReceiverReportSnapshots
+}
+
 private func waitForSubscriberMediaStartupError(_ room: Room) async -> (any Error)? {
     for _ in 0..<100 {
         if let error = room.lastSubscriberMediaStartupError {
@@ -5077,7 +5386,9 @@ private func waitForPublisherMediaStartupError(_ room: Room) async -> (any Error
     return room.lastPublisherMediaStartupError
 }
 
-private func makeStartedSubscriberRTCPFeedbackRoom() async throws -> (Room, RoomMediaStartupDatagramTransport) {
+private func makeStartedSubscriberRTCPFeedbackRoom(
+    receiverReportPolicy: RTCPReceiverReportSchedulePolicy = .standard
+) async throws -> (Room, RoomMediaStartupDatagramTransport) {
     let frames = try [
         makeJoinResponse(),
         makeSubscriberOfferResponse(),
@@ -5109,13 +5420,14 @@ private func makeStartedSubscriberRTCPFeedbackRoom() async throws -> (Room, Room
     let room = Room(
         signalConnection: SignalConnection(transport: signalTransport),
         subscriberPeerConnection: PeerConnectionCoordinator(configuration: NativeWebRTCConfiguration(role: .subscriber)),
-        subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration(
-            localCandidates: { [localCandidate] },
-            tieBreaker: 43,
-            checker: RoomMediaStartupICEChecker(),
-            binder: binder
+            subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration(
+                localCandidates: { [localCandidate] },
+                tieBreaker: 43,
+                checker: RoomMediaStartupICEChecker(),
+                binder: binder
+            ),
+            subscriberRTCPReceiverReportPolicy: receiverReportPolicy
         )
-    )
 
     try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
     let startupResult = await waitForSubscriberMediaStartupResult(room)
@@ -5175,6 +5487,20 @@ private func protectedSubscriberInboundRTCPDatagram(_ packet: RTCPPacket) async 
     )
 
     try await peerTransport.sendRTCP(packet)
+    return try XCTUnwrap(datagramTransport.sentDatagrams.first)
+}
+
+private func protectedSubscriberInboundRTPDatagram(_ packet: RTPPacket) async throws -> Data {
+    let datagramTransport = RoomMediaStartupDatagramTransport()
+    let peerTransport = try DTLSSRTPMediaTransport(
+        packetProtectionContext: DTLSSRTPPacketProtectionContext(
+            keyMaterial: DTLSSRTPKeyMaterial(exportedKeyingMaterial: roomMediaStartupExportedKeyingMaterial()),
+            role: .server
+        ),
+        datagramTransport: datagramTransport
+    )
+
+    try await peerTransport.sendRTP(packet)
     return try XCTUnwrap(datagramTransport.sentDatagrams.first)
 }
 

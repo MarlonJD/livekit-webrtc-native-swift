@@ -192,9 +192,14 @@ package final class H264VideoToolboxEncoder: @unchecked Sendable {
     private var outputHandler: (@Sendable (H264EncodedFrame) -> Void)?
     private var mutableUsesHardwareAcceleration: Bool?
     private var mutableLastEncodingError: (any Error)?
+    private var mutableTargetBitrate: Int
+    private var mutableTargetFramesPerSecond: Int32
+    private var mutableAppliedQualityRecommendation: AdaptiveVideoQualityRecommendation?
 
     package init(settings: H264EncoderSettings) {
         self.settings = settings
+        self.mutableTargetBitrate = settings.bitrate
+        self.mutableTargetFramesPerSecond = settings.framesPerSecond
     }
 
     package var isConfigured: Bool {
@@ -210,6 +215,24 @@ package final class H264VideoToolboxEncoder: @unchecked Sendable {
     package var lastEncodingError: (any Error)? {
         lock.withLock {
             mutableLastEncodingError
+        }
+    }
+
+    package var targetBitrate: Int {
+        lock.withLock {
+            mutableTargetBitrate
+        }
+    }
+
+    package var targetFramesPerSecond: Int32 {
+        lock.withLock {
+            mutableTargetFramesPerSecond
+        }
+    }
+
+    package var appliedQualityRecommendation: AdaptiveVideoQualityRecommendation? {
+        lock.withLock {
+            mutableAppliedQualityRecommendation
         }
     }
 
@@ -240,10 +263,14 @@ package final class H264VideoToolboxEncoder: @unchecked Sendable {
             throw H264VideoToolboxEncoderError.configurationFailed(status)
         }
 
+        let target = lock.withLock {
+            (bitrate: mutableTargetBitrate, framesPerSecond: mutableTargetFramesPerSecond)
+        }
+
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: settings.profileLevel.videoToolboxValue)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: settings.bitrate as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: target.bitrate as CFNumber)
         VTSessionSetProperty(
             session,
             key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
@@ -252,11 +279,37 @@ package final class H264VideoToolboxEncoder: @unchecked Sendable {
         VTSessionSetProperty(
             session,
             key: kVTCompressionPropertyKey_ExpectedFrameRate,
-            value: settings.framesPerSecond as CFNumber
+            value: target.framesPerSecond as CFNumber
         )
         VTCompressionSessionPrepareToEncodeFrames(session)
         compressionSession = session
         updateHardwareAccelerationState(session)
+    }
+
+    package func applyQualityRecommendation(_ recommendation: AdaptiveVideoQualityRecommendation) {
+        let targetBitrate = max(1, recommendation.targetBitrateBps)
+        let targetFramesPerSecond = Int32(max(1, recommendation.maxFramesPerSecond))
+        let session = lock.withLock {
+            mutableTargetBitrate = targetBitrate
+            mutableTargetFramesPerSecond = targetFramesPerSecond
+            mutableAppliedQualityRecommendation = recommendation
+            return compressionSession
+        }
+
+        guard let session else {
+            return
+        }
+
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_AverageBitRate,
+            value: targetBitrate as CFNumber
+        )
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_ExpectedFrameRate,
+            value: targetFramesPerSecond as CFNumber
+        )
     }
 
     package func encode(_ sampleBuffer: CMSampleBuffer) throws {
@@ -435,6 +488,14 @@ package final class H264CameraPublishPipeline: NativeCameraVideoFrameSink, @unch
 
     package var backpressureSnapshot: MediaFrameBackpressureSnapshot {
         backpressureController.snapshot
+    }
+
+    package var appliedQualityRecommendation: AdaptiveVideoQualityRecommendation? {
+        encoder.appliedQualityRecommendation
+    }
+
+    package func applyQualityRecommendation(_ recommendation: AdaptiveVideoQualityRecommendation) {
+        encoder.applyQualityRecommendation(recommendation)
     }
 
     package func start() throws {

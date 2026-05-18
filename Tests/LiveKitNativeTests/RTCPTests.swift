@@ -63,6 +63,22 @@ final class RTCPTests: XCTestCase {
         XCTAssertEqual(try RTCPPacket(decoding: encoded), packet)
     }
 
+    func testReceiverEstimatedMaximumBitrateRoundTrips() throws {
+        let packet = RTCPPacket.receiverEstimatedMaximumBitrate(
+            RTCPReceiverEstimatedMaximumBitrate(
+                senderSSRC: 0x0102_0304,
+                mediaSSRC: 0,
+                bitrateBps: 1_000_000,
+                ssrcs: [0x0506_0708, 0x1112_1314]
+            )
+        )
+        let encoded = try packet.encoded()
+
+        XCTAssertEqual(encoded[0], 0x8F)
+        XCTAssertEqual(encoded[1], 206)
+        XCTAssertEqual(try RTCPPacket(decoding: encoded), packet)
+    }
+
     func testRejectsUnsupportedRTCPVersion() throws {
         var encoded = try RTCPPacket.pictureLossIndication(
             RTCPPictureLossIndication(senderSSRC: 1, mediaSSRC: 2)

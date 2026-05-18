@@ -138,6 +138,48 @@ package struct BandwidthEstimate: Equatable, Sendable {
     }
 }
 
+package struct MediaQualityEstimateSnapshot: Equatable, Sendable {
+    package var ssrc: UInt32
+    package var estimate: BandwidthEstimate
+
+    package init(ssrc: UInt32, estimate: BandwidthEstimate) {
+        self.ssrc = ssrc
+        self.estimate = estimate
+    }
+}
+
+package struct RTCPReceiverEstimatedMaximumBitratePlanner: Equatable, Sendable {
+    package var minimumAdvertisedBitrateBps: Int
+
+    package init(minimumAdvertisedBitrateBps: Int = 1) {
+        self.minimumAdvertisedBitrateBps = max(1, minimumAdvertisedBitrateBps)
+    }
+
+    package func packet(
+        senderSSRC: UInt32,
+        mediaSSRC: UInt32 = 0,
+        snapshots: [MediaQualityEstimateSnapshot]
+    ) -> RTCPPacket? {
+        let orderedSnapshots = snapshots.sorted { $0.ssrc < $1.ssrc }
+        guard !orderedSnapshots.isEmpty else {
+            return nil
+        }
+
+        let bitrateBps = orderedSnapshots
+            .map { max(minimumAdvertisedBitrateBps, $0.estimate.estimatedBitrateBps) }
+            .min() ?? minimumAdvertisedBitrateBps
+
+        return .receiverEstimatedMaximumBitrate(
+            RTCPReceiverEstimatedMaximumBitrate(
+                senderSSRC: senderSSRC,
+                mediaSSRC: mediaSSRC,
+                bitrateBps: UInt64(bitrateBps),
+                ssrcs: orderedSnapshots.map(\.ssrc)
+            )
+        )
+    }
+}
+
 package struct RTCPBandwidthEstimator: Sendable {
     package var policy: BandwidthEstimationPolicy
     private var estimatedBitrateBps: Int
@@ -192,6 +234,62 @@ package struct RTCPBandwidthEstimator: Sendable {
         let expectedDelta = max(1, Int(current.highestSequenceNumber - previous.highestSequenceNumber))
         let lostDelta = max(0, Int(current.cumulativePacketsLost - previous.cumulativePacketsLost))
         return min(1, Double(lostDelta) / Double(expectedDelta))
+    }
+}
+
+package final class RTCPBandwidthEstimateStore: @unchecked Sendable {
+    private let policy: BandwidthEstimationPolicy
+    private let lock = NSLock()
+    private var estimatorsBySSRC: [UInt32: RTCPBandwidthEstimator] = [:]
+    private var estimatesBySSRC: [UInt32: BandwidthEstimate] = [:]
+
+    package init(policy: BandwidthEstimationPolicy = BandwidthEstimationPolicy()) {
+        self.policy = policy
+    }
+
+    package var snapshots: [MediaQualityEstimateSnapshot] {
+        lock.withLock {
+            estimatesBySSRC
+                .map { MediaQualityEstimateSnapshot(ssrc: $0.key, estimate: $0.value) }
+                .sorted { $0.ssrc < $1.ssrc }
+        }
+    }
+
+    @discardableResult
+    package func update(with packet: RTCPPacket) -> [MediaQualityEstimateSnapshot] {
+        let reports: [RTCPReceptionReport]
+        switch packet {
+        case let .receiverReport(report):
+            reports = report.reports
+        case let .senderReport(report):
+            reports = report.reports
+        case .pictureLossIndication,
+             .transportLayerNACK,
+             .receiverEstimatedMaximumBitrate,
+             .applicationLayerFeedback:
+            reports = []
+        }
+
+        guard !reports.isEmpty else {
+            return []
+        }
+
+        return lock.withLock {
+            reports.map { report in
+                var estimator = estimatorsBySSRC[report.ssrc] ?? RTCPBandwidthEstimator(policy: policy)
+                let estimate = estimator.update(with: report)
+                estimatorsBySSRC[report.ssrc] = estimator
+                estimatesBySSRC[report.ssrc] = estimate
+                return MediaQualityEstimateSnapshot(ssrc: report.ssrc, estimate: estimate)
+            }
+        }
+    }
+
+    package func reset() {
+        lock.withLock {
+            estimatorsBySSRC.removeAll()
+            estimatesBySSRC.removeAll()
+        }
     }
 }
 

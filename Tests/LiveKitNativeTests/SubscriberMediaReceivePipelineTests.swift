@@ -78,4 +78,56 @@ final class SubscriberMediaReceivePipelineTests: XCTestCase {
         XCTAssertEqual(result.opusPackets.map(\.payload), [Data([0x08, 0xAA])])
         XCTAssertEqual(result.feedbackPackets, [])
     }
+
+    func testReceiverReportTracksObservedRTPAndSenderReports() throws {
+        let pipeline = SubscriberMediaReceivePipeline()
+        let mediaSSRC: UInt32 = 0x1111_2222
+
+        _ = pipeline.append(
+            RTPPacket(
+                marker: false,
+                payloadType: 111,
+                sequenceNumber: 10,
+                timestamp: 960,
+                ssrc: mediaSSRC,
+                payload: Data([0x08])
+            )
+        )
+        pipeline.observeRTCP(
+            .senderReport(
+                RTCPSenderReport(
+                    senderSSRC: mediaSSRC,
+                    ntpTimestamp: 0x0102_0304_0506_0708,
+                    rtpTimestamp: 960,
+                    packetCount: 1,
+                    octetCount: 1
+                )
+            ),
+            receivedAt: 100
+        )
+        _ = pipeline.append(
+            RTPPacket(
+                marker: false,
+                payloadType: 111,
+                sequenceNumber: 12,
+                timestamp: 1_920,
+                ssrc: mediaSSRC,
+                payload: Data([0x08])
+            )
+        )
+
+        let packet = try XCTUnwrap(pipeline.receiverReport(senderSSRC: 0x0102_0304, now: 100.25))
+        guard case let .receiverReport(report) = packet else {
+            return XCTFail("Expected receiver report.")
+        }
+
+        let receptionReport = try XCTUnwrap(report.reports.first)
+        XCTAssertEqual(report.senderSSRC, 0x0102_0304)
+        XCTAssertEqual(receptionReport.ssrc, mediaSSRC)
+        XCTAssertEqual(receptionReport.highestSequenceNumber, 12)
+        XCTAssertEqual(receptionReport.cumulativePacketsLost, 1)
+        XCTAssertEqual(receptionReport.fractionLost, 85)
+        XCTAssertEqual(receptionReport.lastSenderReport, 0x0304_0506)
+        XCTAssertEqual(receptionReport.delaySinceLastSenderReport, 16_384)
+    }
 }

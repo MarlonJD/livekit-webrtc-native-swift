@@ -170,6 +170,30 @@ final class H264RTPTests: XCTestCase {
         XCTAssertEqual(frames.first?.rtpTimestamp, 0)
     }
 
+    func testVideoToolboxEncoderAppliesAdaptiveQualityRecommendation() {
+        let encoder = H264VideoToolboxEncoder(
+            settings: H264EncoderSettings(
+                width: 1_280,
+                height: 720,
+                framesPerSecond: 30,
+                bitrate: 1_500_000
+            )
+        )
+        let recommendation = AdaptiveVideoQualityRecommendation(
+            level: .low,
+            targetBitrateBps: 500_000,
+            maxWidth: 640,
+            maxHeight: 360,
+            maxFramesPerSecond: 15
+        )
+
+        encoder.applyQualityRecommendation(recommendation)
+
+        XCTAssertEqual(encoder.targetBitrate, 500_000)
+        XCTAssertEqual(encoder.targetFramesPerSecond, 15)
+        XCTAssertEqual(encoder.appliedQualityRecommendation, recommendation)
+    }
+
     func testDetectsMissingFUAStart() {
         let packet = RTPPacket(
             marker: false,

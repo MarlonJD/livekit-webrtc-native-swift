@@ -292,8 +292,11 @@ public final class Room: @unchecked Sendable {
     private let publisherPeerConnection: PeerConnectionCoordinator
     private let subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration?
     private let publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration?
+    private let subscriberRTCPReceiverReportPolicy: RTCPReceiverReportSchedulePolicy
     private let publisherDataChannelIsInjected: Bool
     private var publisherDataChannel: LocalDataChannelPublisher?
+    private let publisherRTCPBandwidthEstimates = RTCPBandwidthEstimateStore()
+    private let subscriberRTCPBandwidthEstimates = RTCPBandwidthEstimateStore()
     private let subscriberMediaReceivePipeline = SubscriberMediaReceivePipeline()
     private let snapshots: RoomSnapshotStore
     private let signalLoopLock = NSLock()
@@ -314,6 +317,7 @@ public final class Room: @unchecked Sendable {
     private var publisherVideoRTPSendersBySID: [String: PublisherVideoRTPSender] = [:]
     private var publisherAudioPipelinesBySID: [String: OpusMicrophonePublishPipeline] = [:]
     private var publisherVideoPipelinesBySID: [String: H264CameraPublishPipeline] = [:]
+    private var publisherVideoPipelineSIDBySSRC: [UInt32: String] = [:]
     private var publisherRTPSenderSIDByCID: [String: String] = [:]
     private var subscriberMediaStartupStarted = false
     private var subscriberMediaStartupTask: Task<Void, Never>?
@@ -323,6 +327,8 @@ public final class Room: @unchecked Sendable {
     private var subscriberRTCPHandler: (@Sendable (RTCPPacket) async -> Void)?
     private var subscriberRTCPReceiveTask: Task<Void, Never>?
     private var subscriberRTCPReceiveLoopID: UInt64 = 0
+    private var subscriberRTCPReceiverReportTask: Task<Void, Never>?
+    private var subscriberRTCPReceiverReportLoopID: UInt64 = 0
     private var subscriberLocalCandidatesGathered = false
     private var subscriberLocalCandidates: [ICECandidate] = []
     private var publisherMediaStartupStarted = false
@@ -387,10 +393,28 @@ public final class Room: @unchecked Sendable {
         }
     }
 
+    func publisherVideoPipeline(sid: String) -> H264CameraPublishPipeline? {
+        publisherRTPSenderLock.withLock {
+            publisherVideoPipelinesBySID[sid]
+        }
+    }
+
     func publisherRTPSenderSID(forCID cid: String) -> String? {
         publisherRTPSenderLock.withLock {
             publisherRTPSenderSIDByCID[cid]
         }
+    }
+
+    var publisherBandwidthEstimateSnapshots: [MediaQualityEstimateSnapshot] {
+        publisherRTCPBandwidthEstimates.snapshots
+    }
+
+    var subscriberReceiverReportSnapshots: [RTCPReceiverReportSnapshot] {
+        subscriberMediaReceivePipeline.receiverReportSnapshots
+    }
+
+    var subscriberBandwidthEstimateSnapshots: [MediaQualityEstimateSnapshot] {
+        subscriberRTCPBandwidthEstimates.snapshots
     }
 
     var lastSubscriberMediaStartupResult: PeerConnectionMediaStartupResult? {
@@ -419,22 +443,10 @@ public final class Room: @unchecked Sendable {
     }
 
     func setPublisherRTCPHandler(_ handler: (@Sendable (RTCPPacket) async -> Void)?) {
-        let taskToCancel = publisherMediaStartupLock.withLock {
+        publisherMediaStartupLock.withLock {
             publisherRTCPHandler = handler
-            guard handler == nil else {
-                return nil as Task<Void, Never>?
-            }
-
-            let task = publisherRTCPReceiveTask
-            publisherRTCPReceiveTask = nil
-            return task
         }
-
-        taskToCancel?.cancel()
-
-        if handler != nil {
-            startPublisherRTCPReceiveLoopIfReady()
-        }
+        startPublisherRTCPReceiveLoopIfReady()
     }
 
     func waitForSubscriberMediaStartup() async {
@@ -450,6 +462,12 @@ public final class Room: @unchecked Sendable {
         }
     }
 
+    var isSubscriberRTCPReceiverReportLoopActive: Bool {
+        subscriberMediaStartupLock.withLock {
+            subscriberRTCPReceiverReportTask != nil
+        }
+    }
+
     var isDataChannelReceiveLoopActive: Bool {
         dataChannelReceiveLoopLock.withLock {
             dataChannelReceiveTask != nil
@@ -457,22 +475,10 @@ public final class Room: @unchecked Sendable {
     }
 
     func setSubscriberRTCPHandler(_ handler: (@Sendable (RTCPPacket) async -> Void)?) {
-        let taskToCancel = subscriberMediaStartupLock.withLock {
+        subscriberMediaStartupLock.withLock {
             subscriberRTCPHandler = handler
-            guard handler == nil else {
-                return nil as Task<Void, Never>?
-            }
-
-            let task = subscriberRTCPReceiveTask
-            subscriberRTCPReceiveTask = nil
-            return task
         }
-
-        taskToCancel?.cancel()
-
-        if handler != nil {
-            startSubscriberRTCPReceiveLoopIfReady()
-        }
+        startSubscriberRTCPReceiveLoopIfReady()
     }
 
     func sendPublisherRTP(_ packet: RTPPacket) async throws {
@@ -521,6 +527,30 @@ public final class Room: @unchecked Sendable {
         }
 
         try await transport.sendRTCP(packet)
+    }
+
+    @discardableResult
+    func sendSubscriberRTCPReceiverReport(senderSSRC: UInt32) async throws -> RTCPPacket? {
+        guard let packet = subscriberMediaReceivePipeline.receiverReport(senderSSRC: senderSSRC) else {
+            return nil
+        }
+
+        try await sendSubscriberRTCP(packet)
+        subscriberRTCPBandwidthEstimates.update(with: packet)
+        return packet
+    }
+
+    @discardableResult
+    func sendSubscriberRTCPReceiverEstimatedMaximumBitrate(senderSSRC: UInt32) async throws -> RTCPPacket? {
+        guard let packet = RTCPReceiverEstimatedMaximumBitratePlanner().packet(
+            senderSSRC: senderSSRC,
+            snapshots: subscriberRTCPBandwidthEstimates.snapshots
+        ) else {
+            return nil
+        }
+
+        try await sendSubscriberRTCP(packet)
+        return packet
     }
 
     func acceptDataChannelPacket(_ packet: SCTPDataChannelPacket) async throws {
@@ -637,7 +667,8 @@ public final class Room: @unchecked Sendable {
         ),
         subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration? = nil,
         publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration? = nil,
-        publisherDataChannel: LocalDataChannelPublisher? = nil
+        publisherDataChannel: LocalDataChannelPublisher? = nil,
+        subscriberRTCPReceiverReportPolicy: RTCPReceiverReportSchedulePolicy = .standard
     ) {
         self.options = options
         self.signalConnection = signalConnection
@@ -645,6 +676,7 @@ public final class Room: @unchecked Sendable {
         self.publisherPeerConnection = publisherPeerConnection
         self.subscriberMediaStartupConfiguration = subscriberMediaStartupConfiguration
         self.publisherMediaStartupConfiguration = publisherMediaStartupConfiguration
+        self.subscriberRTCPReceiverReportPolicy = subscriberRTCPReceiverReportPolicy
         self.publisherDataChannelIsInjected = publisherDataChannel != nil
         self.publisherDataChannel = publisherDataChannel
 
@@ -764,6 +796,45 @@ public final class Room: @unchecked Sendable {
         request.trackSetting = settings
         try await signalConnection.send(request)
         storeReconnectTrackSettingsUpdate(trackSIDs: trackSIDs, disabled: disabled)
+    }
+
+    @discardableResult
+    func updateAdaptiveTrackSettings(
+        trackSIDs: [String],
+        estimate: BandwidthEstimate,
+        priority: UInt32 = 0
+    ) async throws -> AdaptiveTrackSettingsPlan? {
+        try await updateAdaptiveTrackSettings(
+            trackSIDs: trackSIDs,
+            recommendation: estimate.recommendation,
+            priority: priority
+        )
+    }
+
+    @discardableResult
+    func updateAdaptiveTrackSettings(
+        trackSIDs: [String],
+        recommendation: AdaptiveVideoQualityRecommendation,
+        priority: UInt32 = 0
+    ) async throws -> AdaptiveTrackSettingsPlan? {
+        guard let plan = AdaptiveTrackSettingsPlanner().plan(
+            trackSIDs: trackSIDs,
+            recommendation: recommendation,
+            priority: priority
+        ) else {
+            return nil
+        }
+
+        try await updateTrackSettings(
+            trackSIDs: plan.trackSIDs,
+            disabled: plan.disabled,
+            quality: plan.quality,
+            width: plan.width,
+            height: plan.height,
+            fps: plan.fps,
+            priority: plan.priority
+        )
+        return plan
     }
 
     func applyRemoteParticipantSnapshots(_ participantSnapshots: [ParticipantSnapshot]) async {
@@ -1932,6 +2003,7 @@ public final class Room: @unchecked Sendable {
         let previous = publisherRTPSenderLock.withLock {
             let previous = publisherVideoPipelinesBySID[sid]
             publisherVideoPipelinesBySID[sid] = pipeline
+            publisherVideoPipelineSIDBySSRC[plan.ssrc] = sid
             return previous
         }
         previous?.stop()
@@ -1994,6 +2066,7 @@ public final class Room: @unchecked Sendable {
         publisherAudioPipelinesBySID[existingSID] = nil
         publisherVideoPipelinesBySID[existingSID]?.stop()
         publisherVideoPipelinesBySID[existingSID] = nil
+        publisherVideoPipelineSIDBySSRC = publisherVideoPipelineSIDBySSRC.filter { $0.value != existingSID }
     }
 
     @discardableResult
@@ -2003,6 +2076,7 @@ public final class Room: @unchecked Sendable {
             let removedVideo = publisherVideoRTPSendersBySID.removeValue(forKey: sid)
             let removedAudioPipeline = publisherAudioPipelinesBySID.removeValue(forKey: sid)
             let removedVideoPipeline = publisherVideoPipelinesBySID.removeValue(forKey: sid)
+            publisherVideoPipelineSIDBySSRC = publisherVideoPipelineSIDBySSRC.filter { $0.value != sid }
             publisherRTPSenderSIDByCID = publisherRTPSenderSIDByCID.filter { $0.value != sid }
             return (removedAudio != nil || removedVideo != nil, removedAudioPipeline, removedVideoPipeline)
         }
@@ -2020,6 +2094,7 @@ public final class Room: @unchecked Sendable {
             publisherVideoRTPSendersBySID.removeAll()
             publisherAudioPipelinesBySID.removeAll()
             publisherVideoPipelinesBySID.removeAll()
+            publisherVideoPipelineSIDBySSRC.removeAll()
             publisherRTPSenderSIDByCID.removeAll()
             return (audioPipelines, videoPipelines)
         }
@@ -2187,6 +2262,7 @@ public final class Room: @unchecked Sendable {
         }
         startSubscriberICEConsentFreshnessLoopIfReady(result: result)
         startSubscriberRTCPReceiveLoopIfReady()
+        startSubscriberRTCPReceiverReportLoopIfReady()
     }
 
     private func storePublisherMediaStartupError(_ error: any Error) {
@@ -2218,6 +2294,7 @@ public final class Room: @unchecked Sendable {
             let task = subscriberMediaStartupTask
             let result = subscriberMediaStartupResult
             let rtcpReceiveTask = subscriberRTCPReceiveTask
+            let receiverReportTask = subscriberRTCPReceiverReportTask
             let consentFreshnessTask = subscriberICEConsentFreshnessTask
             subscriberMediaStartupStarted = false
             subscriberMediaStartupTask = nil
@@ -2225,14 +2302,18 @@ public final class Room: @unchecked Sendable {
             subscriberMediaStartupError = nil
             subscriberICEConsentFreshnessTask = nil
             subscriberRTCPReceiveTask = nil
+            subscriberRTCPReceiverReportTask = nil
             subscriberLocalCandidatesGathered = false
             subscriberLocalCandidates = []
-            return (task, result, rtcpReceiveTask, consentFreshnessTask)
+            return (task, result, rtcpReceiveTask, receiverReportTask, consentFreshnessTask)
         }
 
         cleared.0?.cancel()
         cleared.2?.cancel()
         cleared.3?.cancel()
+        cleared.4?.cancel()
+        subscriberMediaReceivePipeline.reset()
+        subscriberRTCPBandwidthEstimates.reset()
         stopPublisherLocalMediaPipelines()
         return cleared.1
     }
@@ -2258,6 +2339,7 @@ public final class Room: @unchecked Sendable {
         cleared.0?.cancel()
         cleared.2?.cancel()
         cleared.3?.cancel()
+        publisherRTCPBandwidthEstimates.reset()
         if !publisherDataChannelIsInjected {
             stopDataChannelReceiveLoop()
             publisherDataChannel = nil
@@ -2417,8 +2499,7 @@ public final class Room: @unchecked Sendable {
 
     private func startPublisherRTCPReceiveLoopIfReady() {
         publisherMediaStartupLock.withLock {
-            guard publisherRTCPHandler != nil,
-                  publisherRTCPReceiveTask == nil,
+            guard publisherRTCPReceiveTask == nil,
                   let transport = publisherMediaStartupResult?.transport
             else {
                 return
@@ -2448,6 +2529,23 @@ public final class Room: @unchecked Sendable {
         }
     }
 
+    private func startSubscriberRTCPReceiverReportLoopIfReady() {
+        subscriberMediaStartupLock.withLock {
+            guard subscriberRTCPReceiverReportPolicy.isEnabled,
+                  subscriberRTCPReceiverReportTask == nil,
+                  subscriberMediaStartupResult?.transport != nil
+            else {
+                return
+            }
+
+            subscriberRTCPReceiverReportLoopID &+= 1
+            let loopID = subscriberRTCPReceiverReportLoopID
+            subscriberRTCPReceiverReportTask = Task { [weak self] in
+                await self?.runSubscriberRTCPReceiverReportLoop(loopID: loopID)
+            }
+        }
+    }
+
     private func runPublisherRTCPReceiveLoop(
         transport: DTLSSRTPMediaTransport,
         loopID: UInt64
@@ -2467,10 +2565,10 @@ public final class Room: @unchecked Sendable {
                 case .rtp:
                     continue
                 case let .rtcp(packet):
-                    guard let handler = publisherRTCPHandlerSnapshot() else {
-                        return
+                    recordPublisherRTCPBandwidthEstimate(packet)
+                    if let handler = publisherRTCPHandlerSnapshot() {
+                        await handler(packet)
                     }
-                    await handler(packet)
                 }
             } catch {
                 if isRecoverablePublisherRTCPReceiveError(error) {
@@ -2483,6 +2581,38 @@ public final class Room: @unchecked Sendable {
                 }
                 return
             }
+        }
+    }
+
+    private func recordPublisherRTCPBandwidthEstimate(_ packet: RTCPPacket) {
+        let snapshots = publisherRTCPBandwidthEstimates.update(with: packet)
+        guard !snapshots.isEmpty else {
+            return
+        }
+
+        let pipelineUpdates = publisherRTPSenderLock.withLock {
+            snapshots.compactMap { snapshot -> (H264CameraPublishPipeline, AdaptiveVideoQualityRecommendation)? in
+                guard let sid = publisherVideoPipelineSIDBySSRC[snapshot.ssrc],
+                      let pipeline = publisherVideoPipelinesBySID[sid]
+                else {
+                    return nil
+                }
+
+                return (pipeline, snapshot.estimate.recommendation)
+            }
+        }
+        for (pipeline, recommendation) in pipelineUpdates {
+            pipeline.applyQualityRecommendation(recommendation)
+        }
+
+        let bestEstimate = snapshots
+            .map(\.estimate)
+            .min { $0.estimatedBitrateBps < $1.estimatedBitrateBps }
+        if let bestEstimate {
+            LiveKitNativeLogging.log(
+                .debug,
+                "Publisher RTCP bandwidth estimate updated: \(bestEstimate.estimatedBitrateBps) bps, loss \(bestEstimate.lossFraction)."
+            )
         }
     }
 
@@ -2505,6 +2635,7 @@ public final class Room: @unchecked Sendable {
                 case let .rtp(packet):
                     await handleSubscriberRTP(packet)
                 case let .rtcp(packet):
+                    subscriberMediaReceivePipeline.observeRTCP(packet)
                     guard let handler = subscriberRTCPHandlerSnapshot() else {
                         continue
                     }
@@ -2522,6 +2653,50 @@ public final class Room: @unchecked Sendable {
                 return
             }
         }
+    }
+
+    private func runSubscriberRTCPReceiverReportLoop(loopID: UInt64) async {
+        defer {
+            clearSubscriberRTCPReceiverReportTask(loopID: loopID)
+        }
+
+        var session = RTCPReceiverReportScheduleSession(startedAt: Date().timeIntervalSince1970)
+        while !Task.isCancelled {
+            let now = Date().timeIntervalSince1970
+            if session.dueAction(at: now, policy: subscriberRTCPReceiverReportPolicy) != nil {
+                do {
+                    if try await sendSubscriberRTCPReceiverReport(senderSSRC: subscriberMediaReceivePipeline.feedbackSenderSSRC) != nil {
+                        _ = try await sendSubscriberRTCPReceiverEstimatedMaximumBitrate(
+                            senderSSRC: subscriberMediaReceivePipeline.feedbackSenderSSRC
+                        )
+                    }
+                } catch {
+                    storeSubscriberMediaStartupError(error)
+                    LiveKitNativeLogging.log(.error, "Subscriber RTCP receiver report send failed: \(error.localizedDescription)")
+                }
+                session.recordAttempt(at: now)
+            }
+
+            let sleepNanoseconds = Self.rtcpReceiverReportSleepNanoseconds(
+                session: session,
+                policy: subscriberRTCPReceiverReportPolicy,
+                now: Date().timeIntervalSince1970
+            )
+            do {
+                try await Task.sleep(nanoseconds: sleepNanoseconds)
+            } catch {
+                return
+            }
+        }
+    }
+
+    private static func rtcpReceiverReportSleepNanoseconds(
+        session: RTCPReceiverReportScheduleSession,
+        policy: RTCPReceiverReportSchedulePolicy,
+        now: TimeInterval
+    ) -> UInt64 {
+        let sleepSeconds = max(0.001, session.nextReportDeadline(policy: policy) - now)
+        return UInt64(sleepSeconds * 1_000_000_000)
     }
 
     private func handleSubscriberRTP(_ packet: RTPPacket) async {
@@ -2612,6 +2787,16 @@ public final class Room: @unchecked Sendable {
                 return
             }
             subscriberRTCPReceiveTask = nil
+        }
+    }
+
+    private func clearSubscriberRTCPReceiverReportTask(loopID: UInt64) {
+        subscriberMediaStartupLock.withLock {
+            guard subscriberRTCPReceiverReportLoopID == loopID else {
+                return
+            }
+
+            subscriberRTCPReceiverReportTask = nil
         }
     }
 

@@ -100,6 +100,16 @@ for resume reconnect. Registered publisher/subscriber RTCP handlers can
 receive decoded inbound RTCP from the injected secure media transport, and the
 default subscriber RTP receive loop now feeds protected RTP through jitter
 buffering, H.264/Opus packet assembly, and bounded NACK/PLI feedback dispatch.
+A deterministic RTCP receiver-report bandwidth estimator maps packet loss into
+adaptive video quality recommendations, and the camera publish pipeline applies
+bounded frame backpressure/drop control before queuing VideoToolbox encode
+work. Publisher RTCP receiver reports now feed the estimator even without an
+external app RTCP handler, and matching H.264 camera pipelines can apply
+recommended bitrate/FPS caps to VideoToolbox. Subscriber-side recommendations
+can be planned and sent as LiveKit `UpdateTrackSettings` requests for
+low/medium/high/off reception, and observed subscriber RTP/Sender Report state
+can produce scheduled RTCP Receiver Reports with DLSR timing plus REMB bitrate
+feedback over the subscriber secure RTCP transport.
 `Room.updateSubscription` and `Room.updateTrackSettings` expose media
 subscription and subscribed track settings signaling.
 `LocalParticipant.setTrackSubscriptionPermissions` exposes publisher-controlled
@@ -184,8 +194,8 @@ unit-test level, and keep publisher offer track state so a later local publish
 after resume still includes existing local media sections. LiveKit E2E
 verification for the OpenSSL DTLS-SRTP path, decoded subscriber render/playout,
 standards-compliant live SCTP association behavior, TURN TCP/TLS execution,
-real-device media timing, quality adaptation, LiveKit-validated data-channel
-recovery, and reconnect
+real-device media timing, complete live congestion/adaptive-quality control,
+LiveKit-validated data-channel recovery, and reconnect
 media recovery remain part of production
 hardening.
 

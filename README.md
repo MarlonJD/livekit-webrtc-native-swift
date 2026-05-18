@@ -101,9 +101,22 @@ experience, not only the signaling and media packet paths.
 Production readiness must include meeting-grade audio capture and playout,
 echo cancellation, route changes, Bluetooth behavior, interruptions,
 background/foreground transitions, jitter buffering, packet-loss recovery,
-RTCP feedback, bandwidth estimation, congestion control, adaptive quality,
-bounded frame dropping, reconnect media recovery, TURN-only operation, and
-multi-participant behavior.
+RTCP feedback, live bandwidth estimation, congestion control, applied adaptive
+quality, bounded frame dropping across real-time media queues, reconnect media
+recovery, TURN-only operation, and multi-participant behavior.
+
+The package now includes deterministic RTCP receiver-report bandwidth
+estimation, low/medium/high adaptive video recommendations, and bounded camera
+publish frame backpressure primitives. Publisher RTCP receiver reports now feed
+that estimator, and matching H.264 camera pipelines can apply recommended
+bitrate/FPS caps to VideoToolbox. Subscriber-side recommendations can also be
+planned and sent as LiveKit `UpdateTrackSettings` requests, while observed
+subscriber RTP/Sender Report state can generate scheduled RTCP Receiver
+Reports with DLSR timing and REMB bitrate feedback over the secure subscriber
+RTCP transport.
+Those are still only building blocks until they are expanded into complete
+congestion control, automatic subscriber policy, weak-network recovery, and
+end-to-end LiveKit validation.
 
 Those requirements are intentionally production blockers. A release can only be
 called production-ready after automated LiveKit integration tests, weak-network
@@ -246,7 +259,7 @@ latest-value Room state and emitted as typed room events.
 The active implementation focus is now `1.0.0` hardening: validating the
 OpenSSL-backed DTLS-SRTP `use_srtp` handshake/exporter against LiveKit,
 completing LiveKit-validated default secure media transport, TURN TCP/TLS,
-quality controls, decoded subscriber render/playout, standards-compliant
+live quality-control wiring, decoded subscriber render/playout, standards-compliant
 DTLS-SCTP association behavior, integration apps, and size gates.
 
 Current builds expose `LiveKitNative.productionReadiness` and
@@ -305,7 +318,17 @@ send path after publisher media startup. Registered publisher and subscriber
 RTCP handlers can also receive decoded inbound RTCP from the injected secure
 media transport, and the default subscriber RTP receive loop now feeds
 protected RTP through jitter buffering, H.264/Opus packet assembly, and
-bounded NACK/PLI feedback dispatch.
+bounded NACK/PLI feedback dispatch. A deterministic RTCP receiver-report
+bandwidth estimator now maps loss into adaptive video quality recommendations,
+publisher RTCP receiver reports feed that estimator even without an external
+RTCP handler, matching H.264 camera pipelines can apply recommended
+bitrate/FPS caps to VideoToolbox, and the camera publish pipeline applies a
+bounded frame backpressure/drop controller before VideoToolbox encode work is
+queued. Subscriber-side recommendations can be turned into LiveKit
+`UpdateTrackSettings` requests for low/medium/high/off reception, and the
+subscriber RTP receive pipeline now tracks RTP/Sender Report state to emit
+cadenced RTCP Receiver Reports with DLSR timing and REMB bitrate feedback
+through the subscriber secure RTCP path.
 Server-initiated mute messages update local/remote track publication state and emit
 `RoomEvent.trackMuteChanged`. Room-level media subscription and subscribed
 track settings requests are available through `Room.updateSubscription` and
@@ -330,7 +353,12 @@ pacing/role-conflict integration, shared DTLS/SRTP media-data demux coverage,
 VideoToolbox H.264 encode
 smoke coverage, AudioToolbox Opus
 encode/decode smoke coverage, subscriber RTP
-jitter-buffer/feedback behavior, and matching `RequestResponse` failure
+jitter-buffer/feedback behavior, deterministic receiver-report bandwidth
+estimation, publisher RTCP report ingestion, adaptive video quality
+recommendations, VideoToolbox bitrate/FPS recommendation application, camera
+publish backpressure/drop control, subscriber adaptive track-settings planning
+and signaling, subscriber Receiver Report generation/cadence/sending, REMB
+packet/planner/sending, and matching `RequestResponse` failure
 mapping are unit-tested, while LiveKit E2E media validation, decoded subscriber
 render/playout, standards-compliant live SCTP association behavior, TURN TCP/TLS
 execution, media recovery, and end-to-end LiveKit hardening are still open.
@@ -349,18 +377,18 @@ SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting and
 session-protection context, RTCP feedback, H.264, VP8, Opus RTP scaffolding,
 and SCTP data-channel message paths. On this machine, the latest
 release-readiness smoke medians include protobuf signal roundtrip at
-`6.943 us/op`, subscriber SDP answer generation at `103.277 us/op`, STUN
-binding roundtrip at `1.831 us/op`, RTP encode/decode at `0.598 us/op`, SRTP
-replay protection at `0.047 us/op`, SRTP authenticated roundtrip at
-`8.393 us/op`, SRTP AES-CM payload roundtrip at `62.687 us/op`, full SRTP
-packet protect/unprotect at `70.937 us/op`, RTCP feedback roundtrip at
-`1.755 us/op`, SRTCP packet/replay roundtrip at `0.780 us/op`, SRTCP
-authenticated roundtrip at `6.864 us/op`, full SRTCP packet protect/unprotect
-at `9.397 us/op`, DTLS-SRTP exporter split at `0.326 us/op`, DTLS-SRTP session
-protect/unprotect at `80.422 us/op`, H.264 packetize/depacketize at
-`2.507 us/op`, VP8 payload depacketize at `0.150 us/op`, Opus RTP
-packetize/depacketize at `0.026 us/op`, and SCTP DCEP open/ack roundtrip at
-`0.818 us/op`.
+`6.576 us/op`, subscriber SDP answer generation at `66.752 us/op`, STUN
+binding roundtrip at `1.688 us/op`, RTP encode/decode at `0.550 us/op`, SRTP
+replay protection at `0.045 us/op`, SRTP authenticated roundtrip at
+`7.907 us/op`, SRTP AES-CM payload roundtrip at `58.568 us/op`, full SRTP
+packet protect/unprotect at `65.662 us/op`, RTCP feedback roundtrip at
+`1.578 us/op`, SRTCP packet/replay roundtrip at `0.758 us/op`, SRTCP
+authenticated roundtrip at `6.242 us/op`, full SRTCP packet protect/unprotect
+at `8.582 us/op`, DTLS-SRTP exporter split at `0.300 us/op`, DTLS-SRTP session
+protect/unprotect at `75.267 us/op`, H.264 packetize/depacketize at
+`2.278 us/op`, VP8 payload depacketize at `0.135 us/op`, Opus RTP
+packetize/depacketize at `0.027 us/op`, and SCTP DCEP open/ack roundtrip at
+`0.735 us/op`.
 
 Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
 CSV so this package does not reintroduce the forbidden binary WebRTC dependency.
@@ -384,8 +412,8 @@ binary size proxy. The strict gate additionally requires
 That strict gate intentionally fails today because LiveKit E2E secure RTP/RTCP
 verification, full ICE/TURN hardening, decoded subscriber render/playout,
 standards-compliant live SCTP, Apple-platform OpenSSL packaging validation,
-meeting-grade audio/network quality policy, and end-to-end LiveKit tests are
-still open.
+meeting-grade audio, full live congestion/adaptive-quality policy, and
+end-to-end LiveKit tests are still open.
 
 ## Requirements
 
@@ -471,7 +499,7 @@ try await room.connect(
 | `0.4.0` | Swift Opus audio publish/subscribe |
 | `0.5.0` | Swift VP8 decode-only subscribe path |
 | `0.6.0` | SCTP data channel and LiveKit data packets |
-| `1.0.0` | Reconnect, TURN hardening, quality controls, sample apps, size gates |
+| `1.0.0` | Reconnect, TURN hardening, live quality control, sample apps, size gates |
 
 ## Compatibility Matrix
 

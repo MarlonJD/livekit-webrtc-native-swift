@@ -35,6 +35,7 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
     private var h264PipelinesBySSRC: [UInt32: H264SubscribePipeline] = [:]
     private var h264DecodersBySSRC: [UInt32: H264VideoToolboxSubscribeDecoder] = [:]
     private var opusPipelinesBySSRC: [UInt32: OpusSubscribePipeline] = [:]
+    private let receiverReportStore = RTCPReceiverReportStore()
 
     package init(
         audioPayloadType: UInt8 = 111,
@@ -54,7 +55,34 @@ package final class SubscriberMediaReceivePipeline: @unchecked Sendable {
         }
     }
 
+    package func observeRTCP(_ packet: RTCPPacket, receivedAt: TimeInterval = Date().timeIntervalSince1970) {
+        receiverReportStore.observe(packet, receivedAt: receivedAt)
+    }
+
+    package func receiverReport(
+        senderSSRC: UInt32,
+        now: TimeInterval = Date().timeIntervalSince1970
+    ) -> RTCPPacket? {
+        receiverReportStore.receiverReportPacket(senderSSRC: senderSSRC, now: now)
+    }
+
+    package var receiverReportSnapshots: [RTCPReceiverReportSnapshot] {
+        receiverReportStore.snapshots
+    }
+
+    package func reset() {
+        lock.withLock {
+            jitterBuffersBySSRC.removeAll()
+            h264PipelinesBySSRC.removeAll()
+            h264DecodersBySSRC.removeAll()
+            opusPipelinesBySSRC.removeAll()
+            receiverReportStore.reset()
+        }
+    }
+
     private func appendLocked(_ packet: RTPPacket) -> SubscriberMediaReceiveResult {
+        receiverReportStore.observe(packet)
+
         var jitterBuffer = jitterBuffersBySSRC[packet.ssrc] ?? RTPJitterBuffer(maxBufferedPackets: maxBufferedPackets)
         let jitterResult = jitterBuffer.insert(packet)
         jitterBuffersBySSRC[packet.ssrc] = jitterBuffer
