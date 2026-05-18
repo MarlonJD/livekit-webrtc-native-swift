@@ -220,6 +220,140 @@ final class DTLSSRTPTests: XCTestCase {
         await serverDTLS.close()
     }
 
+    func testOpenSSLDTLSApplicationDataReassemblesFragmentedSCTPDataChannelPackets() async throws {
+        let clientIdentity = DTLSSRTPIdentity.generated()
+        let serverIdentity = DTLSSRTPIdentity.generated()
+        let datagrams = PairedDTLSDatagramTransport.makePair()
+        let clientDTLS = try OpenSSLDTLSApplicationDataTransport(
+            identity: clientIdentity,
+            role: .client,
+            transport: datagrams.client
+        )
+        let serverDTLS = try OpenSSLDTLSApplicationDataTransport(
+            identity: serverIdentity,
+            role: .server,
+            transport: datagrams.server
+        )
+
+        async let clientResult = clientDTLS.performHandshake(
+            role: .client,
+            expectedRemoteFingerprint: serverIdentity.fingerprint
+        )
+        async let serverResult = serverDTLS.performHandshake(
+            role: .server,
+            expectedRemoteFingerprint: clientIdentity.fingerprint
+        )
+        _ = try await (clientResult, serverResult)
+
+        let clientSCTP = DTLSSCTPDataChannelPacketTransport(
+            dtlsTransport: clientDTLS,
+            maxFragmentPayloadSize: 4
+        )
+        let serverSCTP = DTLSSCTPDataChannelPacketTransport(
+            dtlsTransport: serverDTLS,
+            maxFragmentPayloadSize: 4
+        )
+        let packet = SCTPDataChannelPacket(
+            streamID: 2,
+            ppid: .binary,
+            payload: Data(0..<13)
+        )
+
+        try await clientSCTP.send(packet)
+        let received = try await serverSCTP.receive()
+
+        XCTAssertEqual(received, packet)
+        await clientDTLS.close()
+        await serverDTLS.close()
+    }
+
+    func testWebRTCDatagramClassifierUsesRFC5764Ranges() {
+        XCTAssertEqual(WebRTCDatagramClassifier.classify(Data([0x00, 0x01])), .stun)
+        XCTAssertEqual(WebRTCDatagramClassifier.classify(Data([0x17, 0xfe, 0xfd])), .dtls)
+        XCTAssertEqual(WebRTCDatagramClassifier.classify(Data([0x40, 0x00])), .turnChannelData)
+        XCTAssertEqual(WebRTCDatagramClassifier.classify(Data([0x80, 0x66])), .media)
+        XCTAssertEqual(WebRTCDatagramClassifier.classify(Data([0xff])), .unknown)
+        XCTAssertEqual(WebRTCDatagramClassifier.classify(Data()), .unknown)
+    }
+
+    func testMediaDataSessionBinderDemuxesDTLSDataAndSRTPOnSharedTransport() async throws {
+        let clientIdentity = DTLSSRTPIdentity.generated()
+        let serverIdentity = DTLSSRTPIdentity.generated()
+        let datagrams = PairedDTLSDatagramTransport.makePair()
+        let clientCandidate = dtlsCandidate(foundation: "client")
+        let serverCandidate = dtlsCandidate(foundation: "server")
+        let clientPair = ICECandidatePair(
+            local: clientCandidate,
+            remote: serverCandidate,
+            isControlling: true,
+            state: .succeeded,
+            nominated: true
+        )
+        let serverPair = ICECandidatePair(
+            local: serverCandidate,
+            remote: clientCandidate,
+            isControlling: false,
+            state: .succeeded,
+            nominated: true
+        )
+        let clientBinder = DTLSSRTPMediaDataSessionBinder(
+            datagramTransportFactory: FixedMediaDatagramTransportFactory(transport: datagrams.client),
+            identity: clientIdentity,
+            maxDataChannelFragmentPayloadSize: 4
+        )
+        let serverBinder = DTLSSRTPMediaDataSessionBinder(
+            datagramTransportFactory: FixedMediaDatagramTransportFactory(transport: datagrams.server),
+            identity: serverIdentity,
+            maxDataChannelFragmentPayloadSize: 4
+        )
+        let clientConfiguration = try DTLSSRTPHandshakeConfiguration(
+            role: .client,
+            remoteFingerprint: serverIdentity.fingerprint
+        )
+        let serverConfiguration = try DTLSSRTPHandshakeConfiguration(
+            role: .server,
+            remoteFingerprint: clientIdentity.fingerprint
+        )
+
+        async let clientSessionTask = clientBinder.makeSession(
+            selectedCandidatePair: clientPair,
+            handshakeConfiguration: clientConfiguration
+        )
+        async let serverSessionTask = serverBinder.makeSession(
+            selectedCandidatePair: serverPair,
+            handshakeConfiguration: serverConfiguration
+        )
+        let (clientSession, serverSession) = try await (clientSessionTask, serverSessionTask)
+        let dataPacket = SCTPDataChannelPacket(
+            streamID: 2,
+            ppid: .binary,
+            payload: Data(0..<13)
+        )
+        let rtp = RTPPacket(
+            marker: true,
+            payloadType: 102,
+            sequenceNumber: 17,
+            timestamp: 9_000,
+            ssrc: 0x1122_3344,
+            payload: Data((0..<64).map(UInt8.init))
+        )
+
+        try await clientSession.dataChannelTransport.send(dataPacket)
+        try await clientSession.mediaTransport.sendRTP(rtp)
+
+        guard case let .rtp(receivedRTP) = try await serverSession.mediaTransport.receive() else {
+            return XCTFail("Expected demultiplexed SRTP packet.")
+        }
+        let receivedDataPacket = try await serverSession.dataChannelTransport.receive()
+
+        XCTAssertEqual(clientSession.handshakeResult.remoteFingerprint, serverIdentity.fingerprint)
+        XCTAssertEqual(serverSession.handshakeResult.remoteFingerprint, clientIdentity.fingerprint)
+        XCTAssertEqual(receivedRTP, rtp)
+        XCTAssertEqual(receivedDataPacket, dataPacket)
+        await clientSession.close()
+        await serverSession.close()
+    }
+
     func testShortAuthenticationTagProfileUsesSameExporterByteCount() throws {
         let profile = try SRTPProtectionProfile(identifier: 0x0002)
         let exported = Data((0..<60).map(UInt8.init))
@@ -375,6 +509,14 @@ private struct NoopDTLSDatagramTransport: MediaDatagramTransport {
     }
 }
 
+private struct FixedMediaDatagramTransportFactory: MediaDatagramTransportFactory {
+    var transport: any MediaDatagramTransport
+
+    func makeTransport(selectedCandidatePair: ICECandidatePair) throws -> any MediaDatagramTransport {
+        transport
+    }
+}
+
 private final class PairedDTLSDatagramTransport: MediaDatagramTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var incomingDatagrams: [Data] = []
@@ -448,4 +590,16 @@ private final class PairedDTLSDatagramTransport: MediaDatagramTransport, @unchec
 
 private enum PairedDTLSDatagramTransportError: Error {
     case missingPeer
+}
+
+private func dtlsCandidate(foundation: String) -> ICECandidate {
+    ICECandidate(
+        foundation: foundation,
+        componentID: .rtp,
+        transport: .udp,
+        priority: ICECandidatePriority(type: .host, localPreference: 65_535).value,
+        address: "127.0.0.1",
+        port: 9,
+        type: .host
+    )
 }

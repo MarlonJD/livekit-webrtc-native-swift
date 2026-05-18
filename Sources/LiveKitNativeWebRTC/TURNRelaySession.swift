@@ -85,15 +85,13 @@ package struct TURNRelaySessionConfiguration: Equatable, Sendable {
         realm: String,
         nonce: String
     ) throws -> TURNRelaySessionConfiguration {
-        for endpoint in endpoints where endpoint.transport == .udp && endpoint.isSecure == false {
-            guard let username = endpoint.username, username.isEmpty == false,
-                  let credential = endpoint.credential, credential.isEmpty == false
-            else {
-                continue
-            }
-
+        for candidate in TURNRelayFallbackPlan(
+            endpoints: endpoints,
+            realm: realm,
+            nonce: nonce
+        ).candidates where candidate.isSupportedByCurrentDatagramClient {
             return try TURNRelaySessionConfiguration(
-                endpoint: endpoint,
+                endpoint: candidate.endpoint,
                 realm: realm,
                 nonce: nonce
             )
@@ -148,6 +146,119 @@ package struct TURNRelaySessionConfiguration: Equatable, Sendable {
             foundation: foundation,
             localPreference: localPreference
         )
+    }
+}
+
+package enum TURNRelayConnectionProtocol: String, Equatable, Sendable {
+    case udp
+    case tcp
+    case tls
+}
+
+package struct TURNRelayFallbackCandidate: Equatable, Sendable {
+    package var endpoint: TURNServerEndpoint
+    package var credentials: TURNRelaySessionCredentials
+    package var connectionProtocol: TURNRelayConnectionProtocol
+    package var relayedTransport: TURNRequestedTransportProtocol
+
+    package init(
+        endpoint: TURNServerEndpoint,
+        credentials: TURNRelaySessionCredentials,
+        connectionProtocol: TURNRelayConnectionProtocol,
+        relayedTransport: TURNRequestedTransportProtocol = .udp
+    ) {
+        self.endpoint = endpoint
+        self.credentials = credentials
+        self.connectionProtocol = connectionProtocol
+        self.relayedTransport = relayedTransport
+    }
+
+    package var isSupportedByCurrentDatagramClient: Bool {
+        connectionProtocol == .udp && endpoint.transport == .udp && endpoint.isSecure == false
+    }
+}
+
+package struct TURNRelayFallbackPlan: Equatable, Sendable {
+    package var candidates: [TURNRelayFallbackCandidate]
+
+    package init(
+        iceServers: [ICEServer],
+        realm: String,
+        nonce: String
+    ) {
+        self.init(
+            endpoints: TURNServerEndpoint.endpoints(from: iceServers),
+            realm: realm,
+            nonce: nonce
+        )
+    }
+
+    package init(
+        endpoints: [TURNServerEndpoint],
+        realm: String,
+        nonce: String
+    ) {
+        self.candidates = Self.makeCandidates(
+            endpoints: endpoints,
+            realm: realm,
+            nonce: nonce
+        )
+    }
+
+    package var supportedDatagramCandidates: [TURNRelayFallbackCandidate] {
+        candidates.filter(\.isSupportedByCurrentDatagramClient)
+    }
+
+    private static func makeCandidates(
+        endpoints: [TURNServerEndpoint],
+        realm: String,
+        nonce: String
+    ) -> [TURNRelayFallbackCandidate] {
+        endpoints.compactMap { endpoint in
+            guard
+                let credentials = try? TURNRelaySessionCredentials(
+                    endpoint: endpoint,
+                    realm: realm,
+                    nonce: nonce
+                )
+            else {
+                return nil
+            }
+
+            return TURNRelayFallbackCandidate(
+                endpoint: endpoint,
+                credentials: credentials,
+                connectionProtocol: connectionProtocol(for: endpoint),
+                relayedTransport: .udp
+            )
+        }
+        .stableSorted { lhs, rhs in
+            fallbackRank(lhs.connectionProtocol) < fallbackRank(rhs.connectionProtocol)
+        }
+    }
+
+    private static func connectionProtocol(for endpoint: TURNServerEndpoint) -> TURNRelayConnectionProtocol {
+        if endpoint.isSecure {
+            return .tls
+        }
+
+        switch endpoint.transport {
+        case .udp:
+            return .udp
+        case .tcp:
+            return .tcp
+        }
+    }
+
+    private static func fallbackRank(_ connectionProtocol: TURNRelayConnectionProtocol) -> Int {
+        switch connectionProtocol {
+        case .udp:
+            0
+        case .tcp:
+            1
+        case .tls:
+            2
+        }
     }
 }
 
@@ -684,5 +795,23 @@ package struct TURNRelaySession: Sendable {
 
     package static func permissionID(for peerAddress: STUNMappedAddress) -> TURNMaintenanceScheduler.PermissionID {
         "\(peerAddress.address):\(peerAddress.port)"
+    }
+}
+
+private extension Array {
+    func stableSorted(
+        by areInIncreasingOrder: (Element, Element) throws -> Bool
+    ) rethrows -> [Element] {
+        try enumerated()
+            .sorted { lhs, rhs in
+                if try areInIncreasingOrder(lhs.element, rhs.element) {
+                    return true
+                }
+                if try areInIncreasingOrder(rhs.element, lhs.element) {
+                    return false
+                }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
     }
 }

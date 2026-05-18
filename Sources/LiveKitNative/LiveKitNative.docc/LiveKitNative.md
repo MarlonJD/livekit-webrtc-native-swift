@@ -34,8 +34,14 @@ SCTP channel planning, LiveKit `DataPacket` user-packet mapping,
 publish/unpublish/update-subscription signaling. The 1.0 hardening path now
 adds queued local data publish flushing through an injected SCTP packet
 transport, inbound data-channel `DataPacket` event plumbing, and OpenSSL DTLS
-application-data packet transport coverage. Active work has moved to 1.0
-hardening with explicit production
+application-data packet transport coverage with deterministic packet
+fragmentation/reassembly and retransmission queue planning primitives. A
+shared WebRTC DTLS/SRTP datagram demux and media/data session binder can keep
+persistent OpenSSL DTLS application data and SRTP media on the same selected
+ICE datagram path in unit tests, and public default `Room` construction now
+selects that shared startup binder for live media/data transport construction.
+Active
+work has moved to 1.0 hardening with explicit production
 readiness gates, request/response correlation for client-originated signaling,
 metadata/name/attribute update requests, configurable logging, disconnect
 lifecycle cleanup, DTLS-SRTP protection-profile key/salt splitting, RTP
@@ -110,11 +116,15 @@ the same local port. `JoinResponse` and `ReconnectResponse` ICE server lists now
 update both subscriber and publisher peer connection configurations, and
 bound-socket startup can use supported `stun:` UDP URLs to add server-reflexive
 candidates while preserving socket reuse. Public `Room` initialization now
-installs default socket-backed subscriber and publisher media startup
+installs default socket-backed subscriber and publisher media-data startup
 configurations, so live signaling can gather and trickle local ICE candidates
-and then use the package-internal OpenSSL DTLS-SRTP handshaker to negotiate
-WebRTC `use_srtp`, export SRTP keying material, and bind secure RTP/RTCP
-transport when the remote peer completes the same path.
+and then use the package-internal OpenSSL DTLS-SRTP identity plus shared
+datagram demux to negotiate WebRTC `use_srtp`, export SRTP keying material,
+and bind secure RTP/RTCP plus DTLS application-data packet transport when the
+remote peer completes the same path.
+The WebRTC datagram demux can split DTLS records from SRTP/SRTCP media on the
+same underlying selected-pair transport for a shared media/data binder, though
+LiveKit server E2E verification for the combined media/data path remains open.
 Deterministic ICE consent freshness planning can now schedule
 selected-pair checks, timeout expiry, failure expiry, disabled policy behavior,
 and clamped jitter without a wall-clock dependency, and an injectable executor
@@ -143,14 +153,14 @@ dependency. A TURN maintenance executor now drives injectable allocation and
 permission refresh closures and advances scheduler deadlines only on success,
 and relay candidate planning can build relayed ICE candidates from TURN
 relayed addresses and ChannelBind metadata. TURN relay session configuration
-can now select supported UDP relay endpoints from parsed ICE server URLs when
-credentials, realm, and nonce are available. A bounded TURN relay session
-composes allocation, permission creation, channel binding, relayed candidate
-planning, relay transport metadata, and deterministic maintenance execution
-over abstract transports, and a setup plan can create and execute that
-configured session deterministically. A ChannelData relay transport can
-encode outbound payloads and decode inbound packets over an abstract media
-datagram transport while
+can now order credentialed relay fallback candidates from parsed ICE server
+URLs as UDP, TCP, then TLS while exposing the current UDP datagram-supported
+subset. A bounded TURN relay session composes allocation, permission creation,
+channel binding, relayed candidate planning, relay transport metadata, and
+deterministic maintenance execution over abstract transports, and a setup plan
+can create and execute that configured session deterministically. A ChannelData
+relay transport can encode outbound payloads and decode inbound packets over
+an abstract media datagram transport while
 preserving partial stream remainder and peer endpoint metadata. Fresh join,
 reconnect, and disconnect boundaries now reset stale remote SDP/ICE negotiation
 state without replacing the local peer connection configuration, and regenerate

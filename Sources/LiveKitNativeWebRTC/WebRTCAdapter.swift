@@ -291,17 +291,31 @@ package enum PeerConnectionNegotiationError: Error, Equatable, Sendable {
 
 package struct PeerConnectionMediaStartupResult: Sendable {
     package var transport: DTLSSRTPMediaTransport
+    package var mediaDataSession: DTLSSRTPMediaDataSession?
     package var iceSummary: ICEAgentCheckSummary
     package var selectedCandidatePair: ICECandidatePair
+    package var dataChannelTransport: DTLSSCTPDataChannelPacketTransport? {
+        mediaDataSession?.dataChannelTransport
+    }
 
     package init(
         transport: DTLSSRTPMediaTransport,
+        mediaDataSession: DTLSSRTPMediaDataSession? = nil,
         iceSummary: ICEAgentCheckSummary,
         selectedCandidatePair: ICECandidatePair
     ) {
         self.transport = transport
+        self.mediaDataSession = mediaDataSession
         self.iceSummary = iceSummary
         self.selectedCandidatePair = selectedCandidatePair
+    }
+
+    package func close() async {
+        if let mediaDataSession {
+            await mediaDataSession.close()
+        } else {
+            await transport.close()
+        }
     }
 }
 
@@ -567,13 +581,24 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         )
     }
 
+    package func makeSecureMediaDataSession(
+        selectedCandidatePair: ICECandidatePair,
+        binder: DTLSSRTPMediaDataSessionBinder
+    ) async throws -> DTLSSRTPMediaDataSession {
+        try await binder.makeSession(
+            selectedCandidatePair: selectedCandidatePair,
+            handshakeConfiguration: try makeDTLSSRTPHandshakeConfiguration()
+        )
+    }
+
     package func startSecureMediaTransport(
         localCandidates: [ICECandidate],
         iceRole: ICEAgentRole,
         tieBreaker: UInt64,
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
         checker: any ICEConnectivityChecking = STUNICEConnectivityChecker(),
-        binder: DTLSSRTPMediaSessionBinder
+        binder: DTLSSRTPMediaSessionBinder,
+        mediaDataBinder: DTLSSRTPMediaDataSessionBinder? = nil
     ) async throws -> PeerConnectionMediaStartupResult {
         let iceAgent = try makeICEAgent(
             localCandidates: localCandidates,
@@ -585,6 +610,19 @@ package final class PeerConnectionCoordinator: @unchecked Sendable {
         let summary = await iceAgent.performConnectivityChecks()
         guard let selectedCandidatePair = summary.selectedPair else {
             throw PeerConnectionNegotiationError.missingSelectedICECandidatePair
+        }
+
+        if let mediaDataBinder {
+            let session = try await makeSecureMediaDataSession(
+                selectedCandidatePair: selectedCandidatePair,
+                binder: mediaDataBinder
+            )
+            return PeerConnectionMediaStartupResult(
+                transport: session.mediaTransport,
+                mediaDataSession: session,
+                iceSummary: summary,
+                selectedCandidatePair: selectedCandidatePair
+            )
         }
 
         let transport = try await makeSecureMediaTransport(

@@ -38,9 +38,16 @@ using manager-assigned stream IDs, flush encoded `DataPacket` payloads once the
 matching data channel is acknowledged open, acknowledge inbound remote DCEP
 open messages, decode inbound LiveKit `DataPacket` payloads into
 `RoomEvent.dataReceived`, and carry SCTP data-channel packet envelopes over a
-persistent OpenSSL DTLS application-data transport in unit tests. Full SCTP
-chunking, retransmission, congestion control, and default live Room association
-wiring remain open.
+persistent OpenSSL DTLS application-data transport in unit tests. The DTLS
+packet-envelope transport can now optionally fragment large data-channel
+payloads, reassemble them on receive, and use deterministic retransmission
+queue planning in unit tests. A shared DTLS/SRTP datagram demux and media/data
+session binder can now keep persistent OpenSSL DTLS application data and SRTP
+media on one selected ICE datagram path in unit tests, and public default
+`Room` initialization now selects that combined startup binder for live
+media/data transport construction. Full standards-compliant SCTP association
+state, congestion control, data-channel recovery, and LiveKit E2E hardening
+remain open.
 Server/SFU `TrackUnpublishedResponse` cleanup for local media publications also
 clears local publication state and cached publisher offer reconnect state so
 resume reconnects and later publisher offers do not replay removed media.
@@ -67,13 +74,14 @@ deadlines without a wall-clock dependency, schedules due refresh actions in
 deadline order, executes due allocation/permission refreshes through injectable
 network closures, and advances deadlines only on successful refresh. TURN relay
 candidate planning can build relayed ICE candidates from relayed addresses and
-channel bindings. TURN relay session configuration can now select supported UDP
-relay endpoints from parsed ICE server URLs when credentials, realm, and nonce
-are available. A bounded TURN relay session now composes allocation, permission
-creation, channel binding, relay candidate planning, relay transport metadata,
-and deterministic maintenance execution over abstract transports, and a setup
-plan can create and execute that configured session over scripted abstract
-transports. A ChannelData
+channel bindings. TURN relay session configuration can now order fallback relay
+candidates from parsed ICE server URLs as UDP, TCP, then TLS when credentials,
+realm, and nonce are available, while identifying the currently executable UDP
+datagram path. A bounded TURN relay session now composes allocation,
+permission creation, channel binding, relay candidate planning, relay
+transport metadata, and deterministic maintenance execution over abstract
+transports, and a setup plan can create and execute that configured session
+over scripted abstract transports. A ChannelData
 relay transport can encode outbound payloads and decode inbound packets over an
 abstract media datagram transport with partial stream remainder handling.
 Deterministic ICE consent freshness planning now models selected-pair consent
@@ -83,13 +91,18 @@ freshness executor can advance success/failure/expiry state in unit tests.
 Injected Room media startup now starts a selected-pair consent freshness loop
 after secure transport binding and closes the protected transport when consent
 expires. Public `Room` initialization now installs default socket-backed
-subscriber and publisher media startup configurations backed by the local
-OpenSSL DTLS-SRTP handshaker, so the live path can gather host candidates
-lazily, add supported STUN server-reflexive candidates, send local
-trickle/final-trickle signaling, reuse the bound ICE socket for checks/media
-datagrams, negotiate WebRTC `use_srtp`, export SRTP keying material, and bind
-secure RTP/RTCP transport when the remote peer completes the same DTLS-SRTP
-path.
+subscriber and publisher media-data startup configurations backed by the local
+OpenSSL DTLS-SRTP identity and shared datagram demux, so the live path can
+gather host candidates lazily, add supported STUN server-reflexive candidates,
+send local trickle/final-trickle signaling, reuse the bound ICE socket for
+checks/media datagrams, negotiate WebRTC `use_srtp`, export SRTP keying
+material, and bind secure RTP/RTCP plus DTLS application-data packet transport
+when the remote peer completes the same DTLS-SRTP path. A shared WebRTC
+datagram classifier/demux can now split DTLS application
+data from SRTP/SRTCP media over the same underlying datagram transport for the
+media/data session binder; default public Room construction now uses that
+combined media/data startup configuration, while LiveKit server E2E
+verification remains open.
 Fresh
 join, reconnect, and disconnect paths now
 reset stale
@@ -416,6 +429,8 @@ The old binary WebRTC dependency path has been removed from the package model.
   - TURN relay session configuration selection from parsed ICE server
     endpoints, requiring supported UDP transport intent plus endpoint
     credentials, realm, and nonce
+  - TURN relay fallback planning that orders credentialed relay endpoints as
+    UDP, TCP, then TLS and exposes the current UDP datagram-supported subset
   - bounded TURN relay session orchestration that composes Allocate,
     CreatePermission, ChannelBind, relayed ICE candidate planning, ChannelData
     relay transport metadata, and deterministic maintenance execution over
@@ -555,6 +570,8 @@ The old binary WebRTC dependency path has been removed from the package model.
     and RTCP packets, demuxes inbound RTP/SRTCP datagrams, estimates inbound
     RTP rollover counters, and applies SRTP/SRTCP replay rejection at the
     transport boundary
+  - WebRTC datagram classifier/demultiplexer for STUN, DTLS, TURN ChannelData,
+    and RTP/SRTCP packet ranges on a shared datagram transport
   - nominated ICE-pair guarded construction for secure RTP/RTCP datagram
     transport
   - exporter-backed secure media session factory that validates the remote
@@ -583,11 +600,16 @@ The old binary WebRTC dependency path has been removed from the package model.
     local candidate gathering so supported `stun:` UDP endpoints add
     server-reflexive candidates that still map back to the same local socket
   - public default `Room` startup installs socket-backed subscriber/publisher
-    media startup configurations and per-peer OpenSSL DTLS-SRTP identities so
-    SDP fingerprints match the handshaker certificate
+    media-data startup configurations and per-peer OpenSSL DTLS-SRTP identities
+    so SDP fingerprints match the DTLS certificate used by the shared binder
   - OpenSSL-backed DTLS 1.2 `use_srtp` negotiation and exporter binding can
     complete default live secure RTP/RTCP transport when the remote peer
     completes the same DTLS-SRTP path
+  - shared OpenSSL DTLS application-data plus SRTP media/data session binder
+    over one selected ICE pair and demuxed datagram transport
+  - public default `Room` startup selects the shared media/data binder so the
+    live path can construct SRTP media and DTLS application-data packet
+    transport together
 - RTP basics:
   - RTP v2 header encode/decode
   - marker bit, payload type, sequence number, timestamp, SSRC, and payload
@@ -672,6 +694,13 @@ The old binary WebRTC dependency path has been removed from the package model.
     `DataPacket` decode plumbing
   - OpenSSL DTLS application-data read/write plus an SCTP data-channel packet
     envelope transport over the persistent DTLS record layer
+  - deterministic SCTP data-channel packet fragmentation and reassembly
+    envelopes for the DTLS application-data packet transport
+  - deterministic SCTP data-channel retransmission queue planning with
+    per-fragment acknowledgement and bounded retry attempts
+  - shared DTLS/SRTP demux session coverage that carries fragmented
+    data-channel packets and SRTP media on the same underlying datagram
+    transport
   - `RoomEvent.dataReceived` mapping from decoded data packets to remote
     participants
 - `LocalParticipant.publishDataTrack`, `unpublishDataTrack`, and
@@ -688,12 +717,8 @@ The old binary WebRTC dependency path has been removed from the package model.
 The following checks passed after the latest implementation pass:
 
 - `swift test`
-  - 419 tests passed
-  - 1 integration test skipped by opt-in guard
-- macOS `xcodebuild build`
-- iOS Simulator `xcodebuild build`
-- `xcodebuild docbuild`
-  - passes with warnings from the third-party SwiftProtobuf DocC content
+  - 428 tests passed
+  - 1 test skipped by opt-in guard
 - Release-mode benchmark smoke:
   - `swift run -c release LiveKitNativeBenchmarks`
   - official SDK/WebRTC baseline is intentionally external and not yet measured
@@ -701,7 +726,7 @@ The following checks passed after the latest implementation pass:
   - `scripts/check_release_readiness.sh` validates package shape, dependency
     guard, tests, benchmark smoke, and size gate in non-strict mode
   - `scripts/check_release_size.sh` passes with the current compressed
-    `LiveKitNativeBenchmarks` release binary at 2,648,163 bytes under the 5 MB
+    `LiveKitNativeBenchmarks` release binary at 2,696,869 bytes under the 5 MB
     proxy limit
   - `REQUIRE_PRODUCTION_READY=1 scripts/check_release_readiness.sh` is expected
     to fail until production blockers are removed
@@ -742,9 +767,10 @@ The following checks passed after the latest implementation pass:
 - Full TURN relay client behavior beyond the current Allocate, Refresh,
   CreatePermission, ChannelBind, ChannelData framing, abstract relay transport,
   deterministic maintenance scheduler/executor, relayed candidate planning,
-  bounded relay session orchestration, and deterministic setup-plan execution
-  primitives: default relay allocation and socket lifecycle integration,
-  UDP/TCP/TLS fallback, and ICE relay candidate integration.
+  fallback planning, bounded relay session orchestration, and deterministic
+  setup-plan execution primitives: default relay allocation and socket
+  lifecycle integration, TCP/TLS transport execution, and ICE relay candidate
+  integration.
 
 ### DTLS, SRTP, RTP, and RTCP
 
@@ -805,10 +831,12 @@ The following checks passed after the latest implementation pass:
 ### Data Channels
 
 - Standards-compliant DTLS-backed SCTP association beyond the current
-  deterministic DTLS data-channel packet envelope.
-- SCTP chunking, association state, congestion control, retransmission, and
-  reassembly.
-- Default live Room wiring for the DTLS data-channel transport.
+  deterministic DTLS data-channel packet envelope and fragmentation/reassembly
+  primitive plus shared DTLS/SRTP media-data demux.
+- SCTP association state and congestion control beyond the current
+  deterministic retransmission queue planning.
+- LiveKit-validated data-channel recovery over the default shared media/data
+  startup path.
 - Text streams, byte streams, and RPC APIs.
 
 ### Integration
@@ -835,11 +863,12 @@ The following checks passed after the latest implementation pass:
    default Room path against a local LiveKit server, then capture the result in
    an opt-in integration test and validate the OpenSSL packaging story for iOS
    release builds.
-2. Replace the current DTLS data-channel packet envelope with a
-   standards-compliant SCTP association, wire it into the default live Room
-   path, and add data-channel recovery.
+2. Replace the current DTLS data-channel packet envelope and deterministic
+   fragment/retry primitive with a standards-compliant SCTP association,
+   validate it through the default shared media/data Room path, and add
+   data-channel recovery.
 3. Add full LiveKit ICE restart signaling, media/data recovery after signal
-   reconnect, TURN UDP/TCP/TLS fallback, and automated local LiveKit
+   reconnect, TURN TCP/TLS execution, and automated local LiveKit
    integration tests beyond current local ICE credential restart plus signal
    `SyncState` state/SDP unit coverage.
 4. Add text streams, byte streams, RPC, and two-client data integration tests.

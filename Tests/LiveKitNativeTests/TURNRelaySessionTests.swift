@@ -187,6 +187,90 @@ final class TURNRelaySessionTests: XCTestCase {
         }
     }
 
+    func testTURNRelayFallbackPlanOrdersUDPThenTCPThenTLSAndSkipsMissingCredentials() {
+        let plan = TURNRelayFallbackPlan(
+            iceServers: [
+                ICEServer(
+                    urls: ["turns:tls.example.test"],
+                    username: "relay-user",
+                    credential: "relay-password"
+                ),
+                ICEServer(
+                    urls: ["turn:missing.example.test:3478?transport=udp"],
+                    username: "relay-user",
+                    credential: nil
+                ),
+                ICEServer(
+                    urls: ["turn:tcp.example.test:3478?transport=tcp"],
+                    username: "relay-user",
+                    credential: "relay-password"
+                ),
+                ICEServer(
+                    urls: ["turn:udp.example.test:3478?transport=udp"],
+                    username: "relay-user",
+                    credential: "relay-password"
+                ),
+            ],
+            realm: "turn.example.test",
+            nonce: "nonce-1"
+        )
+
+        XCTAssertEqual(plan.candidates.map(\.endpoint.host), [
+            "udp.example.test",
+            "tcp.example.test",
+            "tls.example.test",
+        ])
+        XCTAssertEqual(plan.candidates.map(\.connectionProtocol), [.udp, .tcp, .tls])
+        XCTAssertEqual(plan.candidates.map(\.credentials.username), [
+            "relay-user",
+            "relay-user",
+            "relay-user",
+        ])
+        XCTAssertEqual(plan.candidates.map(\.credentials.realm), [
+            "turn.example.test",
+            "turn.example.test",
+            "turn.example.test",
+        ])
+        XCTAssertEqual(plan.candidates.map(\.credentials.nonce), [
+            "nonce-1",
+            "nonce-1",
+            "nonce-1",
+        ])
+        XCTAssertEqual(plan.supportedDatagramCandidates.map(\.endpoint.host), ["udp.example.test"])
+    }
+
+    func testTURNRelayFallbackPlanPreservesServerOrderWithinConnectionProtocol() {
+        let plan = TURNRelayFallbackPlan(
+            iceServers: [
+                ICEServer(
+                    urls: [
+                        "turn:second-udp.example.test:3478?transport=udp",
+                        "turn:first-tcp.example.test:3478?transport=tcp",
+                    ],
+                    username: "relay-user",
+                    credential: "relay-password"
+                ),
+                ICEServer(
+                    urls: [
+                        "turn:first-udp.example.test:3478?transport=udp",
+                        "turn:second-tcp.example.test:3478?transport=tcp",
+                    ],
+                    username: "relay-user",
+                    credential: "relay-password"
+                ),
+            ],
+            realm: "turn.example.test",
+            nonce: "nonce-1"
+        )
+
+        XCTAssertEqual(plan.candidates.map(\.endpoint.host), [
+            "second-udp.example.test",
+            "first-udp.example.test",
+            "first-tcp.example.test",
+            "second-tcp.example.test",
+        ])
+    }
+
     func testSetupPlanCarriesConfigurationPeerChannelAndLifetimeDetails() throws {
         let endpoint = TURNServerEndpoint(
             host: "relay.example.test",

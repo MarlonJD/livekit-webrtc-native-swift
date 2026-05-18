@@ -10,6 +10,7 @@ struct RoomMediaStartupConfiguration: Sendable {
     var nominationPolicy: ICEPairNominationPolicy
     var checker: any ICEConnectivityChecking
     var binder: DTLSSRTPMediaSessionBinder
+    var mediaDataBinder: DTLSSRTPMediaDataSessionBinder?
     var consentFreshnessPolicy: ICEConsentFreshnessPolicy
     var consentFreshnessRetryPolicy: STUNBindingRetryPolicy
 
@@ -20,6 +21,7 @@ struct RoomMediaStartupConfiguration: Sendable {
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
         checker: any ICEConnectivityChecking = STUNICEConnectivityChecker(),
         binder: DTLSSRTPMediaSessionBinder,
+        mediaDataBinder: DTLSSRTPMediaDataSessionBinder? = nil,
         consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
         consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
     ) {
@@ -30,6 +32,7 @@ struct RoomMediaStartupConfiguration: Sendable {
             nominationPolicy: nominationPolicy,
             checker: checker,
             binder: binder,
+            mediaDataBinder: mediaDataBinder,
             consentFreshnessPolicy: consentFreshnessPolicy,
             consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
         )
@@ -42,6 +45,7 @@ struct RoomMediaStartupConfiguration: Sendable {
         nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
         checker: any ICEConnectivityChecking = STUNICEConnectivityChecker(),
         binder: DTLSSRTPMediaSessionBinder,
+        mediaDataBinder: DTLSSRTPMediaDataSessionBinder? = nil,
         consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
         consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
     ) {
@@ -51,6 +55,7 @@ struct RoomMediaStartupConfiguration: Sendable {
         self.nominationPolicy = nominationPolicy
         self.checker = checker
         self.binder = binder
+        self.mediaDataBinder = mediaDataBinder
         self.consentFreshnessPolicy = consentFreshnessPolicy
         self.consentFreshnessRetryPolicy = consentFreshnessRetryPolicy
     }
@@ -84,6 +89,7 @@ struct RoomMediaStartupConfiguration: Sendable {
                 ),
                 handshaker: handshaker
             ),
+            mediaDataBinder: nil,
             consentFreshnessPolicy: consentFreshnessPolicy,
             consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
         )
@@ -149,6 +155,56 @@ struct RoomMediaStartupConfiguration: Sendable {
                     candidateStore: candidateStore
                 ),
                 handshaker: handshaker
+            ),
+            mediaDataBinder: nil,
+            consentFreshnessPolicy: consentFreshnessPolicy,
+            consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
+        )
+    }
+
+    static func defaultLiveMediaData(
+        hostCandidateAddresses: @escaping @Sendable () -> [ICEInterfaceAddress] = {
+            ICEHostCandidateGatherer.localInterfaceAddresses()
+        },
+        bindAddress: String = "0.0.0.0",
+        receiveTimeoutMilliseconds: Int = 1_000,
+        iceRole: ICEAgentRole = .controlling,
+        tieBreaker: UInt64 = UInt64.random(in: 1 ... UInt64.max),
+        nominationPolicy: ICEPairNominationPolicy = .nominateFirstSuccessful,
+        identity: DTLSSRTPIdentity = .generated(),
+        receiveAttemptLimit: Int = 64,
+        maxDataChannelFragmentPayloadSize: Int? = nil,
+        consentFreshnessPolicy: ICEConsentFreshnessPolicy = .standard,
+        consentFreshnessRetryPolicy: STUNBindingRetryPolicy = .once
+    ) -> Self {
+        let candidateStore = LocalICEUDPSocketCandidateStore(candidates: [])
+        let candidateProvider = DefaultRoomMediaStartupLocalCandidateProvider(
+            candidateStore: candidateStore,
+            hostCandidateAddresses: hostCandidateAddresses,
+            bindAddress: bindAddress,
+            receiveTimeoutMilliseconds: receiveTimeoutMilliseconds
+        )
+        let datagramFactory = LocalICEUDPSocketMediaDatagramTransportFactory(
+            candidateStore: candidateStore
+        )
+
+        return Self(
+            localCandidatesProvider: { iceServers in
+                candidateProvider.localCandidates(iceServers: iceServers)
+            },
+            iceRole: iceRole,
+            tieBreaker: tieBreaker,
+            nominationPolicy: nominationPolicy,
+            checker: LocalICEUDPSocketConnectivityChecker(candidateStore: candidateStore),
+            binder: DTLSSRTPMediaSessionBinder(
+                datagramTransportFactory: datagramFactory,
+                handshaker: OpenSSLDTLSSRTPHandshaker(identity: identity)
+            ),
+            mediaDataBinder: DTLSSRTPMediaDataSessionBinder(
+                datagramTransportFactory: datagramFactory,
+                identity: identity,
+                receiveAttemptLimit: receiveAttemptLimit,
+                maxDataChannelFragmentPayloadSize: maxDataChannelFragmentPayloadSize
             ),
             consentFreshnessPolicy: consentFreshnessPolicy,
             consentFreshnessRetryPolicy: consentFreshnessRetryPolicy
@@ -224,7 +280,8 @@ public final class Room: @unchecked Sendable {
     private let publisherPeerConnection: PeerConnectionCoordinator
     private let subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration?
     private let publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration?
-    private let publisherDataChannel: LocalDataChannelPublisher?
+    private let publisherDataChannelIsInjected: Bool
+    private var publisherDataChannel: LocalDataChannelPublisher?
     private let subscriberMediaReceivePipeline = SubscriberMediaReceivePipeline()
     private let snapshots: RoomSnapshotStore
     private let signalLoopLock = NSLock()
@@ -547,11 +604,11 @@ public final class Room: @unchecked Sendable {
                     dtlsIdentity: publisherDTLSIdentity
                 )
             ),
-            subscriberMediaStartupConfiguration: .defaultLive(
-                handshaker: OpenSSLDTLSSRTPHandshaker(identity: subscriberDTLSIdentity)
+            subscriberMediaStartupConfiguration: .defaultLiveMediaData(
+                identity: subscriberDTLSIdentity
             ),
-            publisherMediaStartupConfiguration: .defaultLive(
-                handshaker: OpenSSLDTLSSRTPHandshaker(identity: publisherDTLSIdentity)
+            publisherMediaStartupConfiguration: .defaultLiveMediaData(
+                identity: publisherDTLSIdentity
             )
         )
     }
@@ -575,6 +632,7 @@ public final class Room: @unchecked Sendable {
         self.publisherPeerConnection = publisherPeerConnection
         self.subscriberMediaStartupConfiguration = subscriberMediaStartupConfiguration
         self.publisherMediaStartupConfiguration = publisherMediaStartupConfiguration
+        self.publisherDataChannelIsInjected = publisherDataChannel != nil
         self.publisherDataChannel = publisherDataChannel
 
         let localParticipant = LocalParticipant(identity: "local")
@@ -1963,7 +2021,8 @@ public final class Room: @unchecked Sendable {
                     tieBreaker: subscriberMediaStartupConfiguration.tieBreaker,
                     nominationPolicy: subscriberMediaStartupConfiguration.nominationPolicy,
                     checker: subscriberMediaStartupConfiguration.checker,
-                    binder: subscriberMediaStartupConfiguration.binder
+                    binder: subscriberMediaStartupConfiguration.binder,
+                    mediaDataBinder: subscriberMediaStartupConfiguration.mediaDataBinder
                 )
                 self?.storeSubscriberMediaStartupResult(result)
                 LiveKitNativeLogging.log(.info, "Subscriber media transport started.")
@@ -2017,7 +2076,8 @@ public final class Room: @unchecked Sendable {
                     tieBreaker: publisherMediaStartupConfiguration.tieBreaker,
                     nominationPolicy: publisherMediaStartupConfiguration.nominationPolicy,
                     checker: publisherMediaStartupConfiguration.checker,
-                    binder: publisherMediaStartupConfiguration.binder
+                    binder: publisherMediaStartupConfiguration.binder,
+                    mediaDataBinder: publisherMediaStartupConfiguration.mediaDataBinder
                 )
                 self?.storePublisherMediaStartupResult(result)
                 LiveKitNativeLogging.log(.info, "Publisher media transport started.")
@@ -2037,6 +2097,7 @@ public final class Room: @unchecked Sendable {
             publisherMediaStartupResult = result
             publisherMediaStartupError = nil
         }
+        installPublisherDataChannelIfAvailable(from: result)
         startPublisherICEConsentFreshnessLoopIfReady(result: result)
         startPublisherRTCPReceiveLoopIfReady()
         startPublisherLocalMediaPipelinesIfReady()
@@ -2061,6 +2122,17 @@ public final class Room: @unchecked Sendable {
         subscriberMediaStartupLock.withLock {
             subscriberMediaStartupError = error
         }
+    }
+
+    private func installPublisherDataChannelIfAvailable(from result: PeerConnectionMediaStartupResult) {
+        guard !publisherDataChannelIsInjected,
+              publisherDataChannel == nil,
+              let dataChannelTransport = result.dataChannelTransport else {
+            return
+        }
+
+        publisherDataChannel = LocalDataChannelPublisher(transport: dataChannelTransport)
+        startDataChannelReceiveLoopIfReady()
     }
 
     @discardableResult
@@ -2109,6 +2181,10 @@ public final class Room: @unchecked Sendable {
         cleared.0?.cancel()
         cleared.2?.cancel()
         cleared.3?.cancel()
+        if !publisherDataChannelIsInjected {
+            stopDataChannelReceiveLoop()
+            publisherDataChannel = nil
+        }
         return cleared.1
     }
 
@@ -2472,7 +2548,7 @@ public final class Room: @unchecked Sendable {
     }
 
     private func closeMediaStartupTransport(_ result: PeerConnectionMediaStartupResult?) async {
-        await result?.transport.close()
+        await result?.close()
     }
 
     private func closeMediaStartupTransportDetached(_ result: PeerConnectionMediaStartupResult?) {
@@ -2481,7 +2557,7 @@ public final class Room: @unchecked Sendable {
         }
 
         Task {
-            await result.transport.close()
+            await result.close()
         }
     }
 

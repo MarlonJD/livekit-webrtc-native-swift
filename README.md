@@ -171,7 +171,8 @@ configuration mapping onto subscriber and publisher peer connections, STUN UDP
 server-reflexive candidate discovery from supported `stun:` ICE server URLs
 for bound-socket startup, default public `Room` subscriber/publisher media
 startup configurations that gather and trickle socket-backed local ICE
-candidates, deterministic ICE consent freshness planning, injectable executor
+candidates and use the shared DTLS/SRTP media-data binder, deterministic ICE
+consent freshness planning, injectable executor
 primitive, and Room-level consent loop for selected pairs after secure-media
 startup succeeds, bounded RTP
 jitter buffering with gap skip, duplicate/old packet drops, missing-sequence
@@ -190,9 +191,9 @@ flows, TURN ChannelData frame encode/decode and stream parsing with 4-byte
 padding, TURN ChannelData relay send/receive over an abstract media datagram
 transport, deterministic TURN allocation/permission refresh planning,
 maintenance execution, due action scheduling, relay ICE candidate planning, and
-TURN relay session configuration selection from parsed ICE server endpoints,
-plus bounded TURN relay session orchestration and deterministic setup-plan
-execution over abstract transports, peer
+TURN relay session configuration selection plus UDP/TCP/TLS fallback planning
+from parsed ICE server endpoints, plus bounded TURN relay session orchestration
+and deterministic setup-plan execution over abstract transports, peer
 negotiation state reset across
 fresh join/reconnect/disconnect boundaries, RTCP
 sender/receiver report and bounded PLI/NACK subscriber feedback planning,
@@ -224,7 +225,13 @@ request/response signaling, data subscription update signaling, queued local
 data publish flushing through an injected SCTP packet transport after
 reliable/lossy DCEP acknowledgement, inbound remote DCEP acknowledgement,
 inbound `DataPacket` decode to `RoomEvent.dataReceived`, and OpenSSL DTLS
-application-data packet transport coverage.
+application-data packet transport coverage with deterministic packet
+fragmentation/reassembly and retransmission queue planning primitives. A
+shared WebRTC DTLS/SRTP datagram demux and media/data session binder can now
+keep the persistent OpenSSL DTLS application-data transport and SRTP media
+transport on the same selected ICE datagram path in unit tests, and the public
+default `Room` initializer now selects that shared startup binder for live
+media/data transport construction.
 Media section requirements and data-track subscriber handles are retained as
 latest-value Room state and emitted as typed room events.
 
@@ -304,8 +311,10 @@ for reconnect state, injected publisher transport teardown, consent-freshness
 execution primitives plus the media-startup consent loop, RTP jitter-buffer
 primitives, default socket-backed Room ICE trickle startup, queued data publish
 flush after data-channel DCEP ack, inbound data-channel event plumbing, DTLS
-application-data packet transport, VideoToolbox H.264 encode smoke coverage,
-AudioToolbox Opus encode/decode smoke coverage, subscriber RTP
+application-data packet transport, data-channel fragment/reassembly and retry
+planning, shared DTLS/SRTP media-data demux coverage, VideoToolbox H.264 encode
+smoke coverage, AudioToolbox Opus
+encode/decode smoke coverage, subscriber RTP
 jitter-buffer/feedback behavior, and matching `RequestResponse` failure
 mapping are unit-tested, while LiveKit E2E media validation, decoded subscriber
 render/playout, standards-compliant live SCTP association behavior, media
@@ -325,18 +334,18 @@ SRTP/SRTCP packet protect/unprotect paths, DTLS-SRTP exporter splitting and
 session-protection context, RTCP feedback, H.264, VP8, Opus RTP scaffolding,
 and SCTP data-channel message paths. On this machine, the latest
 release-readiness smoke medians include protobuf signal roundtrip at
-`6.548 us/op`, subscriber SDP answer generation at `107.148 us/op`, STUN
-binding roundtrip at `1.893 us/op`, RTP encode/decode at `0.609 us/op`, SRTP
-replay protection at `0.049 us/op`, SRTP authenticated roundtrip at
-`8.873 us/op`, SRTP AES-CM payload roundtrip at `69.165 us/op`, full SRTP
-packet protect/unprotect at `79.796 us/op`, RTCP feedback roundtrip at
-`1.941 us/op`, SRTCP packet/replay roundtrip at `0.866 us/op`, SRTCP
-authenticated roundtrip at `7.645 us/op`, full SRTCP packet protect/unprotect
-at `10.131 us/op`, DTLS-SRTP exporter split at `0.335 us/op`, DTLS-SRTP session
-protect/unprotect at `89.203 us/op`, H.264 packetize/depacketize at
-`2.657 us/op`, VP8 payload depacketize at `0.167 us/op`, Opus RTP
-packetize/depacketize at `0.028 us/op`, and SCTP DCEP open/ack roundtrip at
-`0.905 us/op`.
+`7.924 us/op`, subscriber SDP answer generation at `103.106 us/op`, STUN
+binding roundtrip at `1.833 us/op`, RTP encode/decode at `0.586 us/op`, SRTP
+replay protection at `0.047 us/op`, SRTP authenticated roundtrip at
+`8.339 us/op`, SRTP AES-CM payload roundtrip at `61.417 us/op`, full SRTP
+packet protect/unprotect at `69.690 us/op`, RTCP feedback roundtrip at
+`1.710 us/op`, SRTCP packet/replay roundtrip at `0.785 us/op`, SRTCP
+authenticated roundtrip at `6.868 us/op`, full SRTCP packet protect/unprotect
+at `9.281 us/op`, DTLS-SRTP exporter split at `0.322 us/op`, DTLS-SRTP session
+protect/unprotect at `80.011 us/op`, H.264 packetize/depacketize at
+`2.466 us/op`, VP8 payload depacketize at `0.149 us/op`, Opus RTP
+packetize/depacketize at `0.026 us/op`, and SCTP DCEP open/ack roundtrip at
+`0.809 us/op`.
 
 Official LiveKit Swift SDK/WebRTC baseline numbers are accepted as an external
 CSV so this package does not reintroduce the forbidden binary WebRTC dependency.

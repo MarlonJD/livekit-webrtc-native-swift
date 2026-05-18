@@ -89,4 +89,87 @@ final class SCTPDataChannelTests: XCTestCase {
             XCTAssertEqual(error as? SCTPDataChannelError, .truncatedPacketEnvelope)
         }
     }
+
+    func testFragmenterSplitsAndReassemblesDataChannelPacket() throws {
+        let packet = SCTPDataChannelPacket(
+            streamID: 4,
+            ppid: .binary,
+            payload: Data(0..<10)
+        )
+        var fragmenter = SCTPDataChannelFragmenter(maxFragmentPayloadSize: 4, firstMessageID: 42)
+        let fragments = try fragmenter.fragment(packet)
+
+        XCTAssertEqual(fragments.map(\.messageID), [42, 42, 42])
+        XCTAssertEqual(fragments.map(\.fragmentIndex), [0, 1, 2])
+        XCTAssertEqual(fragments.map(\.fragmentCount), [3, 3, 3])
+        XCTAssertEqual(fragments.map(\.payload), [
+            Data([0, 1, 2, 3]),
+            Data([4, 5, 6, 7]),
+            Data([8, 9]),
+        ])
+
+        var reassembler = SCTPDataChannelReassembler()
+        XCTAssertNil(try reassembler.append(fragments[1]))
+        XCTAssertNil(try reassembler.append(fragments[0]))
+        let reassembled = try reassembler.append(fragments[2])
+
+        XCTAssertEqual(reassembled, packet)
+        XCTAssertEqual(reassembler.pendingMessageCount, 0)
+    }
+
+    func testFragmentEnvelopeRejectsDuplicateFragments() throws {
+        let packet = SCTPDataChannelPacket(
+            streamID: 4,
+            ppid: .binary,
+            payload: Data([1, 2, 3, 4])
+        )
+        var fragmenter = SCTPDataChannelFragmenter(maxFragmentPayloadSize: 2, firstMessageID: 7)
+        let fragments = try fragmenter.fragment(packet)
+        var reassembler = SCTPDataChannelReassembler()
+
+        XCTAssertNil(try reassembler.append(fragments[0]))
+        XCTAssertThrowsError(try reassembler.append(fragments[0])) { error in
+            XCTAssertEqual(
+                error as? SCTPDataChannelError,
+                .duplicateFragment(messageID: 7, fragmentIndex: 0)
+            )
+        }
+    }
+
+    func testRetransmissionQueueSchedulesDueFragmentsAndDropsAcknowledgedOnes() throws {
+        let packet = SCTPDataChannelPacket(
+            streamID: 4,
+            ppid: .binary,
+            payload: Data(0..<6)
+        )
+        var fragmenter = SCTPDataChannelFragmenter(maxFragmentPayloadSize: 3, firstMessageID: 9)
+        let fragments = try fragmenter.fragment(packet)
+        let policy = SCTPDataChannelRetransmissionPolicy(
+            initialDelaySeconds: 0.25,
+            maxAttempts: 2
+        )
+        var queue = SCTPDataChannelRetransmissionQueue()
+
+        queue.enqueue(fragments, at: 10)
+        queue.markAcknowledged(messageID: 9, fragmentIndex: 0)
+
+        let firstDue = try queue.dueFragments(at: 10, policy: policy)
+        XCTAssertEqual(firstDue.map(\.envelope.fragmentIndex), [1])
+        XCTAssertEqual(firstDue.map(\.attempt), [1])
+        XCTAssertEqual(firstDue.map(\.nextTransmitAt), [10.25])
+
+        XCTAssertEqual(try queue.dueFragments(at: 10.24, policy: policy), [])
+
+        let secondDue = try queue.dueFragments(at: 10.25, policy: policy)
+        XCTAssertEqual(secondDue.map(\.envelope.fragmentIndex), [1])
+        XCTAssertEqual(secondDue.map(\.attempt), [2])
+        XCTAssertEqual(secondDue.map(\.nextTransmitAt), [10.75])
+
+        XCTAssertThrowsError(try queue.dueFragments(at: 10.75, policy: policy)) { error in
+            XCTAssertEqual(
+                error as? SCTPDataChannelError,
+                .retransmissionAttemptsExhausted(messageID: 9, fragmentIndex: 1)
+            )
+        }
+    }
 }

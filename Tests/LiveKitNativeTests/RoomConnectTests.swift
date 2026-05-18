@@ -1086,6 +1086,16 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(candidateInit.usernameFragment, subscriberPeerConnection.configuration.iceCredentials.usernameFragment)
     }
 
+    func testDefaultLiveMediaDataStartupConfigurationInstallsSharedBinder() {
+        let configuration = RoomPublisherMediaStartupConfiguration.defaultLiveMediaData(
+            hostCandidateAddresses: { [] },
+            identity: DTLSSRTPIdentity.generated(),
+            consentFreshnessPolicy: .disabled
+        )
+
+        XCTAssertNotNil(configuration.mediaDataBinder)
+    }
+
     func testDefaultLiveSubscriberMediaStartupFailsAtUnavailableDTLSSRTPBoundaryAfterSelectedICEPair() async throws {
         let stunResponder = try RoomSTUNResponderSocket()
         stunResponder.start()

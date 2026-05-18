@@ -38,6 +38,88 @@ package protocol MediaDatagramTransportFactory: Sendable {
     func makeTransport(selectedCandidatePair: ICECandidatePair) throws -> any MediaDatagramTransport
 }
 
+package enum WebRTCDatagramKind: Hashable, Sendable {
+    case stun
+    case dtls
+    case turnChannelData
+    case media
+    case unknown
+}
+
+package enum WebRTCDatagramClassifier {
+    package static func classify(_ datagram: Data) -> WebRTCDatagramKind {
+        guard let firstByte = datagram.first else {
+            return .unknown
+        }
+
+        switch firstByte {
+        case 0 ... 3:
+            return .stun
+        case 20 ... 63:
+            return .dtls
+        case 64 ... 79:
+            return .turnChannelData
+        case 128 ... 191:
+            return .media
+        default:
+            return .unknown
+        }
+    }
+}
+
+package actor WebRTCDatagramDemultiplexer {
+    private let transport: any MediaDatagramTransport
+    private var pendingDatagrams: [WebRTCDatagramKind: [Data]]
+
+    package init(transport: any MediaDatagramTransport) {
+        self.transport = transport
+        self.pendingDatagrams = [:]
+    }
+
+    package func send(_ datagram: Data) async throws {
+        try await transport.send(datagram)
+    }
+
+    package func receive(kind: WebRTCDatagramKind) async throws -> Data {
+        if var pending = pendingDatagrams[kind], !pending.isEmpty {
+            let datagram = pending.removeFirst()
+            pendingDatagrams[kind] = pending
+            return datagram
+        }
+
+        while true {
+            let datagram = try await transport.receive()
+            let datagramKind = WebRTCDatagramClassifier.classify(datagram)
+            guard datagramKind != kind else {
+                return datagram
+            }
+
+            pendingDatagrams[datagramKind, default: []].append(datagram)
+        }
+    }
+}
+
+package struct WebRTCDemultiplexedDatagramTransport: MediaDatagramTransport {
+    package var demultiplexer: WebRTCDatagramDemultiplexer
+    package var receiveKind: WebRTCDatagramKind
+
+    package init(
+        demultiplexer: WebRTCDatagramDemultiplexer,
+        receiveKind: WebRTCDatagramKind
+    ) {
+        self.demultiplexer = demultiplexer
+        self.receiveKind = receiveKind
+    }
+
+    package func send(_ datagram: Data) async throws {
+        try await demultiplexer.send(datagram)
+    }
+
+    package func receive() async throws -> Data {
+        try await demultiplexer.receive(kind: receiveKind)
+    }
+}
+
 package protocol DTLSSRTPHandshaking: Sendable {
     func performHandshake(
         configuration: DTLSSRTPHandshakeConfiguration,
@@ -908,6 +990,115 @@ package struct DTLSSRTPMediaSessionBinder: Sendable {
             handshakeResult: handshakeResult,
             expectedRemoteFingerprint: handshakeConfiguration.remoteFingerprint,
             datagramTransport: datagramTransport
+        )
+    }
+
+    private func validateHandshakeResult(
+        _ result: DTLSSRTPHandshakeResult,
+        matches configuration: DTLSSRTPHandshakeConfiguration
+    ) throws {
+        guard result.role == configuration.role else {
+            throw SecureMediaTransportError.handshakeRoleMismatch(
+                expected: configuration.role,
+                actual: result.role
+            )
+        }
+
+        guard configuration.useSRTExtension.protectionProfiles.contains(result.protectionProfile) else {
+            throw SecureMediaTransportError.unofferedHandshakeProtectionProfile(
+                result.protectionProfile
+            )
+        }
+    }
+}
+
+package struct DTLSSRTPMediaDataSession: Sendable {
+    package var mediaTransport: DTLSSRTPMediaTransport
+    package var dataChannelTransport: DTLSSCTPDataChannelPacketTransport
+    package var applicationDataTransport: OpenSSLDTLSApplicationDataTransport
+    package var handshakeResult: DTLSSRTPHandshakeResult
+
+    package init(
+        mediaTransport: DTLSSRTPMediaTransport,
+        dataChannelTransport: DTLSSCTPDataChannelPacketTransport,
+        applicationDataTransport: OpenSSLDTLSApplicationDataTransport,
+        handshakeResult: DTLSSRTPHandshakeResult
+    ) {
+        self.mediaTransport = mediaTransport
+        self.dataChannelTransport = dataChannelTransport
+        self.applicationDataTransport = applicationDataTransport
+        self.handshakeResult = handshakeResult
+    }
+
+    package func close() async {
+        await mediaTransport.close()
+        await applicationDataTransport.close()
+    }
+}
+
+package struct DTLSSRTPMediaDataSessionBinder: Sendable {
+    package var datagramTransportFactory: any MediaDatagramTransportFactory
+    package var identity: DTLSSRTPIdentity
+    package var receiveAttemptLimit: Int
+    package var maxDataChannelFragmentPayloadSize: Int?
+
+    package init(
+        datagramTransportFactory: any MediaDatagramTransportFactory = UDPMediaDatagramTransportFactory(),
+        identity: DTLSSRTPIdentity = .generated(),
+        receiveAttemptLimit: Int = 64,
+        maxDataChannelFragmentPayloadSize: Int? = nil
+    ) {
+        self.datagramTransportFactory = datagramTransportFactory
+        self.identity = identity
+        self.receiveAttemptLimit = max(1, receiveAttemptLimit)
+        self.maxDataChannelFragmentPayloadSize = maxDataChannelFragmentPayloadSize
+    }
+
+    package func makeSession(
+        selectedCandidatePair: ICECandidatePair,
+        handshakeConfiguration: DTLSSRTPHandshakeConfiguration
+    ) async throws -> DTLSSRTPMediaDataSession {
+        try UDPMediaDatagramTransport.validateCandidatePair(selectedCandidatePair)
+        let datagramTransport = try datagramTransportFactory.makeTransport(
+            selectedCandidatePair: selectedCandidatePair
+        )
+        let demultiplexer = WebRTCDatagramDemultiplexer(transport: datagramTransport)
+        let dtlsDatagramTransport = WebRTCDemultiplexedDatagramTransport(
+            demultiplexer: demultiplexer,
+            receiveKind: .dtls
+        )
+        let mediaDatagramTransport = WebRTCDemultiplexedDatagramTransport(
+            demultiplexer: demultiplexer,
+            receiveKind: .media
+        )
+        let applicationDataTransport = try OpenSSLDTLSApplicationDataTransport(
+            identity: identity,
+            role: handshakeConfiguration.role,
+            transport: dtlsDatagramTransport,
+            profiles: handshakeConfiguration.useSRTExtension.protectionProfiles
+        )
+        let handshakeResult = try await applicationDataTransport.performHandshake(
+            role: handshakeConfiguration.role,
+            expectedRemoteFingerprint: handshakeConfiguration.remoteFingerprint,
+            receiveAttemptLimit: receiveAttemptLimit
+        )
+        try validateHandshakeResult(handshakeResult, matches: handshakeConfiguration)
+        let mediaTransport = try DTLSSRTPMediaSessionFactory().makeMediaTransport(
+            selectedCandidatePair: selectedCandidatePair,
+            handshakeResult: handshakeResult,
+            expectedRemoteFingerprint: handshakeConfiguration.remoteFingerprint,
+            datagramTransport: mediaDatagramTransport
+        )
+        let dataChannelTransport = DTLSSCTPDataChannelPacketTransport(
+            dtlsTransport: applicationDataTransport,
+            maxFragmentPayloadSize: maxDataChannelFragmentPayloadSize
+        )
+
+        return DTLSSRTPMediaDataSession(
+            mediaTransport: mediaTransport,
+            dataChannelTransport: dataChannelTransport,
+            applicationDataTransport: applicationDataTransport,
+            handshakeResult: handshakeResult
         )
     }
 
