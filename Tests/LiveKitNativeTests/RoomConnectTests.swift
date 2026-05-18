@@ -4593,6 +4593,71 @@ final class RoomConnectTests: XCTestCase {
         XCTAssertEqual(dataTransport.sentPackets.last?.ppid, .dataChannelControl)
     }
 
+    func testInjectedSubscriberDataChannelReceiveLoopEmitsDataReceivedEvent() async throws {
+        let frames = try [
+            makeJoinResponse(),
+        ].map { SignalTransportFrame.binary(try SignalFrameCodec().encode($0)) }
+
+        let signalTransport = MockSignalTransport(incomingFrames: frames)
+        let dataTransport = ScriptedSCTPDataChannelPacketTransceiver()
+        let subscriberDataChannel = LocalDataChannelPublisher(transport: dataTransport)
+        let room = Room(
+            signalConnection: SignalConnection(transport: signalTransport),
+            subscriberDataChannel: subscriberDataChannel
+        )
+        let eventRecorder = RoomEventRecorder()
+        room.delegate = eventRecorder
+
+        try await room.connect(url: URL(string: "wss://example.test")!, token: "token")
+        XCTAssertTrue(room.isDataChannelReceiveLoopActive)
+
+        let reliableStreamID = await subscriberDataChannel.streamID(for: .reliable)
+        dataTransport.enqueueIncomingPacket(
+            SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.open(
+                    SCTPDataChannelOpenMessage(reliability: .reliable, label: LiveKitSCTPDataChannelLabel.reliable)
+                ).encoded()
+            )
+        )
+
+        let sentPackets = await dataTransport.waitForSentPacketCount(1)
+        XCTAssertEqual(
+            sentPackets.first,
+            SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .dataChannelControl,
+                payload: SCTPDataChannelControlMessage.acknowledgement.encoded()
+            )
+        )
+
+        let packet = LiveKitDataPacketMapper.makeUserPacket(
+            data: Data("from-remote".utf8),
+            options: DataPublishOptions(reliable: true, topic: "chat"),
+            participantSid: "PA_alice",
+            participantIdentity: "alice"
+        )
+        dataTransport.enqueueIncomingPacket(
+            SCTPDataChannelPacket(
+                streamID: reliableStreamID,
+                ppid: .binary,
+                payload: try packet.serializedData()
+            )
+        )
+
+        let events = await eventRecorder.waitForEventCount(5)
+        guard case let .dataReceived(payload, participant, topic) = events.last else {
+            return XCTFail("Expected dataReceived event.")
+        }
+        XCTAssertEqual(payload, Data("from-remote".utf8))
+        XCTAssertEqual(participant?.identity, "alice")
+        XCTAssertEqual(topic, "chat")
+
+        await room.disconnect()
+        XCTAssertFalse(room.isDataChannelReceiveLoopActive)
+    }
+
     func testUpdateDataSubscriptionSendsSignalRequest() async throws {
         let frames = try [
             makeJoinResponse(),

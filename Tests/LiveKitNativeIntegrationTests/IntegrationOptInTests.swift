@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 @testable import LiveKitNative
+@testable import LiveKitNativeWebRTC
 
 final class IntegrationOptInTests: XCTestCase {
     func testIntegrationSuiteIsOptIn() throws {
@@ -160,6 +161,69 @@ final class IntegrationOptInTests: XCTestCase {
             throw error
         }
     }
+
+    func testTwoLiveKitClientsPublishAndReceiveDataPacketOverStandardsSCTP() async throws {
+        guard ProcessInfo.processInfo.environment["LIVEKIT_NATIVE_RUN_DATA_TRACK_INTEGRATION"] == "1" else {
+            throw XCTSkip(
+                "Live data-packet publish/receive requires standards-shaped DTLS-backed SCTP validation, " +
+                "which remains a separate production-readiness blocker."
+            )
+        }
+
+        let harness = try LiveKitIntegrationHarness.load()
+        let roomName = harness.roomName(suffix: "data-packet")
+        let subscriberIdentity = "swift-native-data-packet-sub"
+        let publisherIdentity = "swift-native-data-packet-pub"
+        let subscriberRoom = liveIntegrationMediaDataRoom()
+        let publisherRoom = liveIntegrationMediaDataRoom()
+        let subscriberEvents = LiveKitIntegrationEventRecorder()
+        subscriberRoom.delegate = subscriberEvents
+
+        do {
+            try await harness.connect(subscriberRoom, identity: subscriberIdentity, roomName: roomName)
+            try await harness.connect(publisherRoom, identity: publisherIdentity, roomName: roomName)
+            _ = try await subscriberEvents.waitForParticipantConnected(identity: publisherIdentity)
+
+            let videoTrack = LocalVideoTrack(name: "camera")
+            let videoPublication = try await withLiveKitIntegrationTimeout(seconds: 20) {
+                try await publisherRoom.localParticipant.publish(videoTrack: videoTrack)
+            }
+            _ = try await subscriberEvents.waitForTrackSubscribedOrRemoteVideoPublication(
+                publisherIdentity: publisherIdentity,
+                trackSID: videoPublication.sid,
+                timeoutSeconds: 20
+            )
+            try await subscriberRoom.updateSubscription(trackSIDs: [videoPublication.sid], subscribe: true)
+
+            _ = try await harness.waitForPublisherMediaStartup(publisherRoom, timeoutSeconds: 30)
+            _ = try await harness.waitForSubscriberMediaStartup(subscriberRoom, timeoutSeconds: 30)
+
+            let payload = Data("standards-sctp-ping".utf8)
+            try await withLiveKitIntegrationTimeout(seconds: 10) {
+                try await publisherRoom.localParticipant.publish(
+                    data: payload,
+                    options: DataPublishOptions(reliable: true, topic: "chat")
+                )
+            }
+
+            let received = try await subscriberEvents.waitForDataReceived(
+                payload: payload,
+                topic: "chat",
+                participantIdentity: publisherIdentity,
+                timeoutSeconds: 20
+            )
+            XCTAssertEqual(received.0, payload)
+            XCTAssertEqual(received.1?.identity, publisherIdentity)
+            XCTAssertEqual(received.2, "chat")
+
+            await publisherRoom.disconnect()
+            await subscriberRoom.disconnect()
+        } catch {
+            await publisherRoom.disconnect()
+            await subscriberRoom.disconnect()
+            throw error
+        }
+    }
 }
 
 private func liveIntegrationRoomOptions() -> RoomOptions {
@@ -176,4 +240,45 @@ private func liveIntegrationSignalingRoom() -> Room {
         options: liveIntegrationRoomOptions(),
         signalConnection: SignalConnection()
     )
+}
+
+private func liveIntegrationMediaDataRoom() -> Room {
+    let subscriberIdentity = DTLSSRTPIdentity.generated()
+    let publisherIdentity = DTLSSRTPIdentity.generated()
+    let subscriberPeerConnection = PeerConnectionCoordinator(
+        configuration: NativeWebRTCConfiguration(
+            role: .subscriber,
+            dtlsIdentity: subscriberIdentity
+        )
+    )
+    let publisherPeerConnection = PeerConnectionCoordinator(
+        configuration: NativeWebRTCConfiguration(
+            role: .publisher,
+            dtlsIdentity: publisherIdentity
+        )
+    )
+    return Room(
+        options: liveIntegrationRoomOptions(),
+        signalConnection: SignalConnection(),
+        subscriberPeerConnection: subscriberPeerConnection,
+        publisherPeerConnection: publisherPeerConnection,
+        subscriberMediaStartupConfiguration: .defaultLiveMediaData(
+            localCredentials: {
+                subscriberPeerConnection.configuration.iceCredentials
+            },
+            identity: subscriberIdentity,
+            dataChannelTransportMode: liveIntegrationStandardsSCTPMode()
+        ),
+        publisherMediaStartupConfiguration: .defaultLiveMediaData(
+            localCredentials: {
+                publisherPeerConnection.configuration.iceCredentials
+            },
+            identity: publisherIdentity,
+            dataChannelTransportMode: liveIntegrationStandardsSCTPMode()
+        )
+    )
+}
+
+private func liveIntegrationStandardsSCTPMode() -> DTLSSCTPDataChannelTransportMode {
+    .association(SCTPAssociationConfiguration(maxDataChunkPayloadSize: 1_200))
 }

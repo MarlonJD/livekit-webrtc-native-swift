@@ -322,7 +322,9 @@ public final class Room: @unchecked Sendable {
     private let subscriberRTCPReceiverReportPolicy: RTCPReceiverReportSchedulePolicy
     private let audioSessionController: any AudioSessionControlling
     private let publisherDataChannelIsInjected: Bool
+    private let subscriberDataChannelIsInjected: Bool
     private var publisherDataChannel: LocalDataChannelPublisher?
+    private var subscriberDataChannel: LocalDataChannelPublisher?
     private let publisherRTCPBandwidthEstimates = RTCPBandwidthEstimateStore()
     private let subscriberRTCPBandwidthEstimates = RTCPBandwidthEstimateStore()
     private let subscriberMediaReceivePipeline: SubscriberMediaReceivePipeline
@@ -376,6 +378,8 @@ public final class Room: @unchecked Sendable {
     private var lastSubscriberAdaptiveTrackSettingsPlan: AdaptiveTrackSettingsPlan?
     private var dataChannelReceiveTask: Task<Void, Never>?
     private var dataChannelReceiveLoopID: UInt64 = 0
+    private var subscriberDataChannelReceiveTask: Task<Void, Never>?
+    private var subscriberDataChannelReceiveLoopID: UInt64 = 0
     private var audioSessionActivated = false
     private var reconnectSubscribedTrackSIDs: Set<String> = []
     private var reconnectDisabledTrackSIDs: Set<String> = []
@@ -516,7 +520,7 @@ public final class Room: @unchecked Sendable {
 
     var isDataChannelReceiveLoopActive: Bool {
         dataChannelReceiveLoopLock.withLock {
-            dataChannelReceiveTask != nil
+            dataChannelReceiveTask != nil || subscriberDataChannelReceiveTask != nil
         }
     }
 
@@ -723,6 +727,7 @@ public final class Room: @unchecked Sendable {
         subscriberMediaStartupConfiguration: RoomSubscriberMediaStartupConfiguration? = nil,
         publisherMediaStartupConfiguration: RoomPublisherMediaStartupConfiguration? = nil,
         publisherDataChannel: LocalDataChannelPublisher? = nil,
+        subscriberDataChannel: LocalDataChannelPublisher? = nil,
         subscriberRTCPReceiverReportPolicy: RTCPReceiverReportSchedulePolicy = .standard,
         audioSessionController: any AudioSessionControlling = AudioSessionController()
     ) {
@@ -735,7 +740,9 @@ public final class Room: @unchecked Sendable {
         self.subscriberRTCPReceiverReportPolicy = subscriberRTCPReceiverReportPolicy
         self.audioSessionController = audioSessionController
         self.publisherDataChannelIsInjected = publisherDataChannel != nil
+        self.subscriberDataChannelIsInjected = subscriberDataChannel != nil
         self.publisherDataChannel = publisherDataChannel
+        self.subscriberDataChannel = subscriberDataChannel
         self.subscriberMediaReceivePipeline = SubscriberMediaReceivePipeline(
             videoDecodeEnabled: options.automaticallyDecodeSubscriberVideo,
             audioPlayoutPipeline: options.automaticallyPlaySubscriberAudio ? OpusAudioPlayoutPipeline() : nil
@@ -1104,6 +1111,7 @@ public final class Room: @unchecked Sendable {
         configureLocalParticipant(result.0.localParticipant)
         emit(.connectionStateChanged(.connected))
         startDataChannelReceiveLoopIfReady()
+        startSubscriberDataChannelReceiveLoopIfReady()
 
         for event in result.1 {
             emit(event)
@@ -1184,18 +1192,68 @@ public final class Room: @unchecked Sendable {
             let loopID = dataChannelReceiveLoopID
             dataChannelReceiveTask = Task { [weak self, publisherDataChannel] in
                 await self?.runDataChannelReceiveLoop(
-                    publisherDataChannel: publisherDataChannel,
-                    loopID: loopID
+                    dataChannel: publisherDataChannel,
+                    loopID: loopID,
+                    receivePath: "publisher"
+                )
+            }
+        }
+    }
+
+    private func startSubscriberDataChannelReceiveLoopIfReady() {
+        guard let subscriberDataChannel else {
+            return
+        }
+        guard subscriberDataChannel.canReceivePackets else {
+            return
+        }
+
+        dataChannelReceiveLoopLock.withLock {
+            guard subscriberDataChannelReceiveTask == nil else {
+                return
+            }
+
+            subscriberDataChannelReceiveLoopID &+= 1
+            let loopID = subscriberDataChannelReceiveLoopID
+            subscriberDataChannelReceiveTask = Task { [weak self, subscriberDataChannel] in
+                await self?.runDataChannelReceiveLoop(
+                    dataChannel: subscriberDataChannel,
+                    loopID: loopID,
+                    receivePath: "subscriber"
                 )
             }
         }
     }
 
     private func stopDataChannelReceiveLoop() {
+        let tasks = dataChannelReceiveLoopLock.withLock {
+            let publisherTask = dataChannelReceiveTask
+            let subscriberTask = subscriberDataChannelReceiveTask
+            dataChannelReceiveTask = nil
+            subscriberDataChannelReceiveTask = nil
+            dataChannelReceiveLoopID &+= 1
+            subscriberDataChannelReceiveLoopID &+= 1
+            return (publisherTask, subscriberTask)
+        }
+        tasks.0?.cancel()
+        tasks.1?.cancel()
+    }
+
+    private func stopPublisherDataChannelReceiveLoop() {
         let task = dataChannelReceiveLoopLock.withLock {
             let task = dataChannelReceiveTask
             dataChannelReceiveTask = nil
             dataChannelReceiveLoopID &+= 1
+            return task
+        }
+        task?.cancel()
+    }
+
+    private func stopSubscriberDataChannelReceiveLoop() {
+        let task = dataChannelReceiveLoopLock.withLock {
+            let task = subscriberDataChannelReceiveTask
+            subscriberDataChannelReceiveTask = nil
+            subscriberDataChannelReceiveLoopID &+= 1
             return task
         }
         task?.cancel()
@@ -1958,7 +2016,7 @@ public final class Room: @unchecked Sendable {
             return
         }
 
-        stopDataChannelReceiveLoop()
+        stopPublisherDataChannelReceiveLoop()
         await publisherDataChannel.resetForRecovery()
         startDataChannelReceiveLoopIfReady()
     }
@@ -2518,6 +2576,7 @@ public final class Room: @unchecked Sendable {
             subscriberMediaStartupResult = result
             subscriberMediaStartupError = nil
         }
+        installSubscriberDataChannelIfAvailable(from: result)
         startSubscriberICEConsentFreshnessLoopIfReady(result: result)
         startSubscriberRTCPReceiveLoopIfReady()
         startSubscriberRTCPReceiverReportLoopIfReady()
@@ -2574,6 +2633,17 @@ public final class Room: @unchecked Sendable {
         startDataChannelReceiveLoopIfReady()
     }
 
+    private func installSubscriberDataChannelIfAvailable(from result: PeerConnectionMediaStartupResult) {
+        guard !subscriberDataChannelIsInjected,
+              subscriberDataChannel == nil,
+              let dataChannelTransport = result.dataChannelTransport else {
+            return
+        }
+
+        subscriberDataChannel = LocalDataChannelPublisher(transport: dataChannelTransport)
+        startSubscriberDataChannelReceiveLoopIfReady()
+    }
+
     @discardableResult
     private func clearSubscriberMediaStartupState() -> PeerConnectionMediaStartupResult? {
         let cleared = subscriberMediaStartupLock.withLock {
@@ -2604,6 +2674,10 @@ public final class Room: @unchecked Sendable {
         subscriberMediaReceivePipeline.reset()
         subscriberRTCPBandwidthEstimates.reset()
         clearSubscriberAdaptiveTrackSettingsState()
+        if !subscriberDataChannelIsInjected {
+            stopSubscriberDataChannelReceiveLoop()
+            subscriberDataChannel = nil
+        }
         stopPublisherLocalMediaPipelines()
         return cleared.1
     }
@@ -2631,7 +2705,7 @@ public final class Room: @unchecked Sendable {
         cleared.3?.cancel()
         publisherRTCPBandwidthEstimates.reset()
         if !publisherDataChannelIsInjected {
-            stopDataChannelReceiveLoop()
+            stopPublisherDataChannelReceiveLoop()
             publisherDataChannel = nil
         }
         return cleared.1
@@ -3007,23 +3081,31 @@ public final class Room: @unchecked Sendable {
     }
 
     private func runDataChannelReceiveLoop(
-        publisherDataChannel: LocalDataChannelPublisher,
-        loopID: UInt64
+        dataChannel: LocalDataChannelPublisher,
+        loopID: UInt64,
+        receivePath: String
     ) async {
         defer {
-            clearDataChannelReceiveTask(loopID: loopID)
+            if receivePath == "subscriber" {
+                clearSubscriberDataChannelReceiveTask(loopID: loopID)
+            } else {
+                clearDataChannelReceiveTask(loopID: loopID)
+            }
         }
 
         while !Task.isCancelled {
             do {
-                if let packet = try await publisherDataChannel.receiveInboundPacket() {
+                if let packet = try await dataChannel.receiveInboundPacket() {
                     await emitDataReceived(packet)
                 }
             } catch is CancellationError {
                 return
             } catch {
                 if !Task.isCancelled {
-                    LiveKitNativeLogging.log(.error, "Data channel receive loop stopped: \(error.localizedDescription)")
+                    LiveKitNativeLogging.log(
+                        .error,
+                        "\(receivePath.capitalized) data channel receive loop stopped: \(error.localizedDescription)"
+                    )
                 }
                 return
             }
@@ -3096,6 +3178,15 @@ public final class Room: @unchecked Sendable {
                 return
             }
             dataChannelReceiveTask = nil
+        }
+    }
+
+    private func clearSubscriberDataChannelReceiveTask(loopID: UInt64) {
+        dataChannelReceiveLoopLock.withLock {
+            guard subscriberDataChannelReceiveLoopID == loopID else {
+                return
+            }
+            subscriberDataChannelReceiveTask = nil
         }
     }
 

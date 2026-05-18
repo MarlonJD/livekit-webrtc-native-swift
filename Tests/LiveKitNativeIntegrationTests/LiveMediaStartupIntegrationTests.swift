@@ -32,8 +32,11 @@ final class LiveMediaStartupIntegrationTests: XCTestCase {
                 publisherRoom,
                 timeoutSeconds: 30
             )
-            XCTAssertEqual(startup.iceSummary.state, .connected)
-            XCTAssertNil(publisherRoom.lastPublisherMediaStartupError)
+            assertDefaultOpenSSLLiveMediaStartup(
+                startup,
+                error: publisherRoom.lastPublisherMediaStartupError,
+                role: "publisher"
+            )
 
             let packets = try await withLiveKitIntegrationTimeout(seconds: 10) {
                 try await publisherRoom.sendPublisherVideo(
@@ -89,8 +92,11 @@ final class LiveMediaStartupIntegrationTests: XCTestCase {
                 subscriberRoom,
                 timeoutSeconds: 30
             )
-            XCTAssertEqual(startup.iceSummary.state, .connected)
-            XCTAssertNil(subscriberRoom.lastSubscriberMediaStartupError)
+            assertDefaultOpenSSLLiveMediaStartup(
+                startup,
+                error: subscriberRoom.lastSubscriberMediaStartupError,
+                role: "subscriber"
+            )
 
             await publisherRoom.disconnect()
             await subscriberRoom.disconnect()
@@ -100,6 +106,37 @@ final class LiveMediaStartupIntegrationTests: XCTestCase {
             throw error
         }
     }
+}
+
+private func assertDefaultOpenSSLLiveMediaStartup(
+    _ startup: PeerConnectionMediaStartupResult,
+    error: (any Error)?,
+    role: String,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    XCTAssertNil(error, "\(role) startup should not record an error.", file: file, line: line)
+    XCTAssertEqual(startup.iceSummary.state, .connected, file: file, line: line)
+    XCTAssertGreaterThan(
+        startup.iceSummary.checkedPairCount,
+        0,
+        "\(role) startup should exercise ICE connectivity checks.",
+        file: file,
+        line: line
+    )
+    XCTAssertEqual(
+        startup.iceSummary.selectedPair,
+        Optional(startup.selectedCandidatePair),
+        "\(role) startup should retain the selected ICE candidate pair.",
+        file: file,
+        line: line
+    )
+    XCTAssertNotNil(
+        startup.mediaDataSession,
+        "\(role) startup should use the default OpenSSL DTLS-SRTP media-data session.",
+        file: file,
+        line: line
+    )
 }
 
 private func liveMediaIntegrationRoomOptions() -> RoomOptions {

@@ -248,10 +248,11 @@ channels, binary PPID envelopes, LiveKit `DataPacket` user-packet mapping,
 request/response signaling, data subscription update signaling, queued local
 data publish flushing through an injected SCTP packet transport after
 reliable/lossy DCEP acknowledgement, inbound remote DCEP acknowledgement,
-inbound `DataPacket` decode to `RoomEvent.dataReceived`, and OpenSSL DTLS
-application-data packet transport coverage with deterministic packet
-fragmentation/reassembly and DTLS-backed fragmented-packet retransmission
-scheduling. Standards-shaped SCTP packet/chunk coverage now includes INIT,
+inbound `DataPacket` decode to `RoomEvent.dataReceived`, publisher SDP
+`m=application` data-channel negotiation, subscriber-side data-channel receive
+loop plumbing, and OpenSSL DTLS application-data packet transport coverage with
+deterministic packet fragmentation/reassembly and DTLS-backed fragmented-packet
+retransmission scheduling. Standards-shaped SCTP packet/chunk coverage now includes INIT,
 INIT_ACK, COOKIE_ECHO, COOKIE_ACK, DATA, SACK, parameter padding, and CRC32C
 checksum validation, with a unit-tested OpenSSL DTLS application-data
 association bootstrap that can exchange SCTP DATA chunks, SACK responses, and
@@ -272,7 +273,8 @@ latest-value Room state and emitted as typed room events.
 
 The active implementation focus is now `1.0.0` hardening: expanding the new
 opt-in LiveKit-validated OpenSSL DTLS-SRTP publisher/subscriber media startup
-coverage into full secure RTP/RTCP send/receive validation, TURN TCP/TLS, live
+coverage, including selected ICE pair and default media/data session assertions,
+into full secure RTP/RTCP send/receive validation, TURN TCP/TLS, live
 quality-control wiring, real-device video display hardening,
 default-path DTLS-SCTP association receive-pump integration, LiveKit-validated
 data packet publish/receive, real-device audio session hardening, integration
@@ -463,9 +465,9 @@ short-lived room-scoped participant tokens. It currently covers one-client
 connect/disconnect, two-client participant join/leave, and live OpenSSL
 DTLS-SRTP publisher/subscriber media startup on the socket-backed Room media
 path with one publisher H.264 RTP send attempt. The live data-track
-subscriber-handle test is gated separately with
-`LIVEKIT_NATIVE_RUN_DATA_TRACK_INTEGRATION=1` until the DTLS-backed SCTP data
-channel transport blocker is closed. Strict production release mode now
+subscriber-handle and standards-shaped SCTP data-packet publish/receive tests
+are gated separately with `LIVEKIT_NATIVE_RUN_DATA_TRACK_INTEGRATION=1` until
+the DTLS-backed SCTP data channel transport blocker is closed. Strict production release mode now
 requires those integration variables so the future `productionReady` marker
 cannot pass while live tests are silently skipped.
 

@@ -50,8 +50,10 @@ packet transport, send deterministic LiveKit reliable/lossy DCEP open packets
 using manager-assigned stream IDs, flush encoded `DataPacket` payloads once the
 matching data channel is acknowledged open, acknowledge inbound remote DCEP
 open messages, decode inbound LiveKit `DataPacket` payloads into
-`RoomEvent.dataReceived`, and carry SCTP data-channel packet envelopes over a
-persistent OpenSSL DTLS application-data transport in unit tests. The DTLS
+`RoomEvent.dataReceived`, add publisher SDP `m=application` data-channel
+negotiation, run subscriber-side data-channel receive-loop plumbing in unit
+tests, and carry SCTP data-channel packet envelopes over a persistent OpenSSL
+DTLS application-data transport in unit tests. The DTLS
 packet-envelope transport can now optionally fragment large data-channel
 payloads, reassemble them on receive, and schedule fragmented-packet
 retransmissions on the DTLS-backed packet transport in unit tests. Standards-shaped
@@ -140,9 +142,10 @@ media/data session binder; default public Room construction now uses that
 combined media/data startup configuration. The opt-in LiveKit integration
 harness now covers live OpenSSL DTLS-SRTP publisher and subscriber media
 startup on the socket-backed Room media path, including selected ICE pairs
-reaching `.connected` and one publisher H.264 RTP send attempt; broader LiveKit
-RTP/RTCP receive/render, DTLS-backed SCTP data channels, recovery, TURN-only,
-and hardening verification remain open.
+reaching `.connected`, default media/data session construction, and one
+publisher H.264 RTP send attempt; broader LiveKit RTP/RTCP receive/render,
+DTLS-backed SCTP data channels, recovery, TURN-only, and hardening verification
+remain open.
 Fresh
 join, reconnect, and disconnect paths now
 reset stale
@@ -826,6 +829,10 @@ The old binary WebRTC dependency path has been removed from the package model.
     negotiated local stream plan instead of hard-coded plan constants
   - inbound remote DCEP open acknowledgement and inbound binary
     `DataPacket` decode plumbing
+  - publisher SDP offers include the WebRTC data-channel `m=application`
+    section in the media bundle
+  - subscriber-side Room data-channel receive loops can consume injected SCTP
+    packet transceivers and emit `RoomEvent.dataReceived`
   - OpenSSL DTLS application-data read/write plus an SCTP data-channel packet
     envelope transport over the persistent DTLS record layer
   - deterministic SCTP data-channel packet fragmentation and reassembly
@@ -1016,9 +1023,12 @@ The following checks passed after the latest implementation pass:
 - Expand the current opt-in LiveKit integration harness beyond one-client
   connect/disconnect, two-client participant join/leave, generated `lknative-`
   room prefixes, short-lived room-scoped tokens, the separately gated
-  two-client data-track subscriber-handle signaling test, and live OpenSSL
-  DTLS-SRTP publisher/subscriber media startup.
-- Data packet publish/receive over standards-compliant SCTP.
+  two-client data-track subscriber-handle signaling and standards-shaped SCTP
+  data-packet publish/receive tests, and live OpenSSL DTLS-SRTP
+  publisher/subscriber media startup.
+- Make the separately gated data packet publish/receive test pass against
+  LiveKit over standards-compliant SCTP, then move it into the default live
+  integration gate.
 - Full RTP/RTCP publish/subscribe media validation beyond startup and one H.264
   RTP send attempt.
 - Reconnect integration test.

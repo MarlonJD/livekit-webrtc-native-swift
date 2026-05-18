@@ -57,14 +57,15 @@ package struct PublisherSDPOfferFactory: Sendable {
     }
 
     package func makeOffer(for tracks: [PublisherSDPOfferTrack]) throws -> String {
-        let offerSections = tracks.enumerated().compactMap { index, track in
+        let mediaOfferSections = tracks.enumerated().compactMap { index, track in
             offerSection(for: track, mid: "\(index)")
         }
 
-        guard !offerSections.isEmpty else {
+        guard !mediaOfferSections.isEmpty else {
             throw PublisherSDPOfferError.missingPublishMedia
         }
 
+        let offerSections = mediaOfferSections + [applicationOfferSection(mid: "data")]
         var offerLines: [SDPLine] = [
             SDPLine(field: "v", value: "0"),
             SDPLine(field: "o", value: "- 0 0 IN IP4 127.0.0.1"),
@@ -117,6 +118,17 @@ package struct PublisherSDPOfferFactory: Sendable {
         return SDPMediaSection(
             mediaLine: "\(track.kind.rawValue) 9 UDP/TLS/RTP/SAVPF \(payloadType)",
             attributes: attributes
+        )
+    }
+
+    private func applicationOfferSection(mid: String) -> SDPMediaSection {
+        SDPMediaSection(
+            mediaLine: "application 9 UDP/DTLS/SCTP \(mediaProfile.dataChannelCodec.rawValue)",
+            attributes: [
+                "mid:\(mid)",
+                "setup:actpass",
+                "sctp-port:\(SCTPAssociationConfiguration.webRTCDataChannelPort)",
+            ]
         )
     }
 
